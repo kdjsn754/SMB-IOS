@@ -14,6 +14,9 @@ struct BrowserView: View {
     @State private var showSearch = false
     @State private var query = ""
     @FocusState private var searchFocused: Bool
+    /// 每个媒体的真实宽高比（item.id -> width/height）。缩略图加载后回填，
+    /// 用来做瀑布流布局：竖屏内容完整撑满竖条、横屏内容撑满横条，不再被压成一条。
+    @State private var aspects: [String: CGFloat] = [:]
 
     init(server: SMBServer, path: String) {
         self.server = server
@@ -38,7 +41,7 @@ struct BrowserView: View {
         return currentSort.sorted(base)
     }
 
-    /// 三列等宽，参照「缩略图 + 文件名 / 大小 / 日期」的信息流
+    /// 三列等宽，顶部对齐（同一行三列顶端对齐成一条线，格子高度随内容比例变化）。
     private var gridColumns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
     }
@@ -95,7 +98,7 @@ struct BrowserView: View {
                 if visibleItems.isEmpty {
                     noMatchState
                 } else {
-                    LazyVGrid(columns: gridColumns, alignment: .center, spacing: 16) {
+                    LazyVGrid(columns: gridColumns, alignment: .top, spacing: 16) {
                         ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
                             cell(for: item, order: index)
                         }
@@ -142,7 +145,11 @@ struct BrowserView: View {
                     serverID: server.id,
                     connection: app.connection(for: server),
                     useGrid: useGrid,
-                    order: order
+                    order: order,
+                    aspect: aspects[item.id] ?? TileAspect.placeholder,
+                    onAspectChange: { newAspect in
+                        aspects[item.id] = newAspect
+                    }
                 )
             }
             .buttonStyle(.plain)

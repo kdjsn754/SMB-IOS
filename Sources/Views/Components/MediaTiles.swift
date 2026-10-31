@@ -1,16 +1,18 @@
 import SwiftUI
 import UIKit
 
-/// 网格缩略图的长宽比。所有格子都用 `.fit` 完整显示图片，
-/// 比例按内容类型给（照片竖幅、视频横幅），这样不会被裁成方框。
+/// 网格缩略图的长宽比。所有格子都用 `.fit` 完整显示图片。
+/// 这里只给出「加载完成前」的占位比例（正方形最中性），
+/// 图片真正加载出来后会用它的真实宽高比撑开格子，竖幅就竖条、横幅就横条。
 enum TileAspect {
-    static let photo: CGFloat = 3.0 / 4.0
-    static let video: CGFloat = 16.0 / 9.0
-    static let square: CGFloat = 1
+    /// 加载完成前的占位比例（正方形）
+    static let placeholder: CGFloat = 1
 }
 
 /// 通用缩略图视图：先看缓存，再按需从服务器读取。
 /// 失败会退化成占位图标（不会一直转圈），划走时会取消传输。
+/// 加载到真实图片后，通过 `onAspectChange` 把真实宽高比回传给父级，
+/// 父级用它做瀑布流布局，让竖屏内容也能完整撑满格子、不被压成一条。
 @MainActor
 struct ThumbnailImage: View {
     let item: FileItem
@@ -19,6 +21,8 @@ struct ThumbnailImage: View {
     var cornerRadius: CGFloat = 4
     /// 在目录里的显示序号：让缩略图按「左上 → 右下」的顺序出现，而不是随机位置冒出来
     var order: Int = 0
+    /// 加载到真实图片后回传宽高比（width / height）
+    var onAspectChange: (CGFloat) -> Void = { _ in }
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -54,8 +58,7 @@ struct ThumbnailImage: View {
 
     private func load() async {
         if let cached = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID) {
-            image = cached
-            failed = false
+            apply(cached)
             return
         }
         if image == nil { failed = false }
@@ -71,11 +74,19 @@ struct ThumbnailImage: View {
         if Task.isCancelled { return }
 
         if let result {
-            image = result
-            failed = false
+            apply(result)
         } else {
             failed = true
         }
+    }
+
+    private func apply(_ image: UIImage) {
+        self.image = image
+        failed = false
+        let w = image.size.width
+        let h = image.size.height
+        guard w > 0, h > 0 else { return }
+        onAspectChange(w / h)
     }
 }
 
@@ -106,7 +117,7 @@ struct FileNameLabel: View {
                     .truncationMode(.middle)
             }
         }
-        .font(.system(size: 12))
+        .font(.system(size: 13))
         .multilineTextAlignment(.center)
         .foregroundStyle(.primary)
         .frame(maxWidth: .infinity)
@@ -119,11 +130,11 @@ struct TileCaption: View {
     let date: String
 
     var body: some View {
-        VStack(spacing: 1) {
+        VStack(spacing: 2) {
             Text(size)
             Text(date)
         }
-        .font(.system(size: 11))
+        .font(.system(size: 12))
         .foregroundStyle(.secondary)
         .lineLimit(1)
         .frame(maxWidth: .infinity)
@@ -138,6 +149,10 @@ struct MediaTile: View {
     let connection: SMBConnection
     let useGrid: Bool
     var order: Int = 0
+    /// 当前已知的缩略图宽高比（width / height），加载完成前用占位比例
+    var aspect: CGFloat = TileAspect.placeholder
+    /// 缩略图加载后回传真实宽高比
+    var onAspectChange: (CGFloat) -> Void = { _ in }
 
     var body: some View {
         if useGrid {
@@ -149,21 +164,24 @@ struct MediaTile: View {
 
     private var gridBody: some View {
         VStack(spacing: 5) {
-            ThumbnailImage(item: item, serverID: serverID, connection: connection, order: order)
-                .aspectRatio(
-                    item.kind == .video ? TileAspect.video : TileAspect.photo,
-                    contentMode: .fit
-                )
-                .overlay(alignment: .bottomLeading) {
-                    if item.kind == .video {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 18, height: 18)
-                            .background(.black.opacity(0.45), in: Circle())
-                            .padding(5)
-                    }
+            ThumbnailImage(
+                item: item,
+                serverID: serverID,
+                connection: connection,
+                order: order,
+                onAspectChange: onAspectChange
+            )
+            .aspectRatio(aspect, contentMode: .fit)
+            .overlay(alignment: .bottomLeading) {
+                if item.kind == .video {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 18, height: 18)
+                        .background(.black.opacity(0.45), in: Circle())
+                        .padding(5)
                 }
+            }
 
             FileNameLabel(name: item.name)
             TileCaption(size: Format.bytes(item.size), date: Format.shortDate(item.modified))
