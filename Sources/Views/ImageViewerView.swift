@@ -28,7 +28,10 @@ struct ImageViewerView: View {
                     ZoomableImageView(
                         item: item,
                         serverID: serverID,
-                        connection: connection
+                        connection: connection,
+                        // 只加载当前这一页：分页容器会把所有页都建出来，
+                        // 不加限制的话打开一张图就会把整个目录的原图全下一遍。
+                        isActive: offset == index
                     )
                     .tag(offset)
                 }
@@ -109,9 +112,12 @@ struct ZoomableImageView: View {
     let item: FileItem
     let serverID: UUID
     let connection: SMBConnection
+    /// 是否是当前显示的那一页（只有当前页才去读原图）
+    let isActive: Bool
 
     @State private var image: UIImage?
-    @State private var isLoading = true
+    @State private var isLoading = false
+    @State private var failed = false
 
     @State private var scale: CGFloat = 1
     @State private var baseScale: CGFloat = 1
@@ -134,7 +140,7 @@ struct ZoomableImageView: View {
                 } else if isLoading {
                     ProgressView()
                         .tint(.white)
-                } else {
+                } else if failed {
                     VStack(spacing: 10) {
                         Image(systemName: "photo.badge.exclamationmark")
                             .font(.system(size: 34, weight: .light))
@@ -142,11 +148,16 @@ struct ZoomableImageView: View {
                             .font(.footnote)
                     }
                     .foregroundStyle(.white.opacity(0.7))
+                } else {
+                    Color.clear
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
-        .task(id: item.id) { await load() }
+        .task(id: isActive) {
+            guard isActive else { return }
+            await load()
+        }
     }
 
     private var magnificationGesture: some Gesture {
@@ -198,9 +209,28 @@ struct ZoomableImageView: View {
     }
 
     private func load() async {
+        if image != nil { return }
         isLoading = true
-        let loaded = await MediaStore.shared.image(for: item, serverID: serverID, connection: connection)
-        image = loaded
+        failed = false
+
+        let box = CancellationBox()
+        let loaded = await withTaskCancellationHandler {
+            await MediaStore.shared.image(
+                for: item,
+                serverID: serverID,
+                connection: connection,
+                cancel: box
+            )
+        } onCancel: {
+            box.cancel()
+        }
+
+        if Task.isCancelled { return }
         isLoading = false
+        if let loaded {
+            image = loaded
+        } else {
+            failed = true
+        }
     }
 }

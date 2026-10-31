@@ -105,22 +105,39 @@ actor SMBConnection {
         }
     }
 
-    /// 读取整个文件
-    func readAll(_ path: String) async throws -> Data {
-        try await run { manager in
-            let data: Data = try await manager.contents(atPath: path, range: Range<UInt64>?.none, progress: nil)
-            return data
-        }
+    /// 读取整个文件。只用于图片预览这类必须完整解码的场景，调用方要自己控制频率。
+    func readAll(_ path: String, cancel: CancellationBox? = nil) async throws -> Data {
+        try await transfer(path: path, range: nil, cancel: cancel)
     }
 
-    /// 按区间读取，供视频流式播放使用
-    func read(_ path: String, offset: Int64, length: Int) async throws -> Data {
+    /// 按区间读取，供视频流式播放与缩略图使用。
+    ///
+    /// - Parameter cancel: 置位后底层传输会在下一个数据块返回时中止，并抛出 `CancellationError`。
+    ///   中止不会破坏 SMB 会话，只有真正的 I/O 错误才会重建连接。
+    func read(_ path: String, offset: Int64, length: Int, cancel: CancellationBox? = nil) async throws -> Data {
         guard length > 0, offset >= 0 else { return Data() }
         let start = UInt64(offset)
         let end = start &+ UInt64(length)
-        return try await run { manager in
-            let data: Data = try await manager.contents(atPath: path, range: start..<end, progress: nil)
+        return try await transfer(path: path, range: start..<end, cancel: cancel)
+    }
+
+    private func transfer(path: String, range: Range<UInt64>?, cancel: CancellationBox?) async throws -> Data {
+        let manager = try await connect()
+        do {
+            let data: Data = try await manager.contents(
+                atPath: path,
+                range: range,
+                progress: { _, _ in !(cancel?.isCancelled ?? false) }
+            )
+            if cancel?.isCancelled == true { throw CancellationError() }
             return data
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // 被取消导致的「半截数据」不算故障，不要把会话扔掉重建
+            if cancel?.isCancelled == true { throw CancellationError() }
+            self.manager = nil
+            throw SMBFailure.operation(Self.describe(error))
         }
     }
 

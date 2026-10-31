@@ -7,6 +7,8 @@ enum SettingsKey {
     static let cacheLimitMB = "settings.cacheLimitMB"
     static let autoClean = "settings.autoClean"
     static let gridLayout = "settings.gridLayout"
+    static let thumbnailsEnabled = "settings.thumbnailsEnabled"
+    static let videoThumbnails = "settings.videoThumbnails"
 }
 
 enum AppDefaults {
@@ -15,7 +17,9 @@ enum AppDefaults {
             SettingsKey.theme: AppTheme.system.rawValue,
             SettingsKey.cacheLimitMB: 500,
             SettingsKey.autoClean: true,
-            SettingsKey.gridLayout: true
+            SettingsKey.gridLayout: true,
+            SettingsKey.thumbnailsEnabled: true,
+            SettingsKey.videoThumbnails: true
         ])
     }
 }

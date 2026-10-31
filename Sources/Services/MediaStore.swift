@@ -4,17 +4,31 @@ import UIKit
 final class MediaStore: @unchecked Sendable {
     static let shared = MediaStore()
 
-    func image(for item: FileItem, serverID: UUID, connection: SMBConnection) async -> UIImage? {
+    /// 原图预览：只在当前这一页真正显示时才读取，划走立刻取消
+    func image(
+        for item: FileItem,
+        serverID: UUID,
+        connection: SMBConnection,
+        cancel: CancellationBox? = nil
+    ) async -> UIImage? {
         let cache = CacheManager.shared
         let url = cache.mediaURL(serverID: serverID, item: item, suffix: "jpg")
         if let data = try? Data(contentsOf: url), let cached = UIImage(data: data) {
             return cached
         }
-        guard let data = try? await connection.readAll(item.path) else { return nil }
+
+        let data: Data
+        do {
+            data = try await connection.readAll(item.path, cancel: cancel)
+        } catch {
+            return nil
+        }
+        if cancel?.isCancelled == true { return nil }
+
         guard let image = ImageDownsampler.downsample(data: data, maxPixel: 3000) else { return nil }
         if let jpeg = image.jpegData(compressionQuality: 0.9) {
             try? jpeg.write(to: url, options: .atomic)
-            cache.autoCleanIfNeeded()
+            cache.noteWrite(bytes: Int64(jpeg.count))
         }
         return image
     }

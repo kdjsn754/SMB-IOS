@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.1`（build 2），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 验证过）；1.0.1 改成静态链接后**尚未跑过 CI**，push 后需确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
+| 版本 | `1.0.2`（build 3），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0、1.0.1 均已验证）；1.0.2 改动了缩略图链路，push 后需确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -33,8 +33,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **UI**：SwiftUI，`NavigationStack` + `@MainActor` 观察模型，无第三方 UI 库。
 - **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），**已 vendor 到 `Packages/AMSMB2` 并改成静态链接**（见第 7 节 1.0.1 修复）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，升级上游时要重点核这几个签名。
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
-- **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 512 KB）。
-- **缩略图**：图片走 ImageIO 降采样（480px），视频用 `AVAssetImageGenerator` 取第 1 秒；`NSCache` + 磁盘双层；`AsyncLimiter` 限 4 并发，避免打满 NAS。
+- **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
+- **缩略图**（1.0.2 重写，见第 7 节 7）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3、视频封面并发 1 各自独立闸门；每张图读取有字节上限（≤16 MB），视频封面额度 10 MB；失败进 180 秒负缓存；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
 - **主题**：`@AppStorage` + `preferredColorScheme`，三档（跟随系统/浅色/深色）。
@@ -113,13 +113,26 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 2. **只读**：不做上传/删除/重命名，是刻意设计（降低误操作风险）。要加的话从 `SMBConnection` 扩方法 + `BrowserView` 长按菜单入手。
 3. **单共享**：一台服务器只连一个共享名，没有「先列共享再选」的流程。
 4. **无真机回归**：功能正确性依赖代码审查，用户反馈时优先怀疑 `SMBConnection` 的路径拼接与 `SMBAssetLoader` 的 range 换算。
-5. **缩略图首次慢**：视频要读文件头（`moov` 在尾部时还要读末尾），属预期行为。
+5. **缩略图首次慢**：视频要读 `moov`（在尾部时还要读末尾）+ 关键帧附近数据，首次加载 1～3 秒属正常；已有磁盘缓存，二次进入是本地读取。
 6. **✅ 已修（1.0.1）：iOS 27 上用轻松签 / ESign 安装后点开闪退**
    - 现象：构建成功、安装成功，点图标后立即退回桌面。
    - 根因：AMSMB2 的 SPM 产物声明了 `type: .dynamic`，IPA 里带 `Frameworks/AMSMB2.framework`；轻松签 / ESign 这类工具默认只签主程序、**不签嵌套框架**，iOS 启动时 dyld 校验失败 → 直接杀进程。
    - 修复：把 AMSMB2 连同 libsmb2 vendor 到 `Packages/AMSMB2`，`Package.swift` 里 product 改为 `.static`，并去掉 swift-system / swift-atomics 外部依赖；`project.yml` 的 `packages` 改为本地 `path`。产物里只剩一个可执行文件。
    - 防回归：CI「自检：包结构与依赖」步骤里加了硬断言——一旦 `Frameworks/AMSMB2.framework` 再次出现就 `::error::` 失败。
    - 代码侧已排查：启动路径只渲染 `ServerListView`（空态）+ `SettingsView`，无网络、无强制解包、无 `fatalError`；SwiftUI `App` 生命周期在 iOS 27「必须采用 UIScene」新规里是**豁免**的（该规定只针对 UIKit app-based 生命周期）。
+
+7. **✅ 已修（1.0.2）：缩略图大量显示不出来 + 一打开就一直跑流量**
+   - 现象 A：目录里很多图片/视频只有灰色图标或一直转圈。
+   - 现象 B：只是打开 App 进目录，NAS 的上传/下载速率就一直居高不下。
+   - 根因（按影响排序）：
+     1. `SMBAssetLoader` 对「从当前位置读到文件结尾」的请求照单全收 → `AVAssetImageGenerator` 抽一帧等于把整部视频下完；4 个并发槽位被视频占满，图片缩略图全部排在后面等 → 表现为「很多缩略图出不来」+「持续跑流量」。
+     2. 图片缩略图用 `readAll` 整文件读取，无上限、无取消；超大图（RAW/大 JPEG）还会撞 30 秒 SMB 超时直接失败。
+     3. 失败结果不缓存，`LazyVGrid` 复用时反复重试同一个坏文件。
+     4. 视图划走后传输不中断，继续读完。
+     5. 看图页 `TabView(.page)` 会把所有页都建出来，`ZoomableImageView` 每页都在 `.task` 里读原图 → 打开一张图等于把整个目录的原图全下一遍。
+     6. 每写一张缩略图就调 `autoCleanIfNeeded()`，里面是一次全目录遍历，滑动时持续做无谓 I/O。
+   - 修复：`ThumbnailStore` 整体重写（任务去重 + 等待者计数 + 取消传播 + 失败负缓存 + 图片/视频分闸门）；`SMBAssetLoader` 加 `ByteBudget` / `CancellationBox`；`SMBConnection.read` 用 AMSMB2 的 progress 回调实现真正的传输中止（取消不重建会话）；看图页只加载当前页；`CacheManager` 改为 `noteWrite(bytes:)` 累加 + 20 秒节流，目录只建一次。
+   - 新增设置：「加载图片缩略图」「加载视频封面」两个开关（关掉视频封面可省掉绝大部分流量），以及「重新尝试加载失败的缩略图」。
 
 ## 8. 约定（改代码前先看）
 
@@ -151,6 +164,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.0.2 | 2026-10-31 | 重写缩略图加载链路：任务去重/取消传播/失败负缓存/图片与视频独立并发闸门；视频封面加 10 MB 字节预算，不再整部下载；`SMBConnection.read` 支持传输中止；看图页只加载当前页；缓存自动清理改为 20 秒节流；设置页新增缩略图开关 |
 | 1.0.1 | 2026-10-31 | 修复 iOS 27 上轻松签/ESign 重签后启动闪退：AMSMB2 由 SPM 动态框架改为 vendored 静态链接（`Packages/AMSMB2`），产物不再含 `Frameworks/`；CI 加静态链接断言与包结构自检 |
 | 1.0.0 | 2026-10-31 | 首个版本：SMB 浏览、看图（缩放/滑动）、视频边下边播 + 下载兜底、缩略图双层缓存、深浅主题、缓存上限与自动清理、多服务器管理；CI 用 `xcode-27` 出未签名 IPA |
 

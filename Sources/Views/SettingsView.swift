@@ -9,6 +9,8 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.cacheLimitMB) private var cacheLimit: Int = 500
     @AppStorage(SettingsKey.autoClean) private var autoClean: Bool = true
     @AppStorage(SettingsKey.gridLayout) private var useGrid: Bool = true
+    @AppStorage(SettingsKey.thumbnailsEnabled) private var thumbnailsEnabled: Bool = true
+    @AppStorage(SettingsKey.videoThumbnails) private var videoThumbnails: Bool = true
 
     @State private var showClearConfirm = false
     @State private var showThumbnailConfirm = false
@@ -26,6 +28,22 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
 
                     Toggle("默认使用网格视图", isOn: $useGrid)
+                }
+
+                Section {
+                    Toggle("加载图片缩略图", isOn: $thumbnailsEnabled)
+                    Toggle("加载视频封面", isOn: $videoThumbnails)
+                        .disabled(!thumbnailsEnabled)
+                    Button {
+                        ThumbnailStore.shared.resetFailures()
+                        toast = "已清除失败记录，返回目录会重新加载"
+                    } label: {
+                        Text("重新尝试加载失败的缩略图")
+                    }
+                } header: {
+                    Text("缩略图")
+                } footer: {
+                    Text("只有出现在屏幕上的图片才会去读取，划走时会立刻中断传输。图片缩略图需要读取原图（单张最多 16 MB），视频封面最多读取约 10 MB；关闭后列表只显示图标，可以明显减少流量。")
                 }
 
                 Section {
@@ -76,7 +94,7 @@ struct SettingsView: View {
                         .font(.footnote)
                     Label("MKV / AVI 等格式依赖系统解码能力，若无法播放可点右上角下载到本地再试。", systemImage: "film")
                         .font(.footnote)
-                    Label("视频缩略图会读取文件头部数据，文件很大时首次加载会稍慢。", systemImage: "photo.on.rectangle")
+                    Label("视频封面只读取索引与关键帧附近的数据（上限约 10 MB），不会下载整部影片。", systemImage: "photo.on.rectangle")
                         .font(.footnote)
                 }
 

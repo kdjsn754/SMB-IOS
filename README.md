@@ -13,7 +13,7 @@
 - **浏览共享目录**：网格 / 列表两种视图，文件夹优先排序，支持刷新与多级目录跳转。
 - **看图**：全屏浏览、双指缩放、双击放大、左右滑动切换同目录图片。
 - **放视频**：基于 `AVAssetResourceLoader` 的 **SMB 流式播放**，按需读取字节，不需要先下载整个文件（MP4 / MOV / M4V 等系统可解码格式）。若流式播放失败，可一键「下载到本地播放」兜底。
-- **缩略图**：图片与视频都会生成缩略图（视频取第 1 秒的画面），内存 `NSCache` + 磁盘缓存双层，最多 4 个并发请求，避免把 NAS 打满。
+- **缩略图**：图片与视频都会生成缩略图（视频取最近关键帧），内存 `NSCache` + 磁盘缓存双层。图片并发 3、视频封面并发 1 各自限流；每张图读取上限 16 MB、视频封面额度 10 MB；只有屏幕上的项目才会加载，划走立刻中断传输；失败的文件 3 分钟内不再重试。设置页可分别关闭「图片缩略图」「视频封面」。
 - **主题**：跟随系统 / 浅色 / 深色，即时切换（设置页）。
 - **缓存管理**：
   - 设置页显示当前缓存占用（缩略图 / 图片与视频分开统计）；
@@ -39,7 +39,8 @@
 │   ├── Services/
 │   │   ├── SMBConnection.swift      # AMSMB2 封装（actor）
 │   │   ├── SMBAssetLoader.swift     # AVPlayer 的 SMB 区间读取代理
-│   │   ├── ThumbnailStore.swift     # 缩略图缓存与生成
+│   │   ├── ThumbnailStore.swift     # 缩略图调度：去重 / 限流 / 取消 / 负缓存
+│   │   ├── CancellationBox.swift    # 传输取消标记与字节预算
 │   │   ├── MediaStore.swift         # 大图 / 下载后播放
 │   │   ├── CacheManager.swift       # 缓存统计、清理、上限策略
 │   │   └── CredentialStore.swift    # 密码存储（钥匙串 + 退化方案）
@@ -136,7 +137,11 @@ App 只有一个可执行文件、没有内嵌动态框架（AMSMB2 已静态链
 iOS 的 AVFoundation 不负责这些容器的解码，流式播放会失败。可在播放页右上角选「下载到本地播放」，仍不行就说明系统不支持该编码（例如 DTS 音轨），建议在 NAS 端转成 MP4(H.264/AAC)。
 
 **缩略图很慢 / 不显示**
-视频缩略图需要读取文件头部（`moov` 在文件尾时还要读末尾），首次会慢一些；生成后会写入磁盘缓存，第二次进入目录是秒开。
+视频封面需要读 `moov`（在文件尾时还要读末尾）与关键帧附近数据，首次 1～3 秒属正常；生成后写入磁盘缓存，第二次进入目录是秒开。
+如果一直是灰色图标：
+1. 设置 → 缩略图，确认「加载图片缩略图」开着（视频还要单独开「加载视频封面」）；
+2. 点「重新尝试加载失败的缩略图」（失败会有 3 分钟冷却，避免反复打 NAS）；
+3. 仍然不行说明该文件本身无法解码（如 RAW / 非常规 JPEG），属预期，可点开看大图验证。
 
 **密码保存失败**
 自签名安装时钥匙串可能不可用，此时会自动退化为本地混淆存储（非加密），所以请不要在共享设备上使用重要账号。
@@ -146,8 +151,8 @@ iOS 的 AVFoundation 不负责这些容器的解码，流式播放会失败。�
 ## 技术说明
 
 - **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），已 vendor 到 `Packages/AMSMB2` 并从 SPM 的 `.dynamic` 改成 **`.static`**，只用到 `connectShare` / `contentsOfDirectory` / `contents(range:)` / `downloadItem`。静态化的原因：动态框架会以 `Frameworks/AMSMB2.framework` 进包，用轻松签 / ESign 这类工具重签时常被漏签，iOS 上点开就闪退。
-- **视频流式播放**：自定义 scheme `smbstream://`，`AVAssetResourceLoaderDelegate` 把 AVFoundation 的字节请求翻译成 SMB 的区间读取（每次 512 KB），因此可以边下边播、可拖动进度条。
-- **缩略图**：图片用 `ImageIO` 降采样到 480px，避免整张大图进内存；视频用 `AVAssetImageGenerator` 走同一套流式读取。
+- **视频流式播放**：自定义 scheme `smbstream://`，`AVAssetResourceLoaderDelegate` 把 AVFoundation 的字节请求翻译成 SMB 的区间读取（每次 1 MB），因此可以边下边播、可拖动进度条。加载器带字节预算与取消机制，抽封面时不会被要求把整部影片读完。
+- **缩略图**：图片用 `ImageIO` 降采样到 480px，避免整张大图进内存；视频用 `AVAssetImageGenerator` 走同一套流式读取，但只允许消耗 10 MB 额度。同一文件只生成一份缩略图，网格与列表共用。
 - **缓存**：全部落在 `Library/Caches/SMBViewer/`（缩略图与媒体两个子目录），文件名是 `服务器ID + 路径 + 大小 + 修改时间` 的 SHA256，服务器上文件变了会自动失效。
 
 ## 自定义

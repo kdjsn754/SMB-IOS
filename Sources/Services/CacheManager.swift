@@ -22,6 +22,15 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
     private let fileManager = FileManager.default
     private let queue = DispatchQueue(label: "com.smbviewer.cache", qos: .utility)
 
+    /// 自动清理的最小间隔，避免每写一张缩略图就全盘扫一次
+    private static let autoCleanInterval: TimeInterval = 20
+
+    private let stateLock = NSLock()
+    private var directoriesReady = false
+    private var enforcing = false
+    /// 只在主线程读写
+    private var lastAutoCleanCheck = Date.distantPast
+
     init() {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -51,10 +60,19 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
         return digest.map { String(format: "%02x", Int($0)) }.joined()
     }
 
+    /// 目录只建一次，避免每取一张缩略图就做一次 createDirectory 系统调用
     private func createDirectories() {
+        stateLock.lock()
+        let ready = directoriesReady
+        stateLock.unlock()
+        guard !ready else { return }
+
         for directory in [thumbnailDirectory, mediaDirectory] {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
+        stateLock.lock()
+        directoriesReady = true
+        stateLock.unlock()
     }
 
     // MARK: - 统计
@@ -68,6 +86,18 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
                 self.thumbnailBytes = thumbnails
                 self.mediaBytes = media
             }
+        }
+    }
+
+    /// 写入缓存后调用：只做计数累加，最多每 20 秒触发一次真正的容量检查。
+    /// 之前每写一张图就全盘遍历一次目录，滑动列表时会明显卡顿、也拖慢缩略图。
+    func noteWrite(bytes: Int64) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.thumbnailBytes = max(0, self.thumbnailBytes + max(0, bytes))
+            guard Date().timeIntervalSince(self.lastAutoCleanCheck) >= Self.autoCleanInterval else { return }
+            self.lastAutoCleanCheck = Date()
+            self.autoCleanIfNeeded()
         }
     }
 
@@ -139,6 +169,19 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
         }
         queue.async { [weak self] in
             guard let self else { return }
+            self.stateLock.lock()
+            if self.enforcing {
+                self.stateLock.unlock()
+                return
+            }
+            self.enforcing = true
+            self.stateLock.unlock()
+            defer {
+                self.stateLock.lock()
+                self.enforcing = false
+                self.stateLock.unlock()
+            }
+
             let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
             var files: [(url: URL, size: Int64, date: Date)] = []
 
@@ -162,9 +205,11 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
 
             var total = files.reduce(Int64(0)) { $0 + $1.size }
             guard total > limit else {
+                let thumbnails = Self.size(of: self.thumbnailDirectory)
+                let media = Self.size(of: self.mediaDirectory)
                 DispatchQueue.main.async {
-                    self.thumbnailBytes = Self.size(of: self.thumbnailDirectory)
-                    self.mediaBytes = Self.size(of: self.mediaDirectory)
+                    self.thumbnailBytes = thumbnails
+                    self.mediaBytes = media
                     completion?()
                 }
                 return

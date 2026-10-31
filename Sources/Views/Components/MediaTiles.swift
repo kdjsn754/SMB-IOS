@@ -1,7 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// 通用缩略图视图：先看内存/磁盘缓存，再按需从服务器读取
+/// 通用缩略图视图：先看缓存，再按需从服务器读取。
+/// 失败会退化成占位图标（不会一直转圈），划走时会取消传输。
 @MainActor
 struct ThumbnailImage: View {
     let item: FileItem
@@ -10,7 +11,7 @@ struct ThumbnailImage: View {
     let cornerRadius: CGFloat
 
     @State private var image: UIImage?
-    @State private var isLoaded = false
+    @State private var failed = false
 
     var body: some View {
         Rectangle()
@@ -20,7 +21,7 @@ struct ThumbnailImage: View {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
-                } else if isLoaded {
+                } else if failed {
                     Image(systemName: placeholderIcon)
                         .font(.system(size: 22, weight: .regular))
                         .foregroundStyle(.secondary)
@@ -42,16 +43,26 @@ struct ThumbnailImage: View {
     private func load() async {
         if let cached = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID) {
             image = cached
-            isLoaded = true
+            failed = false
             return
         }
+        if image == nil { failed = false }
+
         let result = await ThumbnailStore.shared.thumbnail(
             for: item,
             serverID: serverID,
             connection: connection
         )
-        image = result
-        isLoaded = true
+
+        // 被取消（划走 / 翻页）时不要写状态，回来时还要重新尝试
+        if Task.isCancelled { return }
+
+        if let result {
+            image = result
+            failed = false
+        } else {
+            failed = true
+        }
     }
 }
 
