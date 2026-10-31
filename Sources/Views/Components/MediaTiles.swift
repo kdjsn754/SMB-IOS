@@ -8,7 +8,7 @@ struct ThumbnailImage: View {
     let item: FileItem
     let serverID: UUID
     let connection: SMBConnection
-    let cornerRadius: CGFloat
+    var cornerRadius: CGFloat = 4
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -23,14 +23,15 @@ struct ThumbnailImage: View {
                         .scaledToFill()
                 } else if failed {
                     Image(systemName: placeholderIcon)
-                        .font(.system(size: 22, weight: .regular))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 20, weight: .regular))
+                        .foregroundStyle(.tertiary)
                 } else {
                     ProgressView()
                         .controlSize(.small)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .contentShape(Rectangle())
             .task(id: item.id) {
                 await load()
             }
@@ -66,6 +67,58 @@ struct ThumbnailImage: View {
     }
 }
 
+/// 两行居中、中间省略的文件名（对齐「文件名 / 大小 / 日期」三行式网格）
+struct FileNameLabel: View {
+    let name: String
+
+    /// 名字太长时拆成「前半 + …后半」，避免只看到一长串前缀
+    private var split: (head: String, tail: String)? {
+        guard name.count > 26 else { return nil }
+        return (String(name.prefix(16)), String(name.suffix(12)))
+    }
+
+    var body: some View {
+        Group {
+            if let split {
+                VStack(spacing: 0) {
+                    Text(split.head)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("…" + split.tail)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            } else {
+                Text(name)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+        }
+        .font(.system(size: 12))
+        .multilineTextAlignment(.center)
+        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// 缩略图下方的两行说明文字（大小 / 日期）
+struct TileCaption: View {
+    let size: String
+    let date: String
+
+    var body: some View {
+        VStack(spacing: 1) {
+            Text(size)
+            Text(date)
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .frame(maxWidth: .infinity)
+        .multilineTextAlignment(.center)
+    }
+}
+
 @MainActor
 struct MediaTile: View {
     let item: FileItem
@@ -82,49 +135,44 @@ struct MediaTile: View {
     }
 
     private var gridBody: some View {
-        ZStack(alignment: .bottomLeading) {
-            ThumbnailImage(item: item, serverID: serverID, connection: connection, cornerRadius: 10)
-
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.65)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-            HStack(spacing: 3) {
-                if item.kind == .video {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 8, weight: .bold))
+        VStack(spacing: 5) {
+            ThumbnailImage(item: item, serverID: serverID, connection: connection)
+                .aspectRatio(1, contentMode: .fit)
+                .overlay(alignment: .bottomLeading) {
+                    if item.kind == .video {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 18, height: 18)
+                            .background(.black.opacity(0.45), in: Circle())
+                            .padding(5)
+                    }
                 }
-                Text(item.name)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 6)
-            .padding(.bottom, 5)
+
+            FileNameLabel(name: item.name)
+            TileCaption(size: Format.bytes(item.size), date: Format.shortDate(item.modified))
         }
-        .aspectRatio(1, contentMode: .fit)
     }
 
     private var listBody: some View {
-        HStack(spacing: 10) {
-            ThumbnailImage(item: item, serverID: serverID, connection: connection, cornerRadius: 8)
-                .frame(width: 52, height: 52)
+        HStack(spacing: 12) {
+            ThumbnailImage(item: item, serverID: serverID, connection: connection, cornerRadius: 6)
+                .frame(width: 56, height: 56)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(item.name)
                     .font(.subheadline)
-                    .lineLimit(1)
-                HStack(spacing: 8) {
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                HStack(spacing: 6) {
                     if item.kind == .video {
-                        Label("视频", systemImage: "play.rectangle.fill")
+                        Image(systemName: "play.rectangle.fill")
                     }
                     Text(Format.bytes(item.size))
-                    Text(Format.date(item.modified))
+                    Text("·")
+                    Text(Format.shortDate(item.modified))
                 }
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
@@ -142,46 +190,51 @@ struct FolderTile: View {
 
     var body: some View {
         if useGrid {
+            gridBody
+        } else {
+            listBody
+        }
+    }
+
+    private var gridBody: some View {
+        VStack(spacing: 5) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(Color.accentColor.opacity(0.12))
-                VStack(spacing: 6) {
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 26))
-                        .foregroundStyle(Color.accentColor)
-                    Text(item.name)
-                        .font(.system(size: 10.5))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 4)
-                }
-                .padding(6)
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(Color.accentColor)
             }
             .aspectRatio(1, contentMode: .fit)
-        } else {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.12))
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(Color.accentColor)
-                }
-                .frame(width: 52, height: 52)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.name)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    Text(Format.date(item.modified))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
+            FileNameLabel(name: item.name)
+            TileCaption(size: "文件夹", date: Format.shortDate(item.modified))
         }
+    }
+
+    private var listBody: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.12))
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .frame(width: 56, height: 56)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.name)
+                    .font(.subheadline)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                Text(Format.shortDate(item.modified))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
     }
 }
 
@@ -192,46 +245,49 @@ struct OtherTile: View {
 
     var body: some View {
         if useGrid {
+            gridBody
+        } else {
+            listBody
+        }
+    }
+
+    private var gridBody: some View {
+        VStack(spacing: 5) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(Color(uiColor: .secondarySystemFill))
-                VStack(spacing: 6) {
-                    Image(systemName: "doc.fill")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.secondary)
-                    Text(item.name)
-                        .font(.system(size: 10.5))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                }
-                .padding(6)
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.secondary)
             }
             .aspectRatio(1, contentMode: .fit)
-            .opacity(0.75)
-        } else {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(uiColor: .secondarySystemFill))
-                    Image(systemName: "doc.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(width: 52, height: 52)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.name)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    Text(Format.bytes(item.size))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
+            FileNameLabel(name: item.name)
+            TileCaption(size: Format.bytes(item.size), date: Format.shortDate(item.modified))
+        }
+    }
+
+    private var listBody: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemFill))
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
             }
-            .opacity(0.8)
+            .frame(width: 56, height: 56)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.name)
+                    .font(.subheadline)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                Text(Format.bytes(item.size))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
         }
     }
 }

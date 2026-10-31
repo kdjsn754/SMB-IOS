@@ -17,6 +17,13 @@ enum Format {
         return formatter
     }()
 
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy/MM/dd"
+        return formatter
+    }()
+
     static func bytes(_ value: Int64) -> String {
         byteFormatter.string(fromByteCount: max(0, value))
     }
@@ -24,5 +31,11 @@ enum Format {
     static func date(_ value: Date?) -> String {
         guard let value else { return "—" }
         return dateFormatter.string(from: value)
+    }
+
+    /// 网格里用的短日期（2023/12/20）
+    static func shortDate(_ value: Date?) -> String {
+        guard let value else { return "—" }
+        return shortDateFormatter.string(from: value)
     }
 }

@@ -9,7 +9,11 @@ struct BrowserView: View {
 
     @StateObject private var model: BrowserModel
     @AppStorage(SettingsKey.gridLayout) private var useGrid = true
+    @AppStorage(SettingsKey.sortOrder) private var sortRaw = BrowserSort.name.rawValue
     @State private var overlay: BrowserOverlay?
+    @State private var showSearch = false
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
 
     init(server: SMBServer, path: String) {
         self.server = server
@@ -21,22 +25,43 @@ struct BrowserView: View {
         path == "/" ? server.share : (path as NSString).lastPathComponent
     }
 
-    private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 104, maximum: 160), spacing: 6)]
+    private var currentSort: BrowserSort {
+        BrowserSort(rawValue: sortRaw) ?? .name
+    }
+
+    /// 文件夹永远在前，其余按用户选择的排序方式
+    private var visibleItems: [FileItem] {
+        let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = keyword.isEmpty
+            ? model.items
+            : model.items.filter { $0.name.localizedCaseInsensitiveContains(keyword) }
+        return currentSort.sorted(base)
+    }
+
+    /// 三列等宽，参照「缩略图 + 文件名 / 大小 / 日期」的信息流
+    private var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
     }
 
     var body: some View {
-        Group {
-            if model.isLoading && model.items.isEmpty {
-                ProgressView("正在读取目录…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let message = model.errorMessage, model.items.isEmpty {
-                errorState(message)
-            } else if model.items.isEmpty {
-                emptyState
-            } else {
-                content
+        VStack(spacing: 0) {
+            if showSearch {
+                searchBar
             }
+
+            Group {
+                if model.isLoading && model.items.isEmpty {
+                    ProgressView("正在读取目录…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let message = model.errorMessage, model.items.isEmpty {
+                    errorState(message)
+                } else if model.items.isEmpty {
+                    emptyState
+                } else {
+                    content
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
@@ -67,21 +92,33 @@ struct BrowserView: View {
     private var content: some View {
         if useGrid {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 6) {
-                    ForEach(model.items) { item in
-                        cell(for: item)
+                if visibleItems.isEmpty {
+                    noMatchState
+                } else {
+                    LazyVGrid(columns: gridColumns, alignment: .center, spacing: 16) {
+                        ForEach(visibleItems) { item in
+                            cell(for: item)
+                        }
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                    .padding(.bottom, 28)
                 }
-                .padding(8)
             }
         } else {
             List {
-                ForEach(model.items) { item in
+                ForEach(visibleItems) { item in
                     cell(for: item)
-                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                        .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
+                        .listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)
+            .overlay {
+                if visibleItems.isEmpty {
+                    noMatchState
+                }
+            }
         }
     }
 
@@ -112,6 +149,52 @@ struct BrowserView: View {
         case .other:
             OtherTile(item: item, useGrid: useGrid)
         }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            TextField("搜索当前文件夹", text: $query)
+                .font(.system(size: 15))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .focused($searchFocused)
+
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+    }
+
+    private var noMatchState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(.secondary)
+            Text(query.isEmpty ? "没有可显示的项目" : "没有找到「\(query)」")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
     }
 
     private var emptyState: some View {
@@ -145,17 +228,40 @@ struct BrowserView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showSearch.toggle()
+                    if showSearch {
+                        searchFocused = true
+                    } else {
+                        query = ""
+                    }
+                }
+            } label: {
+                Image(systemName: showSearch ? "xmark" : "magnifyingglass")
+            }
+
+            Menu {
+                Picker("排序方式", selection: $sortRaw) {
+                    ForEach(BrowserSort.allCases) { option in
+                        Label(option.title, systemImage: option.icon).tag(option.rawValue)
+                    }
+                }
+            } label: {
+                Image(systemName: "arrow.up.arrow.down")
+            }
+
             Menu {
                 Picker("显示方式", selection: $useGrid) {
-                    Text("网格").tag(true)
-                    Text("列表").tag(false)
+                    Text("网格视图").tag(true)
+                    Text("列表视图").tag(false)
                 }
                 Divider()
                 Button {
                     Task { await reload() }
                 } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
+                    Label("刷新目录", systemImage: "arrow.clockwise")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -181,7 +287,7 @@ struct BrowserView: View {
     private func open(_ item: FileItem) {
         switch item.kind {
         case .image:
-            let images = model.items.filter { $0.kind == .image }
+            let images = visibleItems.filter { $0.kind == .image }
             guard let index = images.firstIndex(where: { $0.id == item.id }) else { return }
             overlay = .images(ImagePreviewRequest(items: images, startIndex: index))
         case .video:

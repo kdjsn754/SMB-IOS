@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.3`（build 4），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 / 1.0.1 / 1.0.2 均已验证）；1.0.3 改了图片解码与视频读取上限，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
+| 版本 | `1.0.4`（build 5），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.4 均已验证）；1.0.4 只改了界面层，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -34,6 +34,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），**已 vendor 到 `Packages/AMSMB2` 并改成静态链接**（见第 7 节 1.0.1 修复）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，升级上游时要重点核这几个签名。
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
+- **目录页布局**（1.0.4）：固定三列网格，单元格为「正方形缩略图 + 两行居中文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。
 - **缩略图**（1.0.2 重写，见第 7 节 7）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3、视频封面并发 1 各自独立闸门；每张图读取有字节上限（≤16 MB，BMP/TIFF 必须整份读取）；视频封面额度 32 MB；失败进 180 秒负缓存；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
@@ -63,7 +64,8 @@ Sources/
   Services/AsyncLimiter.swift   async 信号量，限并发
   ViewModels/BrowserModel.swift 目录列举、排序、加载状态
   Views/*.swift                 服务器列表/编辑、浏览、看图、播放、设置
-  Views/Components/MediaTiles.swift 网格/列表单元格（含缩略图占位）
+  Views/Components/MediaTiles.swift 网格/列表单元格 + FileNameLabel（中间省略）/ TileCaption
+  Utilities/Formatters.swift     字节、时间（短日期 yyyy/MM/dd）格式化
   Utilities/AppTheme.swift      主题枚举
   Utilities/Formatters.swift    大小/日期/时长格式化
   Utilities/ImageDownsampler.swift ImageIO 降采样
@@ -143,6 +145,13 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
    - 修复 B：去掉 4MB 单次响应限制，只受总额度约束；视频封面额度 10MB → 32MB。
    - 缓存：`CacheManager.thumbnailVersion` 递增到 2，旧的全黑缩略图自动失效（旧文件变成孤儿，会被缓存上限清理掉）。
 
+8. **✅ 新版式（1.0.4）：目录页改成三列信息流**
+   - 需求：显示效果对齐常见 NAS 客户端——三列缩略图，图下方依次是文件名（最多两行、超长中间省略）、大小、日期。
+   - 实现：`BrowserView.gridColumns` 固定 3 个 `.flexible()`，行距 16、列距 12、水平边距 12；`MediaTile` / `FolderTile` / `OtherTile` 的 `gridBody` 统一改成 `VStack(spacing: 5)`。
+   - 文件名超长（>26 字符）时由 `FileNameLabel` 拆成「前 16 字符 + …后 12 字符」两行，避免只看到一长串前缀。
+   - 新增导航栏能力：搜索（`visibleItems` 在当前目录内过滤，大小写不敏感）、排序（`BrowserSort`：名称/名称倒序/时间新→旧/旧→新/大小大→小/小→大，存 `SettingsKey.sortOrder`）、网格⇄列表切换（原「更多」菜单保留）。
+   - 注意：排序/搜索只影响当前目录；`open()` 用 `visibleItems` 过滤图片列表，保证看图左右滑动顺序与网格一致。
+
 ## 8. 约定（改代码前先看）
 
 - **不要提交 `SMBViewer.xcodeproj`**：改工程必须改 `project.yml`。
@@ -181,6 +190,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.0.4 | 2026-10-31 | 目录页改版：三列网格 + 缩略图下方两行文件名（中间省略）/ 大小 / 日期；新增目录内搜索、6 种排序、网格⇄列表切换 |
 | 1.0.3 | 2026-10-31 | 修复 BMP/TIFF 缩略图全黑（改为整份读取 + 完整解码兜底）；修复 1GB 以上 MP4 无封面（去掉 4MB 单次响应限制、视频额度 10MB→32MB）；缩略图缓存版本号递增以失效旧的黑图 |
 | 1.0.2 | 2026-10-31 | 重写缩略图加载链路：任务去重/取消传播/失败负缓存/图片与视频独立并发闸门；视频封面加 10 MB 字节预算，不再整部下载；`SMBConnection.read` 支持传输中止；看图页只加载当前页；缓存自动清理改为 20 秒节流；设置页新增缩略图开关 |
 | 1.0.1 | 2026-10-31 | 修复 iOS 27 上轻松签/ESign 重签后启动闪退：AMSMB2 由 SPM 动态框架改为 vendored 静态链接（`Packages/AMSMB2`），产物不再含 `Frameworks/`；CI 加静态链接断言与包结构自检 |
