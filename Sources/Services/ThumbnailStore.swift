@@ -13,20 +13,17 @@ final class ThumbnailStore: @unchecked Sendable {
 
     /// 统一缩略图长边像素（网格最宽 160pt × 3 倍屏 = 480）
     private static let pixelSize = 480
-    /// 图片一次读完的上限，超过这个大小才分阶段读
-    private static let imageReadLimit: Int64 = 16 * 1024 * 1024
+    /// 图片必须整份读到才解码：JPEG / PNG 被截断时 ImageIO 不会返回 nil，
+    /// 而是给出一张「上半张正常、下半张灰」的假图（缩略图加载不全的根因）。
+    /// 所以这里不再按大小分阶段试探，一律读满；超过上限的直接放弃。
+    private static let imageHardLimit: Int64 = 64 * 1024 * 1024
+    /// 分块读取大小（单次 SMB 读请求上限）
+    private static let imageReadChunk: Int = 8 * 1024 * 1024
     /// 视频封面允许消耗的字节额度。1GB 以上的 MP4，`moov` 索引本身就可能十几兆，
     /// 额度给小了会导致索引读不全、直接解析失败（大文件缩略图出不来的根因）
     private static let videoByteBudget: Int64 = 32 * 1024 * 1024
     /// 小于这个大小的视频直接流式抽帧（一次就能读完），更大的走稀疏镜像
     private static let smallVideoLimit: Int64 = 24 * 1024 * 1024
-    /// 必须完整读取才能正确解码的图片格式（无压缩 / 分块存储）。
-    /// 这类文件被截断后 ImageIO 不会返回 nil，而是给出一张「主体全黑」的图，正好对上 BMP 全黑的现象。
-    private static let fullReadImageExtensions: Set<String> = ["bmp", "dib", "tif", "tiff"]
-    /// 完整读取类图片的大小上限，超过就放弃（不至于为了一张图传几百兆）
-    private static let fullImageReadLimit: Int64 = 64 * 1024 * 1024
-    /// 完整读取时的分块大小
-    private static let fullReadChunk: Int = 8 * 1024 * 1024
     /// 失败冷却时间
     private static let failureTTL: TimeInterval = 180
     /// AVFoundation 无法解码的容器，直接不做封面，避免白读十几兆
@@ -224,64 +221,28 @@ final class ThumbnailStore: @unchecked Sendable {
 
     // MARK: - 图片
 
+    /// 图片缩略图：整份读回来再解码。
+    ///
+    /// 这里刻意不做「先读 8MB 试试能不能解开」的分阶段优化——1.0.5 之前就是这么干的，
+    /// 结果 16MB 以上的 JPEG 在读到 8MB 时 ImageIO 直接返回一张「上半张有内容、下半张灰」的图，
+    /// 而 `CGImageSourceCreateThumbnailAtIndex` 认为成功、我们就把这张残图写进了缓存。
+    /// JPEG 的结束标记 EOI 在文件末尾，除了读满没有别的办法确认完整，所以只能整份读。
     private func imageThumbnail(item: FileItem, connection: SMBConnection, cancel: CancellationBox) async -> UIImage? {
-        // BMP / TIFF 必须整份拿到才能解码，走独立路径
-        if Self.fullReadImageExtensions.contains(item.fileExtension) {
-            return await fullReadImageThumbnail(item: item, connection: connection, cancel: cancel)
-        }
-
-        for step in Self.readPlan(for: item.size) {
-            if cancel.isCancelled { return nil }
-            // 传输被取消会抛 CancellationError，这里当成「没取到」，不要污染失败缓存
-            let data: Data
-            do {
-                data = try await connection.read(item.path, offset: 0, length: step, cancel: cancel)
-            } catch is CancellationError {
-                return nil
-            } catch {
-                return nil
-            }
-            if data.isEmpty { return nil }
-            if let image = ImageDownsampler.downsample(data: data, maxPixel: Self.pixelSize) {
-                return image
-            }
-        }
-        return nil
-    }
-
-    /// 分阶段读取计划：小图一次读完；超大图先读头部，解码不出来再放宽。
-    private static func readPlan(for size: Int64) -> [Int] {
-        let limit = imageReadLimit
-        if size > 0, size <= limit {
-            return [Int(size)]
-        }
-        if size > limit {
-            return [8 * 1024 * 1024, Int(limit)]
-        }
-        // 目录列表没给大小，只能试探
-        return [1024 * 1024, 4 * 1024 * 1024, Int(limit)]
-    }
-
-    /// BMP / TIFF 专用：分块读完整份文件再解码。
-    /// 目录列表没给大小时先问一次服务器，避免用 1MB 去试而解出一张全黑的图。
-    private func fullReadImageThumbnail(
-        item: FileItem,
-        connection: SMBConnection,
-        cancel: CancellationBox
-    ) async -> UIImage? {
         var size = item.size
         if size <= 0 {
             size = (try? await connection.fileSize(item.path)) ?? 0
         }
-        guard size > 0, size <= Self.fullImageReadLimit else { return nil }
+        guard size > 0, size <= Self.imageHardLimit else { return nil }
 
+        let total = Int(size)
         var data = Data()
-        data.reserveCapacity(Int(size))
+        // 只预留在 16MB 以内，避免一张几十兆的图一上来就吃掉大块内存
+        data.reserveCapacity(min(total, 16 * 1024 * 1024))
         var offset: Int64 = 0
 
-        while offset < size {
+        while data.count < total {
             if cancel.isCancelled { return nil }
-            let want = Int(min(Int64(Self.fullReadChunk), size - offset))
+            let want = min(Self.imageReadChunk, total - data.count)
             let chunk: Data
             do {
                 chunk = try await connection.read(item.path, offset: offset, length: want, cancel: cancel)
@@ -295,7 +256,8 @@ final class ThumbnailStore: @unchecked Sendable {
             offset += Int64(chunk.count)
         }
 
-        guard !data.isEmpty else { return nil }
+        // 没读满就是残缺数据：宁可显示占位图标，也不要糊一张半截图上去
+        guard data.count >= total else { return nil }
         return ImageDownsampler.downsample(data: data, maxPixel: Self.pixelSize)
     }
 

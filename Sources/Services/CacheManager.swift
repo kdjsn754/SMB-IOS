@@ -43,7 +43,7 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
     // MARK: - 路径
 
     /// 缩略图生成逻辑变更时递增，让旧的（错误的）缩略图缓存自动失效
-    private static let thumbnailVersion = 2
+    private static let thumbnailVersion = 3
 
     func thumbnailURL(serverID: UUID, item: FileItem) -> URL {
         createDirectories()

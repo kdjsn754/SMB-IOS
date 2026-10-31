@@ -1,6 +1,14 @@
 import SwiftUI
 import UIKit
 
+/// 网格缩略图的长宽比。所有格子都用 `.fit` 完整显示图片，
+/// 比例按内容类型给（照片竖幅、视频横幅），这样不会被裁成方框。
+enum TileAspect {
+    static let photo: CGFloat = 3.0 / 4.0
+    static let video: CGFloat = 16.0 / 9.0
+    static let square: CGFloat = 1
+}
+
 /// 通用缩略图视图：先看缓存，再按需从服务器读取。
 /// 失败会退化成占位图标（不会一直转圈），划走时会取消传输。
 @MainActor
@@ -18,9 +26,10 @@ struct ThumbnailImage: View {
             .fill(Color(uiColor: .secondarySystemFill))
             .overlay {
                 if let image {
+                    // 完整显示整张图，不做填充裁切（参照同类文件管理软件的做法）
                     Image(uiImage: image)
                         .resizable()
-                        .scaledToFill()
+                        .scaledToFit()
                 } else if failed {
                     Image(systemName: placeholderIcon)
                         .font(.system(size: 20, weight: .regular))
@@ -137,7 +146,10 @@ struct MediaTile: View {
     private var gridBody: some View {
         VStack(spacing: 5) {
             ThumbnailImage(item: item, serverID: serverID, connection: connection)
-                .aspectRatio(1, contentMode: .fit)
+                .aspectRatio(
+                    item.kind == .video ? TileAspect.video : TileAspect.photo,
+                    contentMode: .fit
+                )
                 .overlay(alignment: .bottomLeading) {
                     if item.kind == .video {
                         Image(systemName: "play.fill")
