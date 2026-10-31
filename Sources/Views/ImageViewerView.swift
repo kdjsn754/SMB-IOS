@@ -5,12 +5,17 @@ import UIKit
 ///
 /// 分页不用 `TabView(.page)`：它的翻页手势是 UIKit 内部 pan，
 /// 会和外层「下拉退出」的 `DragGesture` 互相抢（要么翻不了页，要么拖不动退）。
-/// 这里用 `HStack + offset` 自己算位移，一个手势同时处理「横向翻页 / 纵向下拉退出」。
+/// 这里自己用 `ZStack + 每页绝对 offset` 算位置，一个手势同时处理「横向翻页 / 纵向下拉退出」。
+///
+/// 为什么不是 `HStack`：只渲染三页时，换页那一刻 `range` 会整体平移一格，
+/// 每页在 `HStack` 里的**布局位置**会一次性跳一个屏宽，而 `.offset` 只负责补上手指拖出去的那一小段。
+/// 布局跳变不可动画（兄弟页被 insert/remove），于是松手瞬间整排内容瞬移一屏——看起来就是「图片直接闪出来」。
+/// 改成每页位置只由 `(i - index) * width` 这个 offset 决定，位移全部走图层变换，`withAnimation` 一定能动画。
 ///
 /// 为什么不用系统自带的下滑退出：`fullScreenCover` 的呈现方式是 `fullScreen`，
 /// 系统只给 `sheet`（pageSheet/formSheet）配交互式下滑，而 sheet 顶部会留出一条
 /// 露出底层的缝、也拿不到全屏，做看图不合适。所以手势自己做，但**位移只走图层**
-/// （offset / scaleEffect），并且用 `PageStack` 把图片内容按「不可变”隔离掉，
+/// （offset / scaleEffect），并且用 `PageStack` 把图片内容按「不可变」隔离掉，
 /// 拖动时不会重建页面树，手感和系统一样跟手。
 @MainActor
 struct ImageViewerView: View {
@@ -76,16 +81,15 @@ struct ImageViewerView: View {
                             isZoomed: $isZoomed
                         )
                         .equatable()
-                        // 先压成屏幕大小（内容仍是三页总宽、左对齐、不裁剪），
-                        // 之后的 offset / scaleEffect 才是以「屏幕中心」为锚点的图层变换；
-                        // 顺序不能反：scaleEffect 挂在宽条上会绕整条的中间缩放，画面会往一边飘。
-                        .frame(width: width, height: height, alignment: .leading)
-                        .offset(
-                            x: -CGFloat(index - pageRange.lowerBound) * width + drag.width,
-                            y: drag.height
-                        )
+                        // 横向位移必须落在裁剪框「里面」：翻页时下一张从屏幕边缘滑进来，
+                        // 超出屏幕的部分被裁掉；否则下拉缩小（0.86 倍）时会在屏幕右边
+                        // 露出一条别页的边。
+                        .offset(x: drag.width)
+                        .clipped()
+                        // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
+                        // 露出下面被遮住的目录页。
+                        .offset(y: drag.height)
                         .scaleEffect(1 - pullProgress * 0.14)
-                        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
                         .contentShape(Rectangle())
                         .gesture(pagingGesture(width: width))
                         .onTapGesture { toggleChrome() }
@@ -109,6 +113,37 @@ struct ImageViewerView: View {
         .onChange(of: index) { _ in
             // 换页时把上一页的放大状态清掉，否则新一页的翻页手势会被误判成「正在放大」
             isZoomed = false
+        }
+        .task(id: index) {
+            // 翻页动画落定后，把前后两张的原图读进磁盘缓存。
+            // 这样下一次左右滑是「本地直接出图」，不会先糊一片（缩略图占位）再慢慢变清晰。
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else { return }
+            await prefetchNeighbors()
+        }
+    }
+
+    /// 预热前后两页：已经缓存过的直接跳过，没缓存过的按顺序读进磁盘缓存。
+    /// 用户很快又划走时任务会被取消，`CancellationBox` 会把底层 SMB 传输一起掐掉，
+    /// 不会在后台白读几十兆。
+    private func prefetchNeighbors() async {
+        for offset in [index + 1, index - 1] {
+            guard !Task.isCancelled, items.indices.contains(offset) else { continue }
+            let item = items[offset]
+            let url = CacheManager.shared.mediaURL(serverID: serverID, item: item, suffix: "jpg")
+            if FileManager.default.fileExists(atPath: url.path) { continue }
+
+            let box = CancellationBox()
+            await withTaskCancellationHandler {
+                _ = await MediaStore.shared.image(
+                    for: item,
+                    serverID: serverID,
+                    connection: connection,
+                    cancel: box
+                )
+            } onCancel: {
+                box.cancel()
+            }
         }
     }
 
@@ -229,11 +264,17 @@ struct ImageViewerView: View {
 
 // MARK: - 页面容器
 
-/// 三张页面的横向堆叠。
+/// 三张页面的横向堆叠，但**位置不靠布局，靠 offset**。
 ///
 /// 单独抽出来并实现 `Equatable`，配合 `.equatable()` 使用：外层拖动时
 /// `drag` 每帧都在变、`body` 每帧都会重算，但只要这里的入参没变，
 /// SwiftUI 就会跳过它的 `body`，里面的 `Image` 一帧都不重建。
+///
+/// 每页的 x 位移是 `(页号 - 当前页号) * 屏宽`：换页时这个值从 `±1 屏宽` 平滑过渡到 `0`，
+/// 是一条纯图层变换，`withAnimation` 一定动画得出来。
+/// 如果改成 `HStack` 布局 + 外层 offset 补偿，换页那一刻 `range` 会平移一格，
+/// 兄弟页被增删会让布局位置**瞬间**跳一个屏宽（布局跳变无法动画），
+/// 画面表现就是「图片直接闪出来」。
 private struct PageStack: View, Equatable {
     let items: [FileItem]
     let range: ClosedRange<Int>
@@ -254,7 +295,7 @@ private struct PageStack: View, Equatable {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        ZStack {
             ForEach(range, id: \.self) { offset in
                 ZoomableImageView(
                     item: items[offset],
@@ -265,10 +306,11 @@ private struct PageStack: View, Equatable {
                     isZoomed: $isZoomed
                 )
                 .frame(width: width, height: height)
+                .offset(x: CGFloat(offset - index) * width)
+                .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
             }
         }
-        // 给 HStack 真实总宽度，外层再压成屏幕宽度并左对齐，offset 才能从左上角算起
-        .frame(width: width * CGFloat(range.count), alignment: .leading)
+        .frame(width: width, height: height)
     }
 }
 
@@ -289,6 +331,10 @@ struct ZoomableImageView: View {
     @Binding var isZoomed: Bool
 
     @State private var image: UIImage?
+    /// 缩略图占位：网格里已经有 480px 的缩略图在内存里，先把它铺上去。
+    /// 原图从 NAS 读完要几百毫秒到几秒，没有占位的话这期间是一片黑，
+    /// 原图一回来又「啪」地整张出现——翻页时看着就是闪一下。
+    @State private var placeholder: UIImage?
     @State private var isLoading = false
     @State private var failed = false
 
@@ -299,39 +345,63 @@ struct ZoomableImageView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let size = proxy.size
+
             ZStack {
+                // 底层：缩略图（有就先铺，原图淡入后淡出）
+                if let placeholder {
+                    filled(placeholder, size: size)
+                        .opacity(image == nil ? 1 : 0)
+                        .allowsHitTesting(false)
+                }
+
+                // 上层：原图，加载完成后淡入，盖住缩略图
                 if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: proxy.size.width, height: proxy.size.height)
-                        .scaleEffect(scale)
-                        .offset(x: offset.width + dragOffset.width, y: offset.height + dragOffset.height)
-                        // 只有放大之后才接管拖动（未放大时的拖动归外层，用来翻页和下拉退出）
-                        .gesture(panGesture, including: scale > 1.01 ? .all : .none)
-                        .simultaneousGesture(magnificationGesture)
-                        .onTapGesture(count: 2) { toggleZoom() }
-                } else if isLoading {
-                    ProgressView()
-                        .tint(.white)
-                } else if failed {
-                    VStack(spacing: 10) {
-                        Image(systemName: "photo.badge.exclamationmark")
-                            .font(.system(size: 34, weight: .light))
-                        Text("图片加载失败")
-                            .font(.footnote)
+                    filled(image, size: size)
+                        .transition(.opacity)
+                }
+
+                if placeholder == nil {
+                    if isLoading {
+                        ProgressView()
+                            .tint(.white)
+                    } else if failed {
+                        VStack(spacing: 10) {
+                            Image(systemName: "photo.badge.exclamationmark")
+                                .font(.system(size: 34, weight: .light))
+                            Text("图片加载失败")
+                                .font(.footnote)
+                        }
+                        .foregroundStyle(.white.opacity(0.7))
                     }
-                    .foregroundStyle(.white.opacity(0.7))
-                } else {
-                    Color.clear
                 }
             }
-            .frame(width: proxy.size.width, height: proxy.size.height)
+            .frame(width: size.width, height: size.height)
+            // 缩放 / 平移挂在容器上，两层图片共用同一套变换，淡入过程中不会错位
+            .scaleEffect(scale)
+            .offset(x: offset.width + dragOffset.width, y: offset.height + dragOffset.height)
+            .contentShape(Rectangle())
+            // 只有放大之后才接管拖动（未放大时的拖动归外层，用来翻页和下拉退出）
+            .gesture(panGesture, including: scale > 1.01 ? .all : .none)
+            .simultaneousGesture(magnificationGesture)
+            .onTapGesture(count: 2) { toggleZoom() }
+        }
+        .onAppear {
+            if placeholder == nil {
+                placeholder = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
+            }
         }
         .task(id: isActive) {
             guard isActive else { return }
             await load()
         }
+    }
+
+    private func filled(_ image: UIImage, size: CGSize) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFit()
+            .frame(width: size.width, height: size.height)
     }
 
     private var magnificationGesture: some Gesture {
@@ -390,7 +460,14 @@ struct ZoomableImageView: View {
 
     private func load() async {
         if image != nil { return }
-        isLoading = true
+        // 已经有缩略图铺底就不要再转圈，否则会在缩略图上盖一个加载指示器
+        if placeholder == nil {
+            if let cached = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID) {
+                placeholder = cached
+            } else {
+                isLoading = true
+            }
+        }
         failed = false
 
         let box = CancellationBox()
@@ -408,8 +485,11 @@ struct ZoomableImageView: View {
         if Task.isCancelled { return }
         isLoading = false
         if let loaded {
-            image = loaded
-        } else {
+            // 淡入盖住缩略图，而不是「啪」地整张换掉
+            withAnimation(.easeOut(duration: 0.18)) {
+                image = loaded
+            }
+        } else if placeholder == nil {
             failed = true
         }
     }
