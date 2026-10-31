@@ -61,15 +61,25 @@
 3. 构建完成后，在该次运行页面底部 **Artifacts** 下载 `SMBViewer-unsigned-ipa`，解压得到 `SMBViewer-unsigned.ipa`。
 4. 如果推送 `v1.0.0` 这类 tag，IPA 会自动附加到对应的 Release 里。
 
-> 云端使用 `macos-15` 运行器 + Xcode 16，首次构建需要联网拉取 [AMSMB2](https://github.com/amosavian/AMSMB2) 依赖，约 5～10 分钟。
+> 云端使用 **`xcode-27` 运行器**（macOS 27 + Xcode 27 + iOS 27 SDK），首次构建需要联网拉取 [AMSMB2](https://github.com/amosavian/AMSMB2) 依赖，约 6～12 分钟。
+>
+> 想换版本改 `.github/workflows/build-ipa.yml` 顶部的两处即可：`runs-on: xcode-27` → `macos-26` / `macos-15`，以及 `env.XCODE_VERSION: "27"` → 对应主版本号（工作流会在镜像里自动挑最新的正式版 Xcode，找不到 beta 时才退回 beta）。
 
 ### 方式二：本地 macOS
 
 ```bash
 brew install xcodegen
 chmod +x scripts/build-ipa.sh
-./scripts/build-ipa.sh
+./scripts/build-ipa.sh          # 默认挑 /Applications 下最新的 Xcode 27
 # 产物：build/SMBViewer-unsigned.ipa
+```
+
+需要 **Xcode 27**（`DEVELOPER_DIR` 由脚本自动指向 `/Applications/Xcode_27*.app`，优先正式版）。本机装的是别的版本时：
+
+```bash
+XCODE_VERSION=26.6 ./scripts/build-ipa.sh
+# 或直接指定
+XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 ```
 
 ---

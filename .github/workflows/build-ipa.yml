@@ -1,5 +1,11 @@
 name: Build unsigned IPA
 
+# 镜像说明：
+#   xcode-27 = macOS 27 + Xcode 27（镜像默认 Xcode 即 27.x，SDK 为 iOS 27）
+#   想改回旧版：把 runs-on 换成 macos-26 / macos-15，并把 XCODE_VERSION 改成对应主版本号
+env:
+  XCODE_VERSION: "27"
+
 on:
   push:
     branches: [main, master]
@@ -13,8 +19,8 @@ concurrency:
 
 jobs:
   build:
-    name: Build SMBViewer
-    runs-on: macos-15
+    name: Build SMBViewer (Xcode 27, unsigned)
+    runs-on: xcode-27
     timeout-minutes: 60
     permissions:
       contents: write
@@ -23,11 +29,57 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+      - name: Show runner info
+        run: |
+          set -euo pipefail
+          sw_vers
+          echo "== 镜像里的 Xcode =="
+          ls -d /Applications/Xcode*.app || true
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          echo "目标主版本：$XCODE_VERSION"
+          # 优先正式版（跳过 beta），同主版本号取最新的
+          pick=""
+          for app in $(ls -d /Applications/Xcode_${XCODE_VERSION}*.app 2>/dev/null | sort -V); do
+            case "$app" in
+              *[Bb]eta*) continue ;;
+              *) pick="$app" ;;
+            esac
+          done
+          # 没有正式版就退回 beta / 其它命名（例如 Xcode_27_beta_3.app）
+          if [ -z "$pick" ]; then
+            pick=$(ls -d /Applications/Xcode_${XCODE_VERSION}*.app 2>/dev/null | sort -V | tail -1 || true)
+          fi
+          if [ -z "$pick" ]; then
+            echo "::error::镜像上没有找到 Xcode ${XCODE_VERSION}，可用版本见上一步列表"
+            exit 1
+          fi
+
+          echo "== 使用 $pick =="
+          sudo xcode-select -s "$pick/Contents/Developer"
+          xcodebuild -version
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          swift --version 2>&1 | head -2
+
+      # Xcode 27 预览镜像可能没带 Metal 工具链（actool 编译图标时会报 missing Metal Toolchain）
+      - name: Ensure Metal toolchain
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          if xcrun -f metal >/dev/null 2>&1; then
+            echo "Metal 工具链已就绪：$(xcrun -f metal)"
+          else
+            echo "缺少 Metal 工具链，尝试下载"
+            xcodebuild -downloadComponent MetalToolchain || echo "下载失败，继续构建（本项目不需要 Metal 着色器）"
+          fi
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          brew update --quiet || true
+          brew install xcodegen
+          xcodegen --version
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -71,6 +123,14 @@ jobs:
           cd build
           zip -qry SMBViewer-unsigned.ipa Payload
           ls -lh SMBViewer-unsigned.ipa
+
+      - name: Show IPA info
+        run: |
+          set -euo pipefail
+          INFO="$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO" || true
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$INFO" || true
+          otool -L "$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app/SMBViewer" | head -20 || true
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
