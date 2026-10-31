@@ -20,7 +20,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 | 项 | 值 |
 | --- | --- |
 | 版本 | `1.0.9`（build 10），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.8 均已验证）；1.0.9 把网格改成「固定展示框 + 贴顶显示」，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
+| 构建 | ✅ 1.0.9 由 run **#15**（sha `57d26e7`）全绿产出，14 个步骤（含「自检：包结构与依赖」）全 success |
+| 产物自检 | `Info.plist` = 1.0.9 / build 10、`MinimumOSVersion` 16.0、可执行文件 arm64、**Payload 内无 `Frameworks` 目录**、`.app` 里只有一个可执行文件（1.31 MB）；已交付 `D:\下载\互传\SMBViewer-v1.0.9-unsigned.ipa` |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -93,6 +94,21 @@ scripts/make_icon.py            重新生成图标
 - 打包方式：`CODE_SIGNING_ALLOWED=NO` archive → 组 `Payload/` → zip，所以产物是无签名 IPA
 
 **换 Xcode 版本**：改 `runs-on`（`macos-26` / `macos-15`）+ `env.XCODE_VERSION`（`"26.6"` / `"16.4"`）两处即可。
+
+### 查 CI 结果（本机没有 `gh` 也能查）
+
+本机 Git Credential Manager 里已存 `github.com` 凭据（scope: `gist, repo, workflow`），
+可以直接把令牌取出来调 REST API，不需要装 `gh`、也不需要 GitHub connector：
+
+```bash
+GH=$(cd E:/githubjob/SMB-IOS && printf 'protocol=https\nhost=github.com\n\n' | git credential fill | sed -n 's/^password=//p')
+curl -s -H "Authorization: Bearer $GH" \
+  "https://api.github.com/repos/kdjsn754/SMB-IOS/actions/runs?per_page=5"   # 最近运行
+# 拉产物：先 GET .../actions/runs/<run_id>/artifacts 拿 artifact id，
+# 再 curl -L -H "Authorization: Bearer $GH" -o artifact.zip \
+#   "https://api.github.com/repos/kdjsn754/SMB-IOS/actions/artifacts/<id>/zip"
+```
+
 
 ### 本地 macOS
 
