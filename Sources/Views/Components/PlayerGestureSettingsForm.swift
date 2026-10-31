@@ -58,6 +58,8 @@ struct PlayerGestureSettingsSections: View {
             }
             .disabled(!gestures.isEnabled)
 
+            Toggle("显示手势诊断", isOn: $gestures.showDiagnostics)
+
             Button {
                 gestures.resetToDefaults()
                 onReset?()
@@ -73,6 +75,7 @@ struct PlayerGestureSettingsSections: View {
             左右拖动：拖动时只预览目标时间，松手才真正跳转（远端流每帧都跳会卡）。
             长按：按住期间倍速播放，松手恢复原速率。
             双指捏合：放大画面，最大 4 倍；右上角的缩放按钮随时可以还原。
+            打开「显示手势诊断」后，播放页左上角会实时显示收到的手势和当前音量/缩放，排障用。
             """)
         }
     }

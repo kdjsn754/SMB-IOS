@@ -145,6 +145,7 @@ final class PlayerGestureSettings: ObservableObject {
         static let vertical = "settings.gesture.vertical"
         static let longPress = "settings.gesture.longPress"
         static let pinch = "settings.gesture.pinch"
+        static let diagnostics = "settings.gesture.diagnostics"
     }
 
     private let defaults: UserDefaults
@@ -169,6 +170,10 @@ final class PlayerGestureSettings: ObservableObject {
     }
     @Published var pinch: PinchAction {
         didSet { defaults.set(pinch.rawValue, forKey: Key.pinch) }
+    }
+    /// 播放页左上角显示「收到了什么手势」的排障浮层
+    @Published var showDiagnostics: Bool {
+        didSet { defaults.set(showDiagnostics, forKey: Key.diagnostics) }
     }
 
     private init(defaults: UserDefaults = .standard) {
@@ -198,6 +203,8 @@ final class PlayerGestureSettings: ObservableObject {
 
         pinch = PinchAction(rawValue: defaults.string(forKey: Key.pinch) ?? "")
             ?? .zoom
+
+        showDiagnostics = bool(Key.diagnostics, false)
     }
 
     /// 全部恢复默认

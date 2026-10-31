@@ -242,21 +242,36 @@ private final class PlayerUIView: UIView {
         playerLayer?.backgroundColor = UIColor.black.cgColor
     }
 
-    /// 双指捏合缩放：直接给承载 AVPlayerLayer 的 view 套缩放变换
+    /// 双指捏合缩放：缩放 **AVPlayerLayer 自己**，而不是给 view 套 transform。
+    /// 套 transform 会和 SwiftUI 的布局打架（每次 layout 都可能被重置），
+    /// 直接改 layer 的仿射变换既不会被布局覆盖，也不会让手势坐标跟着缩放。
     func applyZoom(_ scale: CGFloat) {
         let clamped = min(max(scale, 1), 4)
-        guard abs(transform.a - clamped) > 0.001 else { return }
-        transform = CGAffineTransform(scaleX: clamped, y: clamped)
+        guard let layer = playerLayer else { return }
+        guard abs(layer.affineTransform().a - clamped) > 0.001 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.setAffineTransform(CGAffineTransform(scaleX: clamped, y: clamped))
+        CATransaction.commit()
     }
 }
 
 private struct PlayerSurface: UIViewRepresentable {
     let player: AVPlayer
     var zoom: CGFloat = 1
+    var gesturesEnabled: Bool = true
+    var onEvent: @MainActor (PlayerGestureEvent) -> Void = { _ in }
+
+    func makeCoordinator() -> PlayerGestureCoordinator {
+        PlayerGestureCoordinator(onEvent: onEvent)
+    }
 
     func makeUIView(context: Context) -> PlayerUIView {
         let view = PlayerUIView()
         view.player = player
+        // 手势直接挂在画面视图上：不依赖上面那层 SwiftUI 透明视图能不能命中
+        context.coordinator.attach(to: view)
+        context.coordinator.setEnabled(gesturesEnabled)
         return view
     }
 
@@ -264,6 +279,8 @@ private struct PlayerSurface: UIViewRepresentable {
         if uiView.player !== player {
             uiView.player = player
         }
+        context.coordinator.onEvent = onEvent
+        context.coordinator.setEnabled(gesturesEnabled)
         uiView.applyZoom(zoom)
     }
 }
@@ -328,14 +345,23 @@ struct VideoPlayerView: View {
     @State private var quickPanel: QuickPanel?
     /// 右上角「手势」按钮弹出的设置面板
     @State private var showGestureSettings = false
+    /// 手势诊断（设置里可开关）：看看到底有没有收到手势
+    @State private var gestureEventCount = 0
+    @State private var lastGestureText = "还没收到任何手势"
+    @State private var lastDiagnosticAt = Date.distantPast
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                PlayerSurface(player: model.player, zoom: zoom)
-                    .ignoresSafeArea()
+                PlayerSurface(
+                    player: model.player,
+                    zoom: zoom,
+                    gesturesEnabled: gestures.isEnabled,
+                    onEvent: handle
+                )
+                .ignoresSafeArea()
 
                 // 亮度遮罩：盖住画面、但盖不到控件和 HUD
                 Color.black
@@ -343,7 +369,13 @@ struct VideoPlayerView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
 
-                gestureSurface
+                // 手势挂在画面视图上；只有关掉手势时才铺一层，保证还能单击显隐控件
+                if !gestures.isEnabled {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture { toggleChrome() }
+                }
 
                 // 右上角浮层打开时，点空白处先收起浮层（同时挡住误触播放手势）
                 if quickPanel != nil {
@@ -360,6 +392,15 @@ struct VideoPlayerView: View {
 
                 if chromeVisible {
                     controls
+                        .transition(.opacity)
+                }
+
+                if gestures.showDiagnostics {
+                    diagnosticsOverlay
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.top, 8)
+                        .padding(.leading, 12)
+                        .allowsHitTesting(false)
                         .transition(.opacity)
                 }
 
@@ -497,22 +538,17 @@ struct VideoPlayerView: View {
 
     // MARK: - 手势
 
-    private var gestureSurface: some View {
-        Group {
-            if gestures.isEnabled {
-                PlayerGestureLayer(isEnabled: true, onEvent: handle)
-                    .ignoresSafeArea()
-            } else {
-                // 关掉手势后至少保留「单击显隐控制条」
-                Color.clear
-                    .contentShape(Rectangle())
-                    .ignoresSafeArea()
-                    .onTapGesture { toggleChrome() }
+    private func handle(_ event: PlayerGestureEvent) {
+        if gestures.showDiagnostics {
+            // 拖动一秒会来几十次事件，限流一下，别让排障浮层自己把画面拖卡
+            let now = Date()
+            if now.timeIntervalSince(lastDiagnosticAt) > 0.12 {
+                lastDiagnosticAt = now
+                gestureEventCount += 1
+                lastGestureText = describe(event)
             }
         }
-    }
 
-    private func handle(_ event: PlayerGestureEvent) {
         switch event {
         case .singleTap(_, _):
             toggleChrome()
@@ -541,6 +577,42 @@ struct VideoPlayerView: View {
             handlePinch(scale, ended: ended)
             if ended { isPinching = false }
         }
+    }
+
+    private func describe(_ event: PlayerGestureEvent) -> String {
+        switch event {
+        case let .singleTap(point, size):
+            return "单击 \(Int(point.x)),\(Int(point.y)) / 画布 \(Int(size.width))×\(Int(size.height))"
+        case .doubleTap:
+            return "双击"
+        case .panBegan:
+            return "拖动开始"
+        case let .panChanged(translation, _):
+            return "拖动中 \(Int(translation.width)),\(Int(translation.height))"
+        case let .panEnded(translation, _):
+            return "拖动结束 \(Int(translation.width)),\(Int(translation.height))"
+        case let .longPress(began):
+            return began ? "长按按下" : "长按松开"
+        case let .pinch(scale, ended):
+            return "\(ended ? "捏合结束" : "捏合中") \(String(format: "%.2f", scale))"
+        }
+    }
+
+    private var diagnosticsOverlay: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("手势诊断 · 共 \(gestureEventCount) 次")
+                .font(.caption2.weight(.semibold))
+            Text("最近：\(lastGestureText)")
+                .font(.caption2.monospacedDigit())
+            Text("音量 \(Int((model.volume * 100).rounded()))% · 缩放 \(String(format: "%.1f", zoom))× · 亮度 \(Int(((1 - dimLevel) * 100).rounded()))%")
+                .font(.caption2.monospacedDigit())
+            Text("开关：\(gestures.isEnabled ? "开" : "关") · 上下拖动：\(gestures.vertical.title)")
+                .font(.caption2)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func toggleChrome() {
