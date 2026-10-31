@@ -19,9 +19,9 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.14`（build 15），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.0.14 由 run **#20**（sha `25d2cb8`）全绿产出（含「自检：包结构与依赖」） |
-| 产物自检 | 1.0.14：`Info.plist` = 1.0.14 / build 15、`MinimumOSVersion` 16.0、可执行文件 arm64（1.31 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:\下载\互传\SMBViewer-v1.0.14-unsigned.ipa` |
+| 版本 | `1.0.15`（build 16），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ 1.0.14 由 run **#20**（sha `25d2cb8`）全绿产出；1.0.15（播放器手势）由本次 CI 产出 |
+| 产物自检 | 1.0.15：`Info.plist` = 1.0.15 / build 16、`MinimumOSVersion` 16.0、可执行文件 arm64（1.31 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:\下载\互传\SMBViewer-v1.0.15-unsigned.ipa` |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -35,7 +35,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），**已 vendor 到 `Packages/AMSMB2` 并改成静态链接**（见第 7 节 1.0.1 修复）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，升级上游时要重点核这几个签名。
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
-- **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。
+- **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。1.0.15 起叠加一层**可配置手势**：`PlayerGestureLayer`（UIKit 手势，不是 SwiftUI `.gesture`，避免和 `AVPlayerLayer` 抢 touches、也才能用 `require(toFail:)` 让单击等双击失败）负责识别，`PlayerGestureSettings`（`@MainActor` 单例 + `UserDefaults`）负责「哪个手势做什么」，设置页「播放手势」可逐项改：双击（两侧快进快退/中间暂停 · 播放暂停 · 单向左/右 · 关闭）、快进跨度（5/10/15/30 秒）、左右拖动（拖动进度/关闭）、上下拖动（左亮度右音量/纯音量/纯亮度/关闭）、长按（1.5×/2×/3× 倍速按住、松手恢复）、双指捏合（缩放 1~4 倍）。几个取舍：**拖进度只在松手时 seek 一次**（远端流每帧 seek 会把 SMB 打爆）、**亮度用黑色遮罩而不是 `UIScreen.main.brightness`**（不改系统亮度、不影响其它 App、iPad 也一致）、**音量用 `AVPlayer.volume` 而不是 `MPVolumeView`**（不弹系统音量条、不碰音频会话）。
 - **目录页布局**（1.0.4，1.0.6 调整，1.0.9 定框，1.0.10 去灰底+居中）：固定三列网格、同一行顶部对齐（`LazyVGrid` + `GridItem(alignment: .top)`），单元格为「缩略图 + 两行文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。**1.0.9 起缩略图展示框高度固定**（`TileAspect.box = 0.87`，即宽:高 ≈ 1:1.15，照片/视频/文件夹/其它文件共用同一个框）；**1.0.10 起框内不再铺灰底**——有图时只在图片自身范围内画圆角，空格子是页面底色；图片 `.scaledToFit()` 完整显示后**在框内居中**（横屏上下留白、竖屏左右留白都均匀），播放角标跟着图片左下角走。`FileNameLabel` 固定两行高度，所以同一行三列的图片顶端成一条线、下面的文件名/大小/日期也齐平。1.0.6 的 `.scaledToFill` 裁切、1.0.8 的按真实比例撑格子均已废弃。
   - ⚠️ `LazyVGrid` 的 `alignment` 参数是 **`HorizontalAlignment`**（不是 `VerticalAlignment`），传 `.top` 编译不过；行内垂直对齐要靠 `GridItem(alignment: .top)` 或单元格内部的 `frame(alignment:)`。
 - **缩略图**（1.0.2 重写，1.0.6 修正读取，1.0.7 换镜像实现）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；**图片和视频共用一道有序闸门（`OrderedLimiter(limit: 1, settleMilliseconds: 250)`，一次只跑一个，按格子序号放行，1.0.11 起）**，所以缩略图严格按「左上→右下」依次出现；1.0.14 起闸门**空闲后先聚集 250 ms 再挑最小序号**（否则「谁先跑到闸门」取决于 SwiftUI 起 `.task` 的顺序，会先冒出一张靠后的图）；**图片一律整份读满再解码**（分块 8 MB，读不满就放弃、绝不拿残缺数据解码；上限 160 MB，超过 24 MB 的改为边读边落临时文件、让 ImageIO 从文件解码，避免「几十兆 Data + 几十兆位图」同时占内存）；**视频封面一律走「迷你镜像」**：先用 `MP4Inspector` 摸清盒子结构（moov/mdat/moof 位置、首个视频样本落点、编码 fourcc），**普通 MP4** 取文件头 12→24→40 MB（按首帧落点可自动加大）+ 末尾接 moov，并把 mdat 声明长度改成实际字节数；**分片 MP4**（moof+mdat）切在**完整 fragment 边界**上、一个字节都不截断；抽帧本身**先 `AVAssetReader` 顺着样本读第一帧**（不 seek，和播放同一条路），失败才退回 `AVAssetImageGenerator` 取最靠前的关键帧。见第 7 节 11/15/18。**1.0.13 起按文件大小分流**：≤ 64 MB 走本地镜像（整份读进来、不截断），> 64 MB 直接走 `smbstream://`，并**优先用播放器管线取帧**（`AVPlayer` + `AVPlayerItemVideoOutput`，与 App 里播放完全同一条路），失败才退回 `AVAssetReader` / `AVAssetImageGenerator`—— 因为截断的镜像会让 `moov` 里的样本偏移越界，AVFoundation 一律判损坏（`-11821`）；失败进 180 秒负缓存并记录原因（设置页可见）；视图划走即取消传输。
@@ -59,6 +59,7 @@ Sources/
   Models/SMBServer.swift        服务器配置模型 + 地址归一化（粘贴 smb:// 也能识别）
   Models/FileItem.swift         SMB 目录项解析、MediaKind 判定（按扩展名）
   Models/PreviewRequests.swift  预览页的跳转参数
+  Models/PlayerGestureSettings.swift 播放器手势配置（UserDefaults，播放器与设置页共用）
   Services/SMBConnection.swift  ★actor，AMSMB2 的唯一直连封装
   Services/SMBAssetLoader.swift ★AVPlayer 的 SMB 区间读取代理（边下边播核心）
   Services/ThumbnailStore.swift 缩略图生成 + 双层缓存
@@ -68,6 +69,7 @@ Sources/
   Services/AsyncLimiter.swift   async 信号量，限并发
   ViewModels/BrowserModel.swift 目录列举、排序、加载状态
   Views/*.swift                 服务器列表/编辑、浏览、看图、播放、设置
+  Views/Components/PlayerGestureLayer.swift UIKit 手势层（单击/双击/拖动/长按/捏合 → 事件）
   Views/Components/MediaTiles.swift 网格/列表单元格 + FileNameLabel（中间省略）/ TileCaption
   Services/VideoThumbnailMirror.swift 大文件视频封面的稀疏镜像抽帧（moov + 关键帧）
   Utilities/Formatters.swift     字节、时间（短日期 yyyy/MM/dd）格式化
@@ -291,6 +293,28 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
      连续滚动时（两次请求间隔 < 400 ms）视为同一批，不重复等待。
    - 代码位置：`Sources/Services/AsyncLimiter.swift`；调用点 `ThumbnailStore.displayLimiter`。
 
+21. **✅ 1.0.15 新增：播放器手势 + 手势自定义**
+   - 结构：`PlayerGestureLayer`（`UIViewRepresentable` + `UITap×2 / UIPan / UILongPress / UIPinch`）
+     只负责把识别结果翻译成 `PlayerGestureEvent`；`VideoPlayerView` 里的 `handle(_:)` 决定动作；
+     `PlayerGestureSettings` 存用户选择，播放器和设置页读同一份，改完立刻生效。
+   - 关键约束（改这里前必看）：
+     - **单击必须 `singleTap.require(toFail: doubleTap)`**，否则每次双击都会先闪一下控制条。
+     - **手势层必须放在控件下面**（ZStack 顺序：画面 → 亮度遮罩 → 手势层 → HUD → 控件），
+       否则按钮和进度条点不动；遮罩与 HUD 都要 `allowsHitTesting(false)`。
+     - **拖动方向在首次位移 > 12pt 时锁定**（横向→进度、纵向→亮度/音量），不做这种锁定的话
+       斜着拖会同时改两个值。
+     - **拖进度过程中不 seek**，只在 `.ended` 落一次；`model.isSeeking` 在拖动期间为 true，
+       用来挡住 0.25 秒的时间回调，否则 HUD 会被真实进度抢回去。
+     - **亮度 = 一层黑色 `Color.black.opacity(dimLevel)`**（0~0.85），不改系统亮度：
+       不需要权限、退出即恢复、不会影响用户其它 App；代价是不能调得比原始更亮。
+     - **音量直接写 `player.volume`**（0~1），不接管系统音量、不弹 HUD。
+     - **长按加速**要记录「按住前是否在播」，松手后回到原状态（`wasPlayingBeforeHold`）；
+       直接把 `player.rate` 设为 1 会让暂停的片子莫名其妙开始播。
+     - **捏合缩放**给承载 `AVPlayerLayer` 的 view 套 `CGAffineTransform`，范围 1~4 倍，
+       窗口外自然被屏幕裁掉；退出播放页 `@State` 归零，不会带到下一个视频。
+   - 已知取舍：拖动进度 HUD 只显示「目标时间」，没有缩略图预览（SMB 上逐帧预览太重，
+     以后要用 1.0.13 的 `VideoFrameDecoder` 做「每 5% 抽一帧」的预览条）。
+
 ## 8. 约定（改代码前先看）
 
 - **不要提交 `SMBViewer.xcodeproj`**：改工程必须改 `project.yml`。
@@ -333,6 +357,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 | 1.0.12 | 2026-10-31 | 视频封面抽帧改为「按结构装配镜像 + 顺序解码」：新增 `MP4Inspector` 解析盒子/轨道/首帧落点，分片 MP4 切在完整 fragment 边界不再截断、普通 MP4 按首帧位置决定镜像长度；抽帧先 `AVAssetReader` 顺读第一帧、失败再退回 `AVAssetImageGenerator`；失败诊断附带结构摘要（盒子布局 + 编码 + 首帧落点）；诊断保留条数 5→8 |
 | 1.0.13 | 2026-10-31 | 视频封面按大小分流：≤64MB 走本地镜像、>64MB 走 `smbstream://` + `AVAssetReader` 顺序解码（截断镜像会让样本偏移越界→-11821，大文件镜像方案废弃）；抽帧逻辑统一到 `VideoFrameDecoder`；诊断拆成「结构 / 失败」两条短句；大图上限 64→160MB、>24MB 走临时文件解码，失败原因全部落诊断 |
 | 1.0.14 | 2026-10-31 | 大文件视频封面改用**播放器管线**取帧（`AVPlayer` + `AVPlayerItemVideoOutput`，与播放同一条路），修掉 `smbstream://` 上 `AVAssetReader`/`AVAssetImageGenerator` 一律 `-11821` 的问题；`OrderedLimiter` 改为**空闲后先聚集 250 ms 再挑最小序号**，修掉「先冒出一张靠后的缩略图」；诊断按「播放器 / 顺序解码 / 按时间取帧」逐项记录失败原因 |
+| 1.0.15 | 2026-11-01 | 播放器新增**可自定义手势**：单击显隐控件、双击（两侧快退/快进 + 中间播放暂停，可改为播放暂停/单向/关闭）、左右拖动拖进度（松手才 seek）、上下拖动（左亮度右音量，可改为纯音量/纯亮度）、长按 1.5×/2×/3× 倍速（松手恢复）、双指捏合缩放 1~4 倍；新增 `PlayerGestureLayer`、`PlayerGestureSettings`，设置页加「播放手势」分组与一键恢复默认 |
 | 1.0.10 | 2026-10-31 | 网格去掉灰底：有图时只画图片本身（圆角裁在图上），无图才铺灰块；图片在展示框内居中（横屏上下、竖屏左右留白均匀），播放角标改挂到图片左下角；视频封面镜像的头部长度改为 12→24→40 MB 逐级重试（修复单个 GOP 大于 12 MB 时抽帧失败），并把 AVFoundation 真实报错写进设置页诊断 |
 | 1.0.9 | 2026-10-31 | 网格改为固定展示框（`TileAspect.box` 宽:高 ≈ 1:1.15）：缩略图完整显示并贴框顶部，横屏图下方留白、竖屏图不再被撑成过高的竖条，文件名固定两行高度，同一行三列顶端与文字行全部齐平；删除 1.0.8 的 `onAspectChange` / `aspects` 真实比例管线 |
 | 1.0.8 | 2026-10-31 | 缩略图网格改为按真实宽高比显示：去掉写死的照片 3:4 / 视频 16:9，`ThumbnailImage` 加载后用 `onAspectChange` 回传真实比例、`BrowserView` 存 `aspects` 再喂 `.aspectRatio`，竖屏撑竖条、横屏撑横条，同一行顶部对齐、底部随内容错落；文件名/大小/日期字号微调（1.0.9 已废弃该方案） |

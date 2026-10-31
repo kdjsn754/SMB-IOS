@@ -5,6 +5,7 @@ struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
     @ObservedObject private var cache = CacheManager.shared
     @ObservedObject private var diagnostics = ThumbnailDiagnostics.shared
+    @ObservedObject private var gestures = PlayerGestureSettings.shared
 
     @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.system.rawValue
     @AppStorage(SettingsKey.cacheLimitMB) private var cacheLimit: Int = 500
@@ -64,6 +65,69 @@ struct SettingsView: View {
                     Text("缩略图")
                 } footer: {
                     Text("只有出现在屏幕上的图片才会去读取，划走时会立刻中断传输。图片缩略图需要整份读取原图才能正确解码；视频封面只读文件头和索引（约 12 MB），不会下载整部影片。关闭后列表只显示图标，可以明显减少流量。")
+                }
+
+                Section {
+                    Toggle("启用手势控制", isOn: $gestures.isEnabled)
+
+                    Picker("双击画面", selection: $gestures.doubleTap) {
+                        ForEach(DoubleTapAction.allCases) { action in
+                            Text(action.title).tag(action)
+                        }
+                    }
+                    .disabled(!gestures.isEnabled)
+
+                    Picker("快进 / 快退跨度", selection: $gestures.seekStep) {
+                        ForEach(PlayerGestureSettings.seekStepChoices, id: \.self) { step in
+                            Text("\(Int(step)) 秒").tag(step)
+                        }
+                    }
+                    .disabled(!gestures.isEnabled || gestures.doubleTap == .none)
+
+                    Picker("左右拖动", selection: $gestures.horizontal) {
+                        ForEach(HorizontalDragAction.allCases) { action in
+                            Text(action.title).tag(action)
+                        }
+                    }
+                    .disabled(!gestures.isEnabled)
+
+                    Picker("上下拖动", selection: $gestures.vertical) {
+                        ForEach(VerticalDragAction.allCases) { action in
+                            Text(action.title).tag(action)
+                        }
+                    }
+                    .disabled(!gestures.isEnabled)
+
+                    Picker("长按画面", selection: $gestures.longPress) {
+                        ForEach(LongPressAction.allCases) { action in
+                            Text(action.title).tag(action)
+                        }
+                    }
+                    .disabled(!gestures.isEnabled)
+
+                    Picker("双指捏合", selection: $gestures.pinch) {
+                        ForEach(PinchAction.allCases) { action in
+                            Text(action.title).tag(action)
+                        }
+                    }
+                    .disabled(!gestures.isEnabled)
+
+                    Button {
+                        gestures.resetToDefaults()
+                        showToast("手势设置已恢复默认")
+                    } label: {
+                        Text("恢复默认手势")
+                    }
+                } header: {
+                    Text("播放手势")
+                } footer: {
+                    Text("""
+                    单击画面：显示 / 隐藏控件（始终有效）。
+                    \(gestures.doubleTap.detail)。
+                    左右拖动：拖动时只预览目标时间，松手才真正跳转（远端流每帧都跳会卡）。
+                    长按：按住期间倍速播放，松手恢复原速率。
+                    双指捏合：放大画面，最大 4 倍；菜单里可还原。
+                    """)
                 }
 
                 Section {
