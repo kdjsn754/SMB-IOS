@@ -88,9 +88,10 @@ final class SMBAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
                 Self.fail(request, SMBFailure.operation("已达到本次读取上限"))
                 return
             }
-            // 单次响应也设上限：避免「读到文件尾」这类请求一口气吃掉整个额度，
-            // 导致后面真正需要的索引 / 关键帧数据没有额度可用。
-            wanted = min(wanted, min(remaining, 4 * 1024 * 1024))
+            // 只受总额度约束，不再把单次响应砍到 4MB。
+            // 大文件的 moov 索引本身就有十几兆，被砍断后 AVFoundation 解析失败，
+            // 表现就是「1GB 以上的 MP4 出不来封面」。
+            wanted = min(wanted, remaining)
         }
         wanted = min(wanted, fileSize - offset)
         guard wanted > 0 else {

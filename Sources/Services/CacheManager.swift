@@ -42,9 +42,13 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
 
     // MARK: - 路径
 
+    /// 缩略图生成逻辑变更时递增，让旧的（错误的）缩略图缓存自动失效
+    private static let thumbnailVersion = 2
+
     func thumbnailURL(serverID: UUID, item: FileItem) -> URL {
         createDirectories()
-        return thumbnailDirectory.appendingPathComponent(Self.fileBaseName(serverID: serverID, item: item) + ".jpg")
+        let base = Self.fileBaseName(serverID: serverID, item: item, salt: "thumb-v\(Self.thumbnailVersion)")
+        return thumbnailDirectory.appendingPathComponent(base + ".jpg")
     }
 
     func mediaURL(serverID: UUID, item: FileItem, suffix: String) -> URL {
@@ -53,9 +57,9 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
         return mediaDirectory.appendingPathComponent(Self.fileBaseName(serverID: serverID, item: item) + "." + ext)
     }
 
-    private static func fileBaseName(serverID: UUID, item: FileItem) -> String {
+    private static func fileBaseName(serverID: UUID, item: FileItem, salt: String = "") -> String {
         let stamp = Int64(item.modified?.timeIntervalSince1970 ?? 0)
-        let raw = "\(serverID.uuidString)|\(item.path)|\(item.size)|\(stamp)"
+        let raw = "\(salt)|\(serverID.uuidString)|\(item.path)|\(item.size)|\(stamp)"
         let digest = SHA256.hash(data: Data(raw.utf8))
         return digest.map { String(format: "%02x", Int($0)) }.joined()
     }

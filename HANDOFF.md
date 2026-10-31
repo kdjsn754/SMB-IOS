@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.2`（build 3），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0、1.0.1 均已验证）；1.0.2 改动了缩略图链路，push 后需确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
+| 版本 | `1.0.3`（build 4），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 / 1.0.1 / 1.0.2 均已验证）；1.0.3 改了图片解码与视频读取上限，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -34,7 +34,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），**已 vendor 到 `Packages/AMSMB2` 并改成静态链接**（见第 7 节 1.0.1 修复）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，升级上游时要重点核这几个签名。
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
-- **缩略图**（1.0.2 重写，见第 7 节 7）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3、视频封面并发 1 各自独立闸门；每张图读取有字节上限（≤16 MB），视频封面额度 10 MB；失败进 180 秒负缓存；视图划走即取消传输。
+- **缩略图**（1.0.2 重写，见第 7 节 7）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3、视频封面并发 1 各自独立闸门；每张图读取有字节上限（≤16 MB，BMP/TIFF 必须整份读取）；视频封面额度 32 MB；失败进 180 秒负缓存；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
 - **主题**：`@AppStorage` + `preferredColorScheme`，三档（跟随系统/浅色/深色）。
@@ -134,6 +134,15 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
    - 修复：`ThumbnailStore` 整体重写（任务去重 + 等待者计数 + 取消传播 + 失败负缓存 + 图片/视频分闸门）；`SMBAssetLoader` 加 `ByteBudget` / `CancellationBox`；`SMBConnection.read` 用 AMSMB2 的 progress 回调实现真正的传输中止（取消不重建会话）；看图页只加载当前页；`CacheManager` 改为 `noteWrite(bytes:)` 累加 + 20 秒节流，目录只建一次。
    - 新增设置：「加载图片缩略图」「加载视频封面」两个开关（关掉视频封面可省掉绝大部分流量），以及「重新尝试加载失败的缩略图」。
 
+8. **✅ 已修（1.0.3）：BMP 缩略图全黑、1GB 以上 MP4 出不来封面**
+   - 现象 A：目录里的 `.bmp` 缩略图全是纯黑方块（不是占位图标，说明「解码成功但画面全黑」）。
+   - 现象 B：几百兆的 MP4 有封面，1GB 以上的 MP4 一律没有封面。
+   - 根因 A：BMP/TIFF 是无压缩/分块存储，必须整份数据才能解码。旧逻辑按 1MB→4MB→16MB 分阶段截断读取，ImageIO 拿到残缺数据**不报错**，而是返回一张主体全黑的图，于是被当成成功结果写进了磁盘缓存。
+   - 根因 B：`SMBAssetLoader` 把单次响应砍到 4MB（`min(remaining, 4MB)`），而 1GB 以上视频的 `moov` 索引本身就有十几兆，被砍断后 AVFoundation 解析失败；额度上限 10MB 也不够。
+   - 修复 A：`ImageDownsampler.downsample` 增加「完整解码再缩放」兜底（用 `.copy` 混合模式写进无 alpha 的上下文，规避 32 位 BMP 的 alpha=0 变全透明）；`ThumbnailStore` 对 `bmp/dib/tif/tiff` 走完整读取路径（分块 8MB，上限 64MB）。
+   - 修复 B：去掉 4MB 单次响应限制，只受总额度约束；视频封面额度 10MB → 32MB。
+   - 缓存：`CacheManager.thumbnailVersion` 递增到 2，旧的全黑缩略图自动失效（旧文件变成孤儿，会被缓存上限清理掉）。
+
 ## 8. 约定（改代码前先看）
 
 - **不要提交 `SMBViewer.xcodeproj`**：改工程必须改 `project.yml`。
@@ -172,6 +181,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.0.3 | 2026-10-31 | 修复 BMP/TIFF 缩略图全黑（改为整份读取 + 完整解码兜底）；修复 1GB 以上 MP4 无封面（去掉 4MB 单次响应限制、视频额度 10MB→32MB）；缩略图缓存版本号递增以失效旧的黑图 |
 | 1.0.2 | 2026-10-31 | 重写缩略图加载链路：任务去重/取消传播/失败负缓存/图片与视频独立并发闸门；视频封面加 10 MB 字节预算，不再整部下载；`SMBConnection.read` 支持传输中止；看图页只加载当前页；缓存自动清理改为 20 秒节流；设置页新增缩略图开关 |
 | 1.0.1 | 2026-10-31 | 修复 iOS 27 上轻松签/ESign 重签后启动闪退：AMSMB2 由 SPM 动态框架改为 vendored 静态链接（`Packages/AMSMB2`），产物不再含 `Frameworks/`；CI 加静态链接断言与包结构自检 |
 | 1.0.0 | 2026-10-31 | 首个版本：SMB 浏览、看图（缩放/滑动）、视频边下边播 + 下载兜底、缩略图双层缓存、深浅主题、缓存上限与自动清理、多服务器管理；CI 用 `xcode-27` 出未签名 IPA |
