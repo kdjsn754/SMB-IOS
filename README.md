@@ -47,6 +47,7 @@
 │   ├── Views/
 │   ├── Utilities/
 │   └── Resources/Assets.xcassets    # AppIcon / AccentColor
+├── Packages/AMSMB2/               # vendored 的 AMSMB2 + libsmb2（改成静态链接）
 ├── scripts/
 │   ├── build-ipa.sh                 # macOS 本地构建未签名 IPA
 │   └── make_icon.py                 # 生成 1024 图标（可选）
@@ -64,7 +65,7 @@
 3. 构建完成后，在该次运行页面底部 **Artifacts** 下载 `SMBViewer-unsigned-ipa`，解压得到 `SMBViewer-unsigned.ipa`。
 4. 如果推送 `v1.0.0` 这类 tag，IPA 会自动附加到对应的 Release 里。
 
-> 云端使用 **`xcode-27` 运行器**（macOS 27 + Xcode 27 + iOS 27 SDK），首次构建需要联网拉取 [AMSMB2](https://github.com/amosavian/AMSMB2) 依赖，约 6～12 分钟。
+> 云端使用 **`xcode-27` 运行器**（macOS 27 + Xcode 27 + iOS 27 SDK）。依赖已 vendor 进仓库，构建不需要联网拉包，约 6～12 分钟。
 >
 > 想换版本改 `.github/workflows/build-ipa.yml` 顶部的两处即可：`runs-on: xcode-27` → `macos-26` / `macos-15`，以及 `env.XCODE_VERSION: "27"` → 对应主版本号（工作流会在镜像里自动挑最新的正式版 Xcode，找不到 beta 时才退回 beta）。
 
@@ -97,7 +98,7 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 | TrollStore | 免签名安装（仅支持的 iOS 版本），最省事 |
 | 企业证书 / 个人开发者证书 | 用 `codesign` 手动重签整个 IPA 后再安装 |
 
-重签名工具会自动处理内嵌的 `AMSMB2.framework`。系统要求 **iOS 16.0 及以上**。
+App 只有一个可执行文件、没有内嵌动态框架（AMSMB2 已静态链接），所以重签工具不会漏签框架。系统要求 **iOS 16.0 及以上**。
 
 首次连接局域网地址时，系统会弹出「本地网络」权限，必须点允许，否则连不上 NAS。
 
@@ -144,7 +145,7 @@ iOS 的 AVFoundation 不负责这些容器的解码，流式播放会失败。�
 
 ## 技术说明
 
-- **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2) 4.x（封装 libsmb2），只用到 `connectShare` / `contentsOfDirectory` / `contents(range:)` / `downloadItem`。
+- **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），已 vendor 到 `Packages/AMSMB2` 并从 SPM 的 `.dynamic` 改成 **`.static`**，只用到 `connectShare` / `contentsOfDirectory` / `contents(range:)` / `downloadItem`。静态化的原因：动态框架会以 `Frameworks/AMSMB2.framework` 进包，用轻松签 / ESign 这类工具重签时常被漏签，iOS 上点开就闪退。
 - **视频流式播放**：自定义 scheme `smbstream://`，`AVAssetResourceLoaderDelegate` 把 AVFoundation 的字节请求翻译成 SMB 的区间读取（每次 512 KB），因此可以边下边播、可拖动进度条。
 - **缩略图**：图片用 `ImageIO` 降采样到 480px，避免整张大图进内存；视频用 `AVAssetImageGenerator` 走同一套流式读取。
 - **缓存**：全部落在 `Library/Caches/SMBViewer/`（缩略图与媒体两个子目录），文件名是 `服务器ID + 路径 + 大小 + 修改时间` 的 SHA256，服务器上文件变了会自动失效。
@@ -155,4 +156,6 @@ iOS 的 AVFoundation 不负责这些容器的解码，流式播放会失败。�
 
 ## 许可
 
-本项目代码可自由使用。依赖的 AMSMB2 为 MIT，但其静态链接的 libsmb2 为 **LGPL v2.1**，因此整体按 LGPL v2.1 对待；自行分发（尤其上架 App Store）时请遵守 LGPL 的动态链接要求。个人自用安装不受影响。
+本项目代码可自由使用。依赖的 AMSMB2 为 MIT，但其内置的 libsmb2 为 **LGPL v2.1**，因此整体按 LGPL v2.1 对待。
+
+注意：本工程现在是**静态链接** libsmb2，若你要对外分发二进制，LGPL v2.1 要求同时提供可重链接的目标文件（或改为动态链接）；个人自用安装、自己签名自己装不受此约束。

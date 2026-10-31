@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.0`（build 1），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 已在 GitHub Actions `xcode-27` 运行器上**全流程跑通**（检出→选 Xcode→XcodeGen→解析依赖→archive→打包→上传，全部成功） |
+| 版本 | `1.0.1`（build 2），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 验证过）；1.0.1 改成静态链接后**尚未跑过 CI**，push 后需确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -31,7 +31,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 ## 3. 技术栈与关键决策
 
 - **UI**：SwiftUI，`NavigationStack` + `@MainActor` 观察模型，无第三方 UI 库。
-- **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2) 4.x（SPM，封装 libsmb2）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，所以升级 AMSMB2 大版本时要重点核这几个签名。
+- **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），**已 vendor 到 `Packages/AMSMB2` 并改成静态链接**（见第 7 节 1.0.1 修复）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，升级上游时要重点核这几个签名。
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 512 KB）。
 - **缩略图**：图片走 ImageIO 降采样（480px），视频用 `AVAssetImageGenerator` 取第 1 秒；`NSCache` + 磁盘双层；`AsyncLimiter` 限 4 并发，避免打满 NAS。
@@ -46,6 +46,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 ```
 project.yml                     工程定义（依赖、Build Settings、scheme）★改配置先看这里
 Config/Info.plist               权限文案、URL scheme、文件共享开关
+Packages/AMSMB2/                 vendored 依赖（静态）：AMSMB2/*.swift + Dependencies/libsmb2/{lib,include}
 Sources/
   App/SMBViewerApp.swift        @main，注入 AppModel / 缓存
   App/RootView.swift            TabView：服务器列表 + 设置
@@ -102,7 +103,7 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 
 ## 6. 安装（给用户的话术）
 
-未签名 IPA 必须重签：Sideloadly / AltStore / 爱思助手（个人 Apple ID，7 天重签一次）、TrollStore（免签，限支持版本）、或自有证书 `codesign` 全量重签。重签工具会自动处理内嵌的 `AMSMB2.framework`。首次连接局域网需允许「本地网络」权限。
+未签名 IPA 必须重签：Sideloadly / AltStore / 爱思助手（个人 Apple ID，7 天重签一次）、TrollStore（免签，限支持版本）、或自有证书 `codesign` 全量重签。1.0.1 起 App 里没有内嵌动态框架（AMSMB2 静态链接），重签工具不会漏签框架。首次连接局域网需允许「本地网络」权限。
 
 ---
 
@@ -113,15 +114,12 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 3. **单共享**：一台服务器只连一个共享名，没有「先列共享再选」的流程。
 4. **无真机回归**：功能正确性依赖代码审查，用户反馈时优先怀疑 `SMBConnection` 的路径拼接与 `SMBAssetLoader` 的 range 换算。
 5. **缩略图首次慢**：视频要读文件头（`moov` 在尾部时还要读末尾），属预期行为。
-6. **🔴 排查中：iOS 27 装机后打开闪退（2026-10-31 用户反馈）**
-   - 已知：构建成功、安装成功，点图标后立即退回桌面。
-   - 代码侧已排查：启动路径只渲染 `ServerListView`（空态）+ `SettingsView`，无网络、无强制解包、无 `fatalError`；SwiftUI `App` 生命周期在 iOS 27 的「必须采用 UIScene」新规里是**豁免**的（该规定只针对 UIKit app-based 生命周期），所以不太像代码问题。
-   - **最可能原因**：AMSMB2 的 SPM 产物是 `type: .dynamic`，IPA 里带 `Frameworks/AMSMB2.framework`；若重签工具只签主程序没签嵌套框架，iOS 会在启动 dyld 阶段直接杀掉进程 → 表现为闪退。
-   - 判别方法：看崩溃日志里是 `Library not loaded: @rpath/AMSMB2.framework/AMSMB2` / `CODESIGNING`（签名/框架问题），还是 `EXC_BAD_ACCESS` + SwiftUI 栈（代码问题）。
-   - CI 已加「自检：包结构与依赖」步骤，会打印 `.app` 结构、`Frameworks` 内容、`LC_RPATH`、签名状态、关键 Info.plist 键。
-   - **根治方案（若确认是框架签名）**：把 `Packages/AMSMB2` vendor 进仓库并把 product 改成 `.static`，IPA 就不再包含任何动态框架，任何重签工具都不会漏签。
-
----
+6. **✅ 已修（1.0.1）：iOS 27 上用轻松签 / ESign 安装后点开闪退**
+   - 现象：构建成功、安装成功，点图标后立即退回桌面。
+   - 根因：AMSMB2 的 SPM 产物声明了 `type: .dynamic`，IPA 里带 `Frameworks/AMSMB2.framework`；轻松签 / ESign 这类工具默认只签主程序、**不签嵌套框架**，iOS 启动时 dyld 校验失败 → 直接杀进程。
+   - 修复：把 AMSMB2 连同 libsmb2 vendor 到 `Packages/AMSMB2`，`Package.swift` 里 product 改为 `.static`，并去掉 swift-system / swift-atomics 外部依赖；`project.yml` 的 `packages` 改为本地 `path`。产物里只剩一个可执行文件。
+   - 防回归：CI「自检：包结构与依赖」步骤里加了硬断言——一旦 `Frameworks/AMSMB2.framework` 再次出现就 `::error::` 失败。
+   - 代码侧已排查：启动路径只渲染 `ServerListView`（空态）+ `SettingsView`，无网络、无强制解包、无 `fatalError`；SwiftUI `App` 生命周期在 iOS 27「必须采用 UIScene」新规里是**豁免**的（该规定只针对 UIKit app-based 生命周期）。
 
 ## 8. 约定（改代码前先看）
 
@@ -131,6 +129,19 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 - **新增文件无需手动加进工程**：`project.yml` 里 `sources: Sources` 是整目录递归。
 - **CI 步骤名用中文**；`uses:` 保持官方 action 原样。
 - 提交信息沿用 `feat:` / `fix:` / `ci:` / `chore:` 前缀。
+- **不要**把 `Packages/AMSMB2/Package.swift` 的 `type: .static` 改回 `.dynamic`，也不要改回远程 URL 依赖，否则闪退问题会复发（CI 有断言兜底）。
+
+### 依赖升级（AMSMB2）
+
+```bash
+git clone --recurse-submodules https://github.com/amosavian/AMSMB2.git /tmp/amsmb2
+rm -rf Packages/AMSMB2/AMSMB2 Packages/AMSMB2/Dependencies/libsmb2/lib Packages/AMSMB2/Dependencies/libsmb2/include
+cp -r /tmp/amsmb2/AMSMB2/*.swift Packages/AMSMB2/AMSMB2/
+cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/include Packages/AMSMB2/Dependencies/libsmb2/
+# 手动核对 Package.swift：保持 type: .static、保持 exclude 列表与上游一致
+```
+
+升级后重点回归：`connectShare`、`contentsOfDirectory`、`contents(atPath:range:)`、`downloadItem` 这 4 个 API。
 
 ---
 
@@ -140,6 +151,7 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.0.1 | 2026-10-31 | 修复 iOS 27 上轻松签/ESign 重签后启动闪退：AMSMB2 由 SPM 动态框架改为 vendored 静态链接（`Packages/AMSMB2`），产物不再含 `Frameworks/`；CI 加静态链接断言与包结构自检 |
 | 1.0.0 | 2026-10-31 | 首个版本：SMB 浏览、看图（缩放/滑动）、视频边下边播 + 下载兜底、缩略图双层缓存、深浅主题、缓存上限与自动清理、多服务器管理；CI 用 `xcode-27` 出未签名 IPA |
 
 ---

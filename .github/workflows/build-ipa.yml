@@ -157,7 +157,16 @@ jobs:
               otool -L "$fw/$(basename "$fw" .framework)" | head -5 || true
             done
           else
-            echo "没有 Frameworks 目录（SPM 可能被静态链接）"
+            echo "没有 Frameworks 目录 —— 静态链接生效 ✅"
+          fi
+          echo
+          # 关键断言：AMSMB2 必须被静态链接进来，否则自签工具会漏签导致启动闪退
+          if [ -d "$APP/Frameworks/AMSMB2.framework" ]; then
+            echo "::error::AMSMB2 仍然是动态框架（IPA 里有 Frameworks/AMSMB2.framework），自签后会漏签闪退。请检查 Packages/AMSMB2/Package.swift 的 product type 是否为 .static"
+            exit 1
+          fi
+          if ! otool -L "$APP/SMBViewer" | grep -q "AMSMB2.framework"; then
+            echo "AMSMB2.framework 未作为动态库出现在主程序依赖里 ✅"
           fi
           echo
           echo "=== LC_RPATH / 依赖 ==="
