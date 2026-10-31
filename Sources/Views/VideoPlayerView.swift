@@ -137,6 +137,7 @@ final class VideoPlaybackModel: ObservableObject {
         guard abs(clamped - volume) > 0.0005 else { return }
         volume = clamped
         player.volume = clamped
+        player.isMuted = clamped <= 0.001
         UserDefaults.standard.set(Double(clamped), forKey: Self.volumeKey)
     }
 
@@ -242,23 +243,12 @@ private final class PlayerUIView: UIView {
         playerLayer?.backgroundColor = UIColor.black.cgColor
     }
 
-    /// 双指捏合缩放：缩放 **AVPlayerLayer 自己**，而不是给 view 套 transform。
-    /// 套 transform 会和 SwiftUI 的布局打架（每次 layout 都可能被重置），
-    /// 直接改 layer 的仿射变换既不会被布局覆盖，也不会让手势坐标跟着缩放。
-    func applyZoom(_ scale: CGFloat) {
-        let clamped = min(max(scale, 1), 4)
-        guard let layer = playerLayer else { return }
-        guard abs(layer.affineTransform().a - clamped) > 0.001 else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.setAffineTransform(CGAffineTransform(scaleX: clamped, y: clamped))
-        CATransaction.commit()
-    }
+    // 画面缩放不在这里做：直接改 AVPlayerLayer 的仿射变换会被视频层/布局刷掉
+    // （1.1.8 在真机上实测「状态变了但画面不动」），缩放统一交给 SwiftUI 的 scaleEffect。
 }
 
 private struct PlayerSurface: UIViewRepresentable {
     let player: AVPlayer
-    var zoom: CGFloat = 1
 
     func makeUIView(context: Context) -> PlayerUIView {
         let view = PlayerUIView()
@@ -270,7 +260,6 @@ private struct PlayerSurface: UIViewRepresentable {
         if uiView.player !== player {
             uiView.player = player
         }
-        uiView.applyZoom(zoom)
     }
 }
 
@@ -344,8 +333,12 @@ struct VideoPlayerView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                PlayerSurface(player: model.player, zoom: zoom)
+                // 缩放用 SwiftUI 的 scaleEffect：UIKit 层直接改 AVPlayerLayer 的
+                // affineTransform 会被视频层和布局刷掉（1.1.8 实测「缩放 1.3× 但画面不动」），
+                // SwiftUI 的渲染变换由它自己维护，改了就一定生效。
+                PlayerSurface(player: model.player)
                     .ignoresSafeArea()
+                    .scaleEffect(zoom)
 
                 // 亮度遮罩：盖住画面、但盖不到控件和 HUD
                 Color.black
@@ -625,6 +618,10 @@ struct VideoPlayerView: View {
                 .font(.caption2.monospacedDigit())
             Text("音量 \(Int((model.volume * 100).rounded()))% · 缩放 \(String(format: "%.1f", zoom))× · 亮度 \(Int(((1 - dimLevel) * 100).rounded()))%")
                 .font(.caption2.monospacedDigit())
+            // 左边是界面状态，右边是真正落到播放器/画面上的值，两者不一致就是这一层断了
+            Text("生效 player \(String(format: "%.2f", model.player.volume))\(model.player.isMuted ? " 静音" : "") · 遮罩 \(String(format: "%.2f", dimLevel)) · 画面 \(String(format: "%.2f", zoom))×")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.75))
             Text("开关：\(gestures.isEnabled ? "开" : "关") · 上下拖动：\(gestures.vertical.title)")
                 .font(.caption2)
         }

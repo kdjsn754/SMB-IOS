@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.1.8`（build 20），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.1.8 由 run **#26**（sha `f452912`）全绿产出（含「自检：包结构与依赖」） |
+| 版本 | `1.1.9`（build 21），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ⏳ 1.1.9 已推送触发 CI |
 | 产物自检 | 1.1.8：`Info.plist` = 1.1.8 / build 20、`MinimumOSVersion` 16.0、可执行文件 arm64（1.42 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:\下载\互传\SMBViewer-v1.1.8-unsigned.ipa` |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
@@ -70,6 +70,10 @@ Sources/
   ViewModels/BrowserModel.swift 目录列举、排序、加载状态
   Views/*.swift                 服务器列表/编辑、浏览、看图、播放、设置
   Views/Components/PlayerGestureSettingsForm.swift 「播放手势」表单 + 播放页「⋯ → 播放手势设置」面板（设置页与播放页共用一份）
+  Views/Components/SettingsRow.swift 设置首页行（彩色图标 + 摘要值）+ SettingsDetail 二级页外壳
+  Views/Components/ToastBanner.swift 底部轻提示（.toast($msg) 修饰器）
+  Views/Settings/*.swift         设置二级页：外观 / 播放手势 / 缩略图（含失败记录）/ 缓存 / 关于
+  Utilities/AppInfo.swift        版本号、build、最低系统（设置首页与关于页共用）
   Views/Components/MediaTiles.swift 网格/列表单元格 + FileNameLabel（中间省略）/ TileCaption
   Services/VideoThumbnailMirror.swift 大文件视频封面的稀疏镜像抽帧（moov + 关键帧）
   Utilities/Formatters.swift     字节、时间（短日期 yyyy/MM/dd）格式化
@@ -313,7 +317,6 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
      - **长按靠定时器兜**：`DragGesture` 手指不动时不再回调，按下时起一个 450 ms 的 Task，
        期间只要位移 > 12pt 就取消，避免「拖动起手先闪一下倍速」。
      - **拖动方向在首次位移 > 12pt 时锁定**（横向→进度、纵向→亮度/音量），不做这种锁定的话
-       斜着拖会同时改两个值。     - **拖动方向在首次位移 > 12pt 时锁定**（横向→进度、纵向→亮度/音量），不做这种锁定的话
        斜着拖会同时改两个值。
      - **拖进度过程中不 seek**，只在 `.ended` 落一次；`model.isSeeking` 在拖动期间为 true，
        用来挡住 0.25 秒的时间回调，否则 HUD 会被真实进度抢回去。
@@ -322,13 +325,17 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
      - **音量直接写 `player.volume`**（0~1），不接管系统音量、不弹 HUD。
      - **长按加速**要记录「按住前是否在播」，松手后回到原状态（`wasPlayingBeforeHold`）；
        直接把 `player.rate` 设为 1 会让暂停的片子莫名其妙开始播。
-     - **捏合缩放改的是 `AVPlayerLayer` 自己的仿射变换**（`layer.setAffineTransform`），1~4 倍，
-       超出部分被 `clipsToBounds` 裁掉。**不要再给 view 套 `CGAffineTransform`**（1.1.7 前是这么做的）：
-       SwiftUI 每次布局都会重新摆这个 view 的 frame，transform 容易被吃掉，表现为「捏了没反应」。
-       改 layer 既不参与布局，也不会让手势坐标跟着缩放。退出播放页 `@State` 归零，不带到下一个视频。
+     - **画面缩放用 SwiftUI 的 `.scaleEffect(zoom)`**（1.1.9 定稿），直接挂在 `PlayerSurface` 上，1~4 倍，
+       超出屏幕的部分由窗口裁掉。**不要再改 UIKit 那一层**：
+       ① 给承载 `AVPlayerLayer` 的 view 套 `CGAffineTransform`（1.1.7）→ SwiftUI 布局把 frame 重摆，transform 被吃掉；
+       ② 给 `AVPlayerLayer` 自己 `setAffineTransform`（1.1.8）→ 真机实测「状态显示 1.3×，画面一动不动」，
+          视频层会覆盖掉外来的仿射变换。
+       只有 SwiftUI 自己维护的渲染变换是可靠的。退出播放页 `@State` 归零，不带到下一个视频。
      - **排障开关**：设置 → 播放手势 → 「显示手势诊断」，播放页左上角实时显示
-       「收到多少次手势 / 最近一个是什么 / 音量 / 缩放 / 亮度 / 开关状态」，
-       手势没反应时先看这里：显示"还没收到任何手势"＝识别没挂上或视图没命中；有事件但数值不动＝响应逻辑问题。
+       「收到多少次手势 / 最近一个是什么 / 音量 / 缩放 / 亮度 / 开关状态」，以及一行「生效」——
+       左边是界面状态，右边是真正落到 `player.volume`、遮罩不透明度、`scaleEffect` 上的值。
+       手势没反应时先看这里：显示"还没收到任何手势"＝识别没挂上或视图没命中；
+       有事件但「生效」那行不动＝响应逻辑断了；两者都在动＝画面/声音层的锅（1.1.8 就是栽在这里）。
    - 已知取舍：拖动进度 HUD 只显示「目标时间」，没有缩略图预览（SMB 上逐帧预览太重，
      以后要用 1.0.13 的 `VideoFrameDecoder` 做「每 5% 抽一帧」的预览条）。
 
@@ -382,6 +389,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.1.9 | 2026-11-01 | **修「手势数值在变、画面/声音不动」**：画面缩放从「改 `AVPlayerLayer` 仿射变换」改为 SwiftUI `.scaleEffect(zoom)`（视频层会覆盖外来变换，1.1.8 实测无效）；音量在 0% 时同时 `isMuted`，保证 0 真的静音；诊断浮层新增「生效」一行，直接打 `player.volume` / 遮罩 / 画面缩放。**设置页改为「分类入口 + 二级页」**：首页只留外观 / 播放手势 / 缩略图 / 缓存 / 关于五个带摘要值的行，点进去才是详细设置；失败记录单独一页；新增 `AppInfo` 统一版本信息 |
 | 1.1.8 | 2026-11-01 | **手势彻底换实现**：删掉 UIKit 手势层（`PlayerGestureLayer`/`PlayerGestureCoordinator`），改成「0.1% 白矩形 + `DragGesture(minimumDistance:0)` + `MagnificationGesture`」，单击/双击/拖动/长按全部手写判定（之前透明视图当手势层在真机上完全收不到触摸）；右上角三个按钮收回「⋯」菜单（手势设置进菜单，音量/缩放入口移除）；**设置页重做**：分「外观 / 播放手势 / 缩略图 / 缓存 / 关于」五组，删掉大段小字说明与「使用说明」区块，失败记录改成可折叠 |
 | 1.1.7 | 2026-11-01 | **修播放手势完全没反应**：手势识别器从「SwiftUI 透明覆盖层」改挂到承载 `AVPlayerLayer` 的画面视图 `PlayerUIView` 本身（不再依赖透明层能否命中），`isMultipleTouchEnabled = true` 修双指捏合，位移改用父视图坐标系（放大后拖动不变迟钝）；缩放改为直接给 `AVPlayerLayer` 设仿射变换（给 view 套 transform 会被 SwiftUI 布局重置）；新增「显示手势诊断」开关，播放页左上角实时显示收到的手势与音量/缩放/亮度 |
 | 1.1.6 | 2026-11-01 | 播放页右上角新增三个入口：**音量浮层**（滑杆 + 静音/50%/100%，音量统一走 `VideoPlaybackModel.setVolume` 并持久化）、**画面缩放浮层**（1~4× 滑杆 + 快捷档位）、**播放手势设置**（弹出与设置页同一份 `PlayerGestureSettingsSections`，改完立即生效）；抽出 `PlayerGestureSettingsForm.swift` 供设置页与播放页共用；浮层打开时屏蔽播放手势、点空白收起、不参与自动隐藏 |

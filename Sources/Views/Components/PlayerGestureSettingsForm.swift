@@ -5,15 +5,18 @@ import SwiftUI
 @MainActor
 struct PlayerGestureSettingsSections: View {
     @ObservedObject private var gestures = PlayerGestureSettings.shared
+    /// 分组标题；二级页自己的导航标题已经写了「播放手势」，传 nil 就不重复显示
+    var header: String? = "播放手势"
     /// 恢复默认之后要做什么（设置页用来弹 toast，播放页可以传 nil）
     var onReset: (() -> Void)?
 
-    init(onReset: (() -> Void)? = nil) {
+    init(header: String? = "播放手势", onReset: (() -> Void)? = nil) {
+        self.header = header
         self.onReset = onReset
     }
 
     var body: some View {
-        Section("播放手势") {
+        Section {
             Toggle("启用手势", isOn: $gestures.isEnabled)
 
             Picker("双击画面", selection: $gestures.doubleTap) {
@@ -59,7 +62,13 @@ struct PlayerGestureSettingsSections: View {
             .disabled(!gestures.isEnabled)
 
             Toggle("显示手势诊断", isOn: $gestures.showDiagnostics)
+        } header: {
+            if let header {
+                Text(header)
+            }
+        }
 
+        Section {
             Button("恢复默认手势") {
                 gestures.resetToDefaults()
                 onReset?()

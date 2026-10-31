@@ -17,6 +17,17 @@ enum DoubleTapAction: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// 设置首页右侧用的极简写法
+    var shortTitle: String {
+        switch self {
+        case .sides: return "两侧快进"
+        case .playPause: return "播放 / 暂停"
+        case .forward: return "快进"
+        case .backward: return "快退"
+        case .none: return "仅单击"
+        }
+    }
+
     var title: String {
         switch self {
         case .sides: return "两侧快退/快进，中间播放暂停"
