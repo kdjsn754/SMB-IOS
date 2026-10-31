@@ -259,19 +259,10 @@ private final class PlayerUIView: UIView {
 private struct PlayerSurface: UIViewRepresentable {
     let player: AVPlayer
     var zoom: CGFloat = 1
-    var gesturesEnabled: Bool = true
-    var onEvent: @MainActor (PlayerGestureEvent) -> Void = { _ in }
-
-    func makeCoordinator() -> PlayerGestureCoordinator {
-        PlayerGestureCoordinator(onEvent: onEvent)
-    }
 
     func makeUIView(context: Context) -> PlayerUIView {
         let view = PlayerUIView()
         view.player = player
-        // 手势直接挂在画面视图上：不依赖上面那层 SwiftUI 透明视图能不能命中
-        context.coordinator.attach(to: view)
-        context.coordinator.setEnabled(gesturesEnabled)
         return view
     }
 
@@ -279,8 +270,6 @@ private struct PlayerSurface: UIViewRepresentable {
         if uiView.player !== player {
             uiView.player = player
         }
-        context.coordinator.onEvent = onEvent
-        context.coordinator.setEnabled(gesturesEnabled)
         uiView.applyZoom(zoom)
     }
 }
@@ -302,12 +291,6 @@ private enum DragMode: Equatable {
     case undecided
     case seek
     case vertical
-}
-
-/// 右上角浮层：音量 / 画面缩放
-private enum QuickPanel: Equatable {
-    case volume
-    case zoom
 }
 
 @MainActor
@@ -341,27 +324,28 @@ struct VideoPlayerView: View {
     /// 捏合期间要压掉拖动，否则缩放的同时还会冒出进度 HUD
     @State private var isPinching = false
     @State private var showGestureHelp = false
-    /// 右上角音量 / 缩放浮层
-    @State private var quickPanel: QuickPanel?
-    /// 右上角「手势」按钮弹出的设置面板
+    /// 从「⋯」菜单打开的播放手势设置面板
     @State private var showGestureSettings = false
     /// 手势诊断（设置里可开关）：看看到底有没有收到手势
     @State private var gestureEventCount = 0
     @State private var lastGestureText = "还没收到任何手势"
     @State private var lastDiagnosticAt = Date.distantPast
+    // 触摸状态（SwiftUI 手势自己维护，不再依赖 UIKit 识别器）
+    @State private var touchActive = false
+    @State private var touchMoved = false
+    @State private var didBeginPan = false
+    @State private var holdFired = false
+    @State private var holdStartTask: Task<Void, Never>?
+    @State private var singleTapTask: Task<Void, Never>?
+    @State private var lastTapDate = Date.distantPast
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                PlayerSurface(
-                    player: model.player,
-                    zoom: zoom,
-                    gesturesEnabled: gestures.isEnabled,
-                    onEvent: handle
-                )
-                .ignoresSafeArea()
+                PlayerSurface(player: model.player, zoom: zoom)
+                    .ignoresSafeArea()
 
                 // 亮度遮罩：盖住画面、但盖不到控件和 HUD
                 Color.black
@@ -369,20 +353,8 @@ struct VideoPlayerView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
 
-                // 手势挂在画面视图上；只有关掉手势时才铺一层，保证还能单击显隐控件
-                if !gestures.isEnabled {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .ignoresSafeArea()
-                        .onTapGesture { toggleChrome() }
-                }
-
-                // 右上角浮层打开时，点空白处先收起浮层（同时挡住误触播放手势）
-                if quickPanel != nil {
-                    Color.black.opacity(0.001)
-                        .ignoresSafeArea()
-                        .onTapGesture { closeQuickPanel() }
-                }
+                // 手势层放在控件下面：播放键、进度条仍然点得动，其余区域的触摸都归它
+                gestureSurface
 
                 if let hud {
                     hudView(hud)
@@ -402,14 +374,6 @@ struct VideoPlayerView: View {
                         .padding(.leading, 12)
                         .allowsHitTesting(false)
                         .transition(.opacity)
-                }
-
-                if let panel = quickPanel {
-                    quickPanelView(panel)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .padding(.top, 8)
-                        .padding(.trailing, 12)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
                 }
 
                 if let progress = model.downloadProgress {
@@ -436,56 +400,33 @@ struct VideoPlayerView: View {
                     Button("关闭") { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 12) {
-                        Button {
-                            toggleQuickPanel(.volume)
-                        } label: {
-                            Image(systemName: volumeIconName)
-                                .font(.system(size: 16, weight: .medium))
-                        }
-                        .accessibilityLabel("音量")
-
-                        Button {
-                            toggleQuickPanel(.zoom)
-                        } label: {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundStyle(zoom > 1.01 ? Color.accentColor : Color.primary)
-                        }
-                        .accessibilityLabel("画面缩放")
-
-                        Button {
-                            closeQuickPanel()
-                            showGestureSettings = true
-                        } label: {
-                            Image(systemName: "hand.draw")
-                                .font(.system(size: 16, weight: .medium))
-                        }
-                        .accessibilityLabel("播放手势设置")
-
-                        Menu {
-                            if zoom > 1.01 {
-                                Button {
-                                    setZoom(1)
-                                } label: {
-                                    Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
-                                }
-                                Divider()
-                            }
+                    Menu {
+                        if zoom > 1.01 {
                             Button {
-                                Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
+                                setZoom(1)
                             } label: {
-                                Label("下载到本地播放", systemImage: "arrow.down.circle")
+                                Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
                             }
                             Divider()
-                            Button {
-                                showGestureHelp = true
-                            } label: {
-                                Label("手势说明", systemImage: "hand.draw")
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
                         }
+                        Button {
+                            showGestureSettings = true
+                        } label: {
+                            Label("播放手势设置", systemImage: "hand.draw")
+                        }
+                        Button {
+                            showGestureHelp = true
+                        } label: {
+                            Label("手势说明", systemImage: "questionmark.circle")
+                        }
+                        Divider()
+                        Button {
+                            Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
+                        } label: {
+                            Label("下载到本地播放", systemImage: "arrow.down.circle")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
                     }
                 }
             }
@@ -506,6 +447,8 @@ struct VideoPlayerView: View {
         .onDisappear {
             hideTask?.cancel()
             hudTask?.cancel()
+            holdStartTask?.cancel()
+            singleTapTask?.cancel()
             model.stop()
         }
     }
@@ -538,64 +481,140 @@ struct VideoPlayerView: View {
 
     // MARK: - 手势
 
-    private func handle(_ event: PlayerGestureEvent) {
-        if gestures.showDiagnostics {
-            // 拖动一秒会来几十次事件，限流一下，别让排障浮层自己把画面拖卡
-            let now = Date()
-            if now.timeIntervalSince(lastDiagnosticAt) > 0.12 {
-                lastDiagnosticAt = now
-                gestureEventCount += 1
-                lastGestureText = describe(event)
-            }
+    /// 手势层：一层「几乎透明但画得出来」的矩形。
+    ///
+    /// 1.1.7 之前用的是 `Color.clear` / 透明 `UIView`，真机上一个手势都收不到——
+    /// SwiftUI 里只有**能画出像素**的视图才稳定参与命中测试，透明图层时灵时不灵。
+    /// 这里改成 `Rectangle().fill(white 0.001)` + `contentShape`，再挂 SwiftUI 原生手势：
+    /// 拖动（含单击 / 双击 / 长按）一个 `DragGesture(minimumDistance: 0)` 全包，
+    /// 捏合用 `simultaneousGesture` 并行识别。
+    private var gestureSurface: some View {
+        GeometryReader { proxy in
+            Rectangle()
+                .fill(Color.white.opacity(0.001))
+                .contentShape(Rectangle())
+                .gesture(dragGesture(size: proxy.size))
+                .simultaneousGesture(magnifyGesture)
         }
+        .ignoresSafeArea()
+    }
 
-        switch event {
-        case .singleTap(_, _):
-            toggleChrome()
-        case let .doubleTap(point, size):
-            handleDoubleTap(at: point, in: size)
-        case let .panBegan(point, size):
-            guard !isPinching else { return }
-            beginPan(at: point, in: size)
-        case let .panChanged(translation, size):
-            guard !isPinching else { return }
-            updatePan(translation, in: size)
-        case let .panEnded(translation, size):
-            guard !isPinching else { return }
-            endPan(translation, in: size)
-        case let .longPress(began):
-            handleHold(began)
-        case let .pinch(scale, ended):
-            if !ended, !isPinching {
-                isPinching = true
-                // 捏合优先：把可能已经开始的方向拖动收掉，免得一边缩放一边改进度
-                if dragMode != .undecided {
-                    model.isSeeking = false
-                    dragMode = .undecided
+    private func dragGesture(size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { value in
+                if !touchActive {
+                    beginTouch(at: value.startLocation, size: size)
+                }
+                let translation = CGSize(width: value.translation.width, height: value.translation.height)
+                if !didBeginPan, !isPinching, gestures.isEnabled,
+                   abs(translation.width) > 12 || abs(translation.height) > 12 {
+                    holdStartTask?.cancel()
+                    touchMoved = true
+                    didBeginPan = true
+                    beginPan(at: dragStartPoint, in: size)
+                }
+                if didBeginPan {
+                    updatePan(translation, in: size)
+                    logGesture("拖动中 \(Int(translation.width)),\(Int(translation.height))")
                 }
             }
-            handlePinch(scale, ended: ended)
-            if ended { isPinching = false }
+            .onEnded { value in
+                holdStartTask?.cancel()
+                let translation = CGSize(width: value.translation.width, height: value.translation.height)
+                if didBeginPan {
+                    endPan(translation, in: size)
+                } else if holdFired {
+                    handleHold(false)
+                } else {
+                    registerTap(at: value.startLocation, in: size)
+                }
+                touchActive = false
+                touchMoved = false
+                didBeginPan = false
+                holdFired = false
+                isHolding = false
+            }
+    }
+
+    /// 按下：记录起点，并起一个 0.45 秒的定时器判断长按。
+    /// `DragGesture` 手指不动时不会继续回调，长按只能靠定时器兜。
+    private func beginTouch(at point: CGPoint, size: CGSize) {
+        touchActive = true
+        touchMoved = false
+        didBeginPan = false
+        holdFired = false
+        dragStartPoint = point
+
+        holdStartTask?.cancel()
+        guard gestures.isEnabled, gestures.longPress != .none else { return }
+        holdStartTask = Task {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled, !didBeginPan, !touchMoved, !isPinching else { return }
+            holdFired = true
+            logGesture("长按按下")
+            handleHold(true)
         }
     }
 
-    private func describe(_ event: PlayerGestureEvent) -> String {
-        switch event {
-        case let .singleTap(point, size):
-            return "单击 \(Int(point.x)),\(Int(point.y)) / 画布 \(Int(size.width))×\(Int(size.height))"
-        case .doubleTap:
-            return "双击"
-        case .panBegan:
-            return "拖动开始"
-        case let .panChanged(translation, _):
-            return "拖动中 \(Int(translation.width)),\(Int(translation.height))"
-        case let .panEnded(translation, _):
-            return "拖动结束 \(Int(translation.width)),\(Int(translation.height))"
-        case let .longPress(began):
-            return began ? "长按按下" : "长按松开"
-        case let .pinch(scale, ended):
-            return "\(ended ? "捏合结束" : "捏合中") \(String(format: "%.2f", scale))"
+    /// 抬手：靠两次点击的间隔区分单击 / 双击。
+    /// 不用 SwiftUI 的 `.onTapGesture(count:)` 是因为拿不到点击位置（两侧快退/快进要用 x 坐标），
+    /// 而 `SpatialTapGesture` 和拖动叠在一起时优先级很难调。
+    private func registerTap(at point: CGPoint, in size: CGSize) {
+        guard gestures.isEnabled else {
+            toggleChrome()
+            return
         }
+        let now = Date()
+        if now.timeIntervalSince(lastTapDate) < 0.35 {
+            lastTapDate = .distantPast
+            singleTapTask?.cancel()
+            singleTapTask = nil
+            logGesture("双击 \(Int(point.x)),\(Int(point.y))")
+            handleDoubleTap(at: point, in: size)
+        } else {
+            lastTapDate = now
+            singleTapTask?.cancel()
+            singleTapTask = Task {
+                try? await Task.sleep(nanoseconds: 330_000_000)
+                guard !Task.isCancelled else { return }
+                logGesture("单击")
+                toggleChrome()
+            }
+        }
+    }
+
+    private var magnifyGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { scale in
+                guard gestures.isEnabled else { return }
+                if !isPinching {
+                    isPinching = true
+                    holdStartTask?.cancel()
+                    // 捏合优先：把可能已经开始的方向拖动收掉，免得一边缩放一边改进度
+                    if dragMode != .undecided {
+                        model.isSeeking = false
+                        dragMode = .undecided
+                    }
+                    didBeginPan = false
+                }
+                logGesture("捏合中 \(String(format: "%.2f", scale))")
+                handlePinch(scale, ended: false)
+            }
+            .onEnded { scale in
+                handlePinch(scale, ended: true)
+                isPinching = false
+                logGesture("捏合结束 \(String(format: "%.2f", scale))")
+            }
+    }
+
+    private func logGesture(_ text: String) {
+        guard gestures.showDiagnostics else { return }
+        // 拖动一秒会来几十次回调，限流一下，别让排障浮层自己把画面拖卡
+        let now = Date()
+        guard now.timeIntervalSince(lastDiagnosticAt) > 0.12 else { return }
+        lastDiagnosticAt = now
+        gestureEventCount += 1
+        lastGestureText = text
     }
 
     private var diagnosticsOverlay: some View {
@@ -853,111 +872,6 @@ struct VideoPlayerView: View {
         rate == rate.rounded() ? "\(Int(rate))" : String(format: "%.1f", rate)
     }
 
-    // MARK: - 右上角浮层（音量 / 画面缩放）
-
-    private var volumeIconName: String {
-        let level = model.volume
-        if level <= 0.001 { return "speaker.slash.fill" }
-        if level < 0.34 { return "speaker.wave.1.fill" }
-        if level < 0.67 { return "speaker.wave.2.fill" }
-        return "speaker.wave.3.fill"
-    }
-
-    private func toggleQuickPanel(_ panel: QuickPanel) {
-        hideTask?.cancel()
-        if !chromeVisible {
-            withAnimation(.easeInOut(duration: 0.18)) { chromeVisible = true }
-        }
-        withAnimation(.easeOut(duration: 0.16)) {
-            quickPanel = quickPanel == panel ? nil : panel
-        }
-    }
-
-    private func closeQuickPanel() {
-        guard quickPanel != nil else { return }
-        withAnimation(.easeOut(duration: 0.14)) { quickPanel = nil }
-        scheduleHide()
-    }
-
-    @ViewBuilder
-    private func quickPanelView(_ panel: QuickPanel) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: panel == .volume ? volumeIconName : "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(panel == .volume ? "音量" : "画面缩放")
-                    .font(.footnote.weight(.semibold))
-                Spacer(minLength: 12)
-                Text(panel == .volume
-                     ? "\(Int((model.volume * 100).rounded()))%"
-                     : String(format: "%.1f×", zoom))
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.75))
-            }
-
-            if panel == .volume {
-                Slider(
-                    value: Binding(get: { Double(model.volume) },
-                                   set: { model.setVolume(Float($0)) }),
-                    in: 0...1
-                )
-                .tint(.white)
-
-                HStack(spacing: 8) {
-                    quickChip("静音") { model.setVolume(0) }
-                    quickChip("50%") { model.setVolume(0.5) }
-                    quickChip("100%") { model.setVolume(1) }
-                }
-            } else {
-                Slider(
-                    value: Binding(get: { Double(zoom) },
-                                   set: { setZoom(CGFloat($0)) }),
-                    in: 1...4
-                )
-                .tint(.white)
-
-                HStack(spacing: 6) {
-                    ForEach(Self.zoomChoices, id: \.self) { value in
-                        quickChip(zoomChipTitle(value), selected: abs(zoom - CGFloat(value)) < 0.01) {
-                            setZoom(CGFloat(value))
-                        }
-                    }
-                }
-            }
-        }
-        .foregroundStyle(.white)
-        .padding(14)
-        .frame(width: 244)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-        )
-        .environment(\.colorScheme, .dark)
-    }
-
-    private static let zoomChoices: [Double] = [1, 1.5, 2, 3, 4]
-
-    private func zoomChipTitle(_ value: Double) -> String {
-        value == value.rounded() ? "\(Int(value))×" : String(format: "%.1f×", value)
-    }
-
-    private func quickChip(_ title: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.monospacedDigit())
-                .fontWeight(selected ? .semibold : .regular)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
-                .background(
-                    Color.white.opacity(selected ? 0.26 : 0.12),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
     private func setZoom(_ value: CGFloat) {
         withAnimation(.easeOut(duration: 0.15)) {
             zoom = min(max(value, 1), 4)
@@ -1026,8 +940,7 @@ struct VideoPlayerView: View {
 
     private func scheduleHide() {
         hideTask?.cancel()
-        // 右上角浮层开着的时候不要自动收控件，否则浮层会跟着消失
-        guard model.isPlaying, quickPanel == nil else { return }
+        guard model.isPlaying else { return }
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if Task.isCancelled { return }
