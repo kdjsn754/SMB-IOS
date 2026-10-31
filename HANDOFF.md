@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.4`（build 5），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.4 均已验证）；1.0.4 只改了界面层，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
+| 版本 | `1.0.5`（build 6），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.5 均已验证）；1.0.5 新增视频封面「稀疏镜像」抽帧，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -35,7 +35,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
 - **目录页布局**（1.0.4）：固定三列网格，单元格为「正方形缩略图 + 两行居中文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。
-- **缩略图**（1.0.2 重写，见第 7 节 7）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3、视频封面并发 1 各自独立闸门；每张图读取有字节上限（≤16 MB，BMP/TIFF 必须整份读取）；视频封面额度 32 MB；失败进 180 秒负缓存；视图划走即取消传输。
+- **缩略图**（1.0.2 重写，见第 7 节 7）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3、视频封面并发 1 各自独立闸门；每张图读取有字节上限（≤16 MB，BMP/TIFF 必须整份读取）；**视频封面默认走「稀疏镜像」**（只读 moov + 第一个关键帧，约 10 MB，见第 7 节 9），流式抽帧降为兜底；失败进 180 秒负缓存；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
 - **主题**：`@AppStorage` + `preferredColorScheme`，三档（跟随系统/浅色/深色）。
@@ -65,6 +65,7 @@ Sources/
   ViewModels/BrowserModel.swift 目录列举、排序、加载状态
   Views/*.swift                 服务器列表/编辑、浏览、看图、播放、设置
   Views/Components/MediaTiles.swift 网格/列表单元格 + FileNameLabel（中间省略）/ TileCaption
+  Services/VideoThumbnailMirror.swift 大文件视频封面的稀疏镜像抽帧（moov + 关键帧）
   Utilities/Formatters.swift     字节、时间（短日期 yyyy/MM/dd）格式化
   Utilities/AppTheme.swift      主题枚举
   Utilities/Formatters.swift    大小/日期/时长格式化
@@ -152,6 +153,13 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
    - 新增导航栏能力：搜索（`visibleItems` 在当前目录内过滤，大小写不敏感）、排序（`BrowserSort`：名称/名称倒序/时间新→旧/旧→新/大小大→小/小→大，存 `SettingsKey.sortOrder`）、网格⇄列表切换（原「更多」菜单保留）。
    - 注意：排序/搜索只影响当前目录；`open()` 用 `visibleItems` 过滤图片列表，保证看图左右滑动顺序与网格一致。
 
+9. **✅ 已修（1.0.5）：大文件 MP4 没有封面（含 522 MB、moov 在尾部的片子）**
+   - 现象：`桃桃酱-白衬无缝肉丝.mp4`（522 MB，`moov` 在文件末尾，offset 547662742，大小 422378）在目录里只显示胶片占位图标。
+   - 根因：AVFoundation 抽帧时会发出「从当前偏移一直读到文件尾」的请求。这类请求无法在不读完整个文件的前提下满足，一旦命中 `ByteBudget` 只能提前 `finishLoading()`，AVFoundation 便认为资源被截断、整条解析链失败。小文件能整部读完所以正常，大文件必然失败。
+   - 修复：新增 `VideoThumbnailMirror`（稀疏镜像）。流程：① 读 8～16 字节盒子头，顺着顶层盒子找到 `moov`（头尾都支持）；② 读 moov（≤8 MB）、文件头 1 MB；③ 从 moov 的 `stbl` 里取视频轨 `stco`/`co64` 第一个 chunk 偏移，读该位置往前 128 KB、往后 8 MB；④ 按原始偏移写进临时「稀疏文件」（空洞不占磁盘）；⑤ `AVAssetImageGenerator` 对本地文件抽帧，用完即删。
+   - 分流：≤24 MB 的视频先走原流式抽帧（一次读完更省请求），失败再镜像；>24 MB 直接镜像，失败再退回流式。
+   - 收益：封面流量与文件大小解耦（约 10 MB 封顶），也不再受 AVFoundation 请求策略影响。
+
 ## 8. 约定（改代码前先看）
 
 - **不要提交 `SMBViewer.xcodeproj`**：改工程必须改 `project.yml`。
@@ -190,6 +198,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.0.5 | 2026-10-31 | 修复大文件 MP4 无封面：视频封面改用「稀疏镜像」抽帧（只读 moov + 首个关键帧，约 10 MB），流式抽帧降为兜底；设置页两个确认框由 confirmationDialog 改为 alert，避免 iOS 26/27 锚定到按钮上方压住开关；清理完成提示改为底部轻提示 |
 | 1.0.4 | 2026-10-31 | 目录页改版：三列网格 + 缩略图下方两行文件名（中间省略）/ 大小 / 日期；新增目录内搜索、6 种排序、网格⇄列表切换 |
 | 1.0.3 | 2026-10-31 | 修复 BMP/TIFF 缩略图全黑（改为整份读取 + 完整解码兜底）；修复 1GB 以上 MP4 无封面（去掉 4MB 单次响应限制、视频额度 10MB→32MB）；缩略图缓存版本号递增以失效旧的黑图 |
 | 1.0.2 | 2026-10-31 | 重写缩略图加载链路：任务去重/取消传播/失败负缓存/图片与视频独立并发闸门；视频封面加 10 MB 字节预算，不再整部下载；`SMBConnection.read` 支持传输中止；看图页只加载当前页；缓存自动清理改为 20 秒节流；设置页新增缩略图开关 |

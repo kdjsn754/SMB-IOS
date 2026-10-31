@@ -18,6 +18,8 @@ final class ThumbnailStore: @unchecked Sendable {
     /// 视频封面允许消耗的字节额度。1GB 以上的 MP4，`moov` 索引本身就可能十几兆，
     /// 额度给小了会导致索引读不全、直接解析失败（大文件缩略图出不来的根因）
     private static let videoByteBudget: Int64 = 32 * 1024 * 1024
+    /// 小于这个大小的视频直接流式抽帧（一次就能读完），更大的走稀疏镜像
+    private static let smallVideoLimit: Int64 = 24 * 1024 * 1024
     /// 必须完整读取才能正确解码的图片格式（无压缩 / 分块存储）。
     /// 这类文件被截断后 ImageIO 不会返回 nil，而是给出一张「主体全黑」的图，正好对上 BMP 全黑的现象。
     private static let fullReadImageExtensions: Set<String> = ["bmp", "dib", "tif", "tiff"]
@@ -309,6 +311,49 @@ final class ThumbnailStore: @unchecked Sendable {
         }
         guard size > 0 else { return nil }
 
+        // 小文件一次流式读完最省请求；大文件走稀疏镜像，避免被字节预算截断。
+        if size <= Self.smallVideoLimit {
+            if let image = await streamingVideoThumbnail(
+                item: item, connection: connection, size: size, cancel: cancel
+            ) {
+                return image
+            }
+            if cancel.isCancelled { return nil }
+            return await VideoThumbnailMirror.makeImage(
+                connection: connection,
+                path: item.path,
+                fileSize: size,
+                fileExtension: item.fileExtension,
+                cancel: cancel
+            )
+        }
+
+        // 大文件：只读 moov + 第一个关键帧（约 10 MB），跟文件总大小无关，
+        // 也不会被 AVFoundation「一直读到文件尾」的请求拖住（大文件封面失败的根因）。
+        if let mirrored = await VideoThumbnailMirror.makeImage(
+            connection: connection,
+            path: item.path,
+            fileSize: size,
+            fileExtension: item.fileExtension,
+            cancel: cancel
+        ) {
+            return mirrored
+        }
+        if cancel.isCancelled { return nil }
+
+        // 兜底：流式抽帧（moov 在文件头部、或稀疏镜像解析失败时）
+        return await streamingVideoThumbnail(
+            item: item, connection: connection, size: size, cancel: cancel
+        )
+    }
+
+    /// 原始做法：让 AVFoundation 通过自定义 scheme 边读边解析
+    private func streamingVideoThumbnail(
+        item: FileItem,
+        connection: SMBConnection,
+        size: Int64,
+        cancel: CancellationBox
+    ) async -> UIImage? {
         let budget = ByteBudget(limit: Self.videoByteBudget)
         let asset = MediaAssetFactory.shared.makeAsset(
             connection: connection,

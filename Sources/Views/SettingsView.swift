@@ -36,14 +36,14 @@ struct SettingsView: View {
                         .disabled(!thumbnailsEnabled)
                     Button {
                         ThumbnailStore.shared.resetFailures()
-                        toast = "已清除失败记录，返回目录会重新加载"
+                        showToast("已清除失败记录，返回目录会重新加载")
                     } label: {
                         Text("重新尝试加载失败的缩略图")
                     }
                 } header: {
                     Text("缩略图")
                 } footer: {
-                    Text("只有出现在屏幕上的图片才会去读取，划走时会立刻中断传输。图片缩略图需要读取原图（单张最多 16 MB），视频封面最多读取约 10 MB；关闭后列表只显示图标，可以明显减少流量。")
+                    Text("只有出现在屏幕上的图片才会去读取，划走时会立刻中断传输。图片缩略图需要读取原图（单张最多 16 MB）；视频封面只读索引和第一个关键帧（约 10 MB），不会下载整部影片。关闭后列表只显示图标，可以明显减少流量。")
                 }
 
                 Section {
@@ -94,7 +94,7 @@ struct SettingsView: View {
                         .font(.footnote)
                     Label("MKV / AVI 等格式依赖系统解码能力，若无法播放可点右上角下载到本地再试。", systemImage: "film")
                         .font(.footnote)
-                    Label("视频封面只读取索引与关键帧附近的数据（上限约 10 MB），不会下载整部影片。", systemImage: "photo.on.rectangle")
+                    Label("视频封面只读取索引与第一个关键帧（约 10 MB），不会下载整部影片。", systemImage: "photo.on.rectangle")
                         .font(.footnote)
                 }
 
@@ -114,34 +114,53 @@ struct SettingsView: View {
             .onChange(of: cacheLimit) { _ in
                 cache.autoCleanIfNeeded()
             }
-            .confirmationDialog("确定清空全部缓存？", isPresented: $showClearConfirm, titleVisibility: .visible) {
+            // 居中弹窗：confirmationDialog 在 iOS 26/27 上会锚定到按钮位置，
+            // 从 Form 里弹出来时容易压到上方的开关，改成 alert 稳定居中。
+            .alert("确定清空全部缓存？", isPresented: $showClearConfirm) {
                 Button("清空缓存", role: .destructive) {
                     cache.clearAll {
-                        toast = "缓存已清空"
+                        showToast("缓存已清空")
                     }
                 }
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("将删除所有缩略图、缓存图片与已下载的视频。")
             }
-            .confirmationDialog("确定清理缩略图？", isPresented: $showThumbnailConfirm, titleVisibility: .visible) {
+            .alert("确定清理缩略图？", isPresented: $showThumbnailConfirm) {
                 Button("清理缩略图", role: .destructive) {
                     cache.clearThumbnails {
-                        toast = "缩略图已清理"
+                        showToast("缩略图已清理")
                     }
                 }
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("只会删除缩略图缓存，已缓存的图片与视频会保留。")
             }
-            .alert("完成", isPresented: Binding(
-                get: { toast != nil },
-                set: { if !$0 { toast = nil } }
-            )) {
-                Button("好", role: .cancel) { toast = nil }
-            } message: {
-                Text(toast ?? "")
+            .overlay(alignment: .bottom) {
+                if let toast {
+                    Text(toast)
+                        .font(.footnote)
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.regularMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+                        .padding(.bottom, 32)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                        .task(id: toast) {
+                            try? await Task.sleep(nanoseconds: 2_000_000_000)
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                self.toast = nil
+                            }
+                        }
+                }
             }
+        }
+    }
+
+    private func showToast(_ message: String) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            toast = message
         }
     }
 
