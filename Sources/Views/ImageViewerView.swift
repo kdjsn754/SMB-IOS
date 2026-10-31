@@ -87,7 +87,7 @@ struct ImageViewerView: View {
                         .scaleEffect(1 - pullProgress * 0.14)
                         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
                         .contentShape(Rectangle())
-                        .gesture(pagingGesture(width: width, height: height))
+                        .gesture(pagingGesture(width: width))
                         .onTapGesture { toggleChrome() }
                     }
                 }
@@ -120,7 +120,7 @@ struct ImageViewerView: View {
 
     // MARK: - 手势
 
-    private func pagingGesture(width: CGFloat, height: CGFloat) -> some Gesture {
+    private func pagingGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12)
             .onChanged { value in
                 guard !isZoomed, !isDismissing else { return }
@@ -147,7 +147,11 @@ struct ImageViewerView: View {
                 if abs(dy) > abs(dx) {
                     // 位移超过 130pt，或者甩得够快，就退出
                     if dy > 130 || value.predictedEndTranslation.height > 320 {
-                        startDismiss(height: height)
+                        // 退出只动一次：画面现在停在哪就留在哪，交给系统把整张全屏页
+                        // 顺着滑下去（coverVertical），两段动画接力会变成
+                        // 「图片先下去、黑底再跟一次」。
+                        isDismissing = true
+                        dismiss()
                     } else {
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                             drag = .zero
@@ -170,18 +174,8 @@ struct ImageViewerView: View {
             }
     }
 
-    /// 松手后的退出：先把画面顺着甩出去（单独一段动画），动画走完再真正关掉，
-    /// 直接 `dismiss()` 会让整个页面「啪」地消失，看起来像卡了一下。
-    private func startDismiss(height: CGFloat) {
-        guard !isDismissing else { return }
-        isDismissing = true
-        withAnimation(.easeOut(duration: 0.24)) {
-            drag = CGSize(width: 0, height: max(height * 0.95, drag.height))
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-            dismiss()
-        }
-    }
+    /// 松手后的退出交给系统：不自己做第二段动画。
+    /// （曾经试过「先甩出去 0.24s 再 dismiss」，看起来是图片和黑底分两次落下。）
 
     // MARK: - 顶部/底部浮层
 
@@ -417,6 +411,22 @@ struct ZoomableImageView: View {
             image = loaded
         } else {
             failed = true
+        }
+    }
+}
+
+extension View {
+    /// 让 `fullScreenCover` 自带的背景透明。
+    ///
+    /// 系统那层底默认是不透明的黑：下拉时我们把画面缩小、背景渐隐，下面其实一直是黑的，
+    /// 退出时它还会跟着一起滑下去（就是「图片下去了，黑屏又跟了一次」的来源）。
+    /// 设成透明之后，下拉过程能真的看见下面的目录页，退出也只剩画面这一段运动。
+    @ViewBuilder
+    func clearPresentationBackground() -> some View {
+        if #available(iOS 16.4, *) {
+            presentationBackground(Color.clear)
+        } else {
+            self
         }
     }
 }

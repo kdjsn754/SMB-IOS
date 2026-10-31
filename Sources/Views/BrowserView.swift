@@ -79,6 +79,8 @@ struct BrowserView: View {
                     serverID: server.id,
                     connection: app.connection(for: server)
                 )
+                // 系统那层不透明黑底会让「下拉渐隐」白做，退出时还会跟着滑一次
+                .clearPresentationBackground()
             case .video(let request):
                 VideoPlayerView(
                     item: request.item,
