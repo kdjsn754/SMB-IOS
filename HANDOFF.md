@@ -19,9 +19,9 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.2.0`（build 23），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.2.0 由 run **#29**（sha `e779ef0`）全绿产出（含「自检：包结构与依赖」） |
-| 产物自检 | 1.2.0：`Info.plist` = 1.2.0 / build 23、`MinimumOSVersion` 16.0、可执行文件 arm64（1.48 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:/下载/互传/SMBViewer-v1.2.0-unsigned.ipa` |
+| 版本 | `1.2.1`（build 24），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ⏳ 1.2.1 已推送触发 CI（1.2.0 = run #29 / sha `e779ef0`，全绿） |
+| 产物自检 | 待 1.2.1 出包后填写（1.2.0 已交付：build 23 / 无 `Frameworks` / arm64 1.48 MB） |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -69,7 +69,7 @@ Sources/
   Services/CredentialStore.swift 密码存取（钥匙串 + 退化）
   Services/AsyncLimiter.swift   async 信号量，限并发
   ViewModels/BrowserModel.swift 目录列举、排序、加载状态
-  Views/*.swift                 服务器列表/编辑、浏览、看图、播放、设置
+  Views/*.swift                 服务器列表/编辑、浏览、看图（自算分页 + 下拉退出）、播放、设置
   Views/Components/PlayerGestureSettingsForm.swift 「播放手势」表单 + 播放页「⋯ → 播放手势设置」面板（设置页与播放页共用一份）
   Views/Components/SettingsRow.swift 设置首页行（彩色图标 + 标题 + 右侧当前值）+ SettingsDetail 二级页外壳
   Views/Components/ToastBanner.swift 底部轻提示（.toast($msg) 修饰器）
@@ -351,6 +351,31 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
    - 已知取舍：拖动进度 HUD 只显示「目标时间」，没有缩略图预览（SMB 上逐帧预览太重，
      以后要用 1.0.13 的 `VideoFrameDecoder` 做「每 5% 抽一帧」的预览条）。
 
+22. **1.2.1：首页头顶对齐 + 卡片两个箭头 + 看图下拉退出**
+   - **首页大标题和「+」必须同一行**：系统 `ToolbarItem` 永远排在导航栏那一行、大标题在它下面一行，
+     两者不可能齐平。所以首页 `.toolbar(.hidden, for: .navigationBar)`，自己排 `HStack { Text("资源库") / Spacer / 圆形 + }`，
+     标题 38pt bold、按钮 46pt 圆形（`.ultraThinMaterial` + 一圈 0.5pt 描边），左右 24pt；
+     卡片区 `LazyVStack` 用 20pt，和标题共用同一条左边的视觉基准。
+     二级页（`BrowserView` / `SettingsDetail`）都显式 `.toolbar(.visible, for: .navigationBar)`，
+     否则从隐藏导航栏的首页 push 过去会没有返回按钮。
+   - **卡片右边只能有一个箭头**：`List` + `NavigationLink` 会自动加系统 accessory（行尾的 `>`），
+     label 里再画一个 `chevron.right` 就是两个（用户截图反馈）。现在不用 `List`，
+     `ScrollView + LazyVStack + NavigationLink`，系统不会补 accessory，卡片里那一个就是唯一的。
+     顺手用 `ServerCardButtonStyle`（按下 0.985 缩放 + 0.82 透明度）替代 List 行自带的高亮。
+   - **看图下拉退出**：`ImageViewerView` 不用 `TabView(.page)`，改成
+     `HStack(每页固定屏宽) + offset(-index*width + drag)`，一个 `DragGesture(minimumDistance: 12)` 同时管两件事：
+     横向 → 翻页（阈值 `max(60, 0.22*屏宽)` 或甩动预测过半屏；首尾页位移打 0.32 阻尼）；
+     纵向且向下 → 退出，位移跟手、背景 `opacity(1 - pull*0.92)`、画面 `scaleEffect(1 - pull*0.14)`，
+     松手时 `dy > 130` 或 `predictedEndTranslation.height > 320` 才真的 dismiss，否则弹回。
+     **为什么不用 `TabView`**：它的翻页是 UIKit 内部 pan，和外层拖拽手势会互相抢——要么翻不了页、
+     要么拖不动退。自己算位移就没有这个问题，而且阈值/阻尼都好调。
+   - **放大和手势的优先级**：`ZoomableImageView` 的 pan 用 `including: scale > 1.01 ? .all : .none`，
+     只在放大后接管拖动；放大状态通过 `@Binding isZoomed` 报给外层，外层看到 `isZoomed` 就整段跳过
+     （否则放大以后一拖就翻页）。换页时（`onChange(of: index)`）把 `isZoomed` 清掉，
+     否则上一页的放大态会让新一页的手势一直失效。
+   - 浮层（关闭按钮 / 页码 / 文件名）留在安全区内，`GeometryReader` 那层才 `.ignoresSafeArea()`，
+     不然按钮会压到状态栏。
+
 ## 8. 约定（改代码前先看）
 
 - **不要提交 `SMBViewer.xcodeproj`**：改工程必须改 `project.yml`。
@@ -401,6 +426,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.2.1 | 2026-11-01 | **首页头顶重新排**：隐藏系统导航栏，自绘「资源库」大标题 + 右侧 46pt 圆形「+」，两者同一行（系统 `ToolbarItem` 与大标题天生不同行）；卡片区改 `ScrollView + LazyVStack`，**去掉卡片右边重复的箭头**（`List` + `NavigationLink` 会自带系统 accessory）；按下有缩放反馈。**看图页支持下拉退出**：分页从 `TabView(.page)` 换成自算位移的 `HStack + offset`，一个手势同时处理横向翻页与纵向下拉退出（背景渐隐、画面缩小，超阈值松手即关），放大状态下手势仍归图片 pan |
 | 1.2.0 | 2026-11-01 | **播放页顶部栏并入自动隐藏**：导航栏整个隐藏（`ToolbarItem` 不受 `chromeVisible` 控制，播放中一直挂在顶上），关闭 / 文件名 / ⋯ 改成自绘并跟底部控件一起淡出；**手势 HUD 上移 110pt**，不再压在中间的暂停键上（播放/暂停气泡仍居中）；**设置页退回上一版的列表样式**（`SettingsRow` 彩色图标 + 标题 + 右侧当前值，二级页不变）；**首页改回系统导航栏**：`.navigationTitle("资源库")` + 系统 `+` 按钮，`List` 承载卡片，卡片边距与系统大标题共用 20pt；标签页名字同步为「资源库」 |
 | 1.1.10 | 2026-11-01 | **音量手势改为调手机系统音量**（`SystemVolume`：屏幕外 `MPVolumeView` 的 slider + `sendActions`），`player.volume` 固定 1；**首页重做**：标题改「资源库」、自定义大标题与「+」和服务器卡片共用 20pt 边距、服务器改成卡片（长按出编辑/删除）、空态合并成一张卡片；**设置页改成方块卡片网格**（2 列，淡色图标块 + 标题 + 当前状态，分「偏好设置 / 浏览与存储 / 其他」三组，关于为整行卡片）；两个首页都隐藏系统导航栏，二级页显式 `.toolbar(.visible)` 保住返回按钮 |
 | 1.1.9 | 2026-11-01 | **修「手势数值在变、画面/声音不动」**：画面缩放从「改 `AVPlayerLayer` 仿射变换」改为 SwiftUI `.scaleEffect(zoom)`（视频层会覆盖外来变换，1.1.8 实测无效）；音量在 0% 时同时 `isMuted`，保证 0 真的静音；诊断浮层新增「生效」一行，直接打 `player.volume` / 遮罩 / 画面缩放。**设置页改为「分类入口 + 二级页」**：首页只留外观 / 播放手势 / 缩略图 / 缓存 / 关于五个带摘要值的行，点进去才是详细设置；失败记录单独一页；新增 `AppInfo` 统一版本信息 |
