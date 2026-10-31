@@ -54,6 +54,7 @@ enum VideoThumbnailMirror {
 
         let ext = fileExtension.isEmpty ? "mp4" : fileExtension
         var moovData: Data?
+        var lastMoovBytes: Data?
         var lastFailure = "未知原因"
         var triedPrefix = 0
 
@@ -93,6 +94,13 @@ enum VideoThumbnailMirror {
                     moovData = data
                 }
                 tail = moovData ?? Data()
+                lastMoovBytes = tail
+            } else if lastMoovBytes == nil {
+                let start = Int(layout.moovOffset)
+                let end = start + Int(layout.moovSize)
+                if start >= 0, end <= head.count {
+                    lastMoovBytes = head.subdata(in: start..<end)
+                }
             }
             if cancel.isCancelled { return nil }
 
@@ -120,8 +128,9 @@ enum VideoThumbnailMirror {
             if prefix >= fileSize { break }
         }
 
+        let codec = lastMoovBytes.flatMap { codecTag(in: $0) }.map { " · 编码 \($0)" } ?? ""
         ThumbnailDiagnostics.record(
-            name, "抽帧失败（文件头试到 \(triedPrefix / 1024 / 1024) MB）：\(lastFailure)"
+            name, "抽帧失败（文件头试到 \(triedPrefix / 1024 / 1024) MB\(codec)）：\(lastFailure)"
         )
         return nil
     }
@@ -134,25 +143,47 @@ enum VideoThumbnailMirror {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 480, height: 480)
-        // 允许取最近的关键帧，这样只需解开头几个 GOP
-        generator.requestedTimeToleranceBefore = .positiveInfinity
-        generator.requestedTimeToleranceAfter = .positiveInfinity
 
         var lastError = ""
-        // 从小时间点试起：镜像里只有头十几兆，越靠后越可能没有数据
-        for seconds in [1.0, 0.0, 3.0, 0.5] {
+        // 第一轮先精确取「第 0 秒的关键帧」：镜像里必然包含它、解码量最小；
+        // 后面的轮次才放宽到「允许取最近的关键帧」，因为越往后越可能没有数据
+        for (index, seconds) in [0.0, 1.0, 0.5, 3.0].enumerated() {
             if cancel.isCancelled { return (nil, "已取消") }
+            let exact = index == 0
+            generator.requestedTimeToleranceBefore = exact ? CMTime.zero : CMTime.positiveInfinity
+            generator.requestedTimeToleranceAfter = exact ? CMTime.zero : CMTime.positiveInfinity
             let time = CMTime(seconds: seconds, preferredTimescale: 600)
             do {
                 let result = try await generator.image(at: time)
                 return (UIImage(cgImage: result.image), "")
             } catch {
                 let code = (error as NSError).code
-                let text = error.localizedDescription
-                lastError = text.isEmpty ? "错误码 \(code)" : "\(text)(\(code))"
+                lastError = code == 0
+                    ? error.localizedDescription
+                    : "\(error.localizedDescription)(\(code))"
             }
         }
         return (nil, lastError)
+    }
+
+    /// 从 moov 里嗅探视频编码 fourcc（只做 4 字节匹配，够诊断用）
+    private static func codecTag(in moov: Data) -> String? {
+        let tags = ["avc1", "avc3", "hvc1", "hev1", "av01", "vp09", "mp4v", "dvh1", "dvhe"]
+        guard moov.count > 8 else { return nil }
+        let bytes = [UInt8](moov)
+        for tag in tags {
+            let p = [UInt8](tag.utf8)
+            guard p.count == 4 else { continue }
+            var index = 0
+            while index + 4 <= bytes.count {
+                if bytes[index] == p[0], bytes[index + 1] == p[1],
+                   bytes[index + 2] == p[2], bytes[index + 3] == p[3] {
+                    return tag
+                }
+                index += 1
+            }
+        }
+        return nil
     }
 
     // MARK: - 顶层盒子扫描

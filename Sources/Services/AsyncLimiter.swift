@@ -39,6 +39,9 @@ actor OrderedLimiter {
     private let limit: Int
     private var running = 0
     private var sequence = 0
+    /// 放行下一个之前的宽限时间：同一批格子创建时间极接近，
+    /// 先让它们把序号登记进队伍，再挑最小的，避免「后出现的格子抢到名额」
+    private let graceNanos: UInt64
 
     private struct Waiter {
         let order: Int
@@ -48,12 +51,13 @@ actor OrderedLimiter {
 
     private var waiters: [Waiter] = []
 
-    init(limit: Int) {
+    init(limit: Int, graceMilliseconds: Int = 0) {
         self.limit = max(1, limit)
+        self.graceNanos = UInt64(max(0, graceMilliseconds)) * 1_000_000
     }
 
     func acquire(order: Int) async {
-        if running < limit {
+        if running < limit, waiters.isEmpty {
             running += 1
             return
         }
@@ -63,7 +67,15 @@ actor OrderedLimiter {
         }
     }
 
-    func release() {
+    func release() async {
+        guard !waiters.isEmpty else {
+            running = max(0, running - 1)
+            return
+        }
+        if graceNanos > 0 {
+            // 等待期间 actor 可重入，新格子能继续登记序号
+            try? await Task.sleep(nanoseconds: graceNanos)
+        }
         guard !waiters.isEmpty else {
             running = max(0, running - 1)
             return

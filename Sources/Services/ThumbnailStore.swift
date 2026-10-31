@@ -5,7 +5,7 @@ import AVFoundation
 ///
 /// 设计要点：
 /// 1. 同一个文件只生成一份 480px 缩略图，网格和列表共用，避免同一张图取两次。
-/// 2. 图片和视频走各自的并发闸门（图片 3、视频 1），视频封面再慢也不会把图片挤死。
+/// 2. 图片和视频共用一道有序闸门（一次一个、按格子序号放行），缩略图严格按「左上 → 右下」依次出现。
 /// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输。
 /// 4. 失败的文件进负缓存冷却几分钟，避免「划回去就重试」把 NAS 打满。
 final class ThumbnailStore: @unchecked Sendable {
@@ -58,8 +58,11 @@ final class ThumbnailStore: @unchecked Sendable {
     private var jobs: [String: Job] = [:]
     private var failures: [String: Date] = [:]
 
-    private let imageLimiter = OrderedLimiter(limit: 3)
-    private let videoLimiter = AsyncLimiter(limit: 1)
+    /// 缩略图唯一的闸门：图片和视频共用，一次只跑一个、按格子序号放行。
+    /// 分成「图片 3 并发 + 视频 1 并发」两道闸门时是排不出全局顺序的
+    /// （视频可能比它前面几张图片先返回），所以合并成一道。
+    /// 宽限 60 ms 让同一批创建的格子先把序号登记进队伍。
+    private let displayLimiter = OrderedLimiter(limit: 1, graceMilliseconds: 60)
 
     init() {
         memory.countLimit = 600
@@ -194,14 +197,20 @@ final class ThumbnailStore: @unchecked Sendable {
 
         var image: UIImage?
         switch item.kind {
-        case .image:
-            await imageLimiter.acquire(order: order)
-            image = await imageThumbnail(item: item, connection: connection, cancel: cancel)
-            await imageLimiter.release()
-        case .video:
-            await videoLimiter.acquire()
-            image = await videoThumbnail(item: item, connection: connection, cancel: cancel)
-            await videoLimiter.release()
+        case .image, .video:
+            // 图片和视频共用一道闸门：一次只跑一个、按格子序号放行，
+            // 缩略图才会严格按「左上 → 右下」依次出现
+            await displayLimiter.acquire(order: order)
+            if cancel.isCancelled {
+                await displayLimiter.release()
+                return nil
+            }
+            if item.kind == .image {
+                image = await imageThumbnail(item: item, connection: connection, cancel: cancel)
+            } else {
+                image = await videoThumbnail(item: item, connection: connection, cancel: cancel)
+            }
+            await displayLimiter.release()
         case .folder, .other:
             return nil
         }
@@ -324,12 +333,20 @@ final class ThumbnailStore: @unchecked Sendable {
             .zero,
             CMTime(seconds: 5, preferredTimescale: 600)
         ]
+        var lastError = ""
         for time in candidates {
             if cancel.isCancelled { return nil }
-            if let result = try? await generator.image(at: time) {
+            do {
+                let result = try await generator.image(at: time)
                 return UIImage(cgImage: result.image)
+            } catch {
+                let code = (error as NSError).code
+                lastError = code == 0 ? error.localizedDescription : "\(error.localizedDescription)(\(code))"
             }
             if cancel.isCancelled || budget.remaining() <= 0 { return nil }
+        }
+        if !lastError.isEmpty {
+            ThumbnailDiagnostics.record(item.name, "流式抽帧也失败：\(lastError)")
         }
         return nil
     }
