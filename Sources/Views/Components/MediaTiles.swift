@@ -1,17 +1,17 @@
 import SwiftUI
 import UIKit
 
-/// 网格缩略图的展示框尺寸。所有格子共用同一个固定框，图片一律 `.fit` 完整显示且顶部对齐：
-/// 同一行顶端成一条线，横屏内容下方自然留白，竖屏内容也不会被撑成过高的竖条，
+/// 网格缩略图的展示框尺寸。所有格子共用同一个固定框，图片 `.fit` 完整显示并在框内**居中**：
+/// 同一行格子尺寸一致，横屏内容上下留白均匀、竖屏内容左右留白均匀，留白是页面底色（不是灰块）。
 /// 框下面的文件名 / 大小 / 日期三列齐平。
 enum TileAspect {
-    /// 展示框的「宽度 / 高度」（0.87 ≈ 宽:高 = 1 : 1.15）
+    /// 展示框的「宽度 / 高度」（0.87 ≈ 宽:高 = 1 : 1.15，略高于正方形，竖屏内容不至于被挤成窄条）
     static let box: CGFloat = 0.87
 }
 
 /// 通用缩略图视图：先看缓存，再按需从服务器读取。
 /// 失败会退化成占位图标（不会一直转圈），划走时会取消传输。
-/// 图片完整显示（不裁切）并贴展示框顶部，留白只出现在图片下方。
+/// 图片完整显示（不裁切）并在展示框里居中，没有图片时才铺灰色占位底。
 @MainActor
 struct ThumbnailImage: View {
     let item: FileItem
@@ -20,35 +20,52 @@ struct ThumbnailImage: View {
     var cornerRadius: CGFloat = 4
     /// 在目录里的显示序号：让缩略图按「左上 → 右下」的顺序出现，而不是随机位置冒出来
     var order: Int = 0
+    /// 视频是否显示左下角的播放角标（列表页已有播放图标，传 false 避免重复）
+    var showPlayBadge: Bool = true
 
     @State private var image: UIImage?
     @State private var failed = false
 
     var body: some View {
-        Rectangle()
-            .fill(Color(uiColor: .secondarySystemFill))
-            .overlay {
-                if let image {
-                    // 完整显示整张图，不做填充裁切；frame 撑满展示框后把内容顶到最上面，
-                    // 这样横屏图的留白只会落在下方，不会上下各一半（看起来像居中）
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                } else if failed {
-                    Image(systemName: placeholderIcon)
-                        .font(.system(size: 20, weight: .regular))
-                        .foregroundStyle(.tertiary)
-                } else {
-                    ProgressView()
-                        .controlSize(.small)
-                }
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .overlay(alignment: .bottomLeading) {
+                        if showPlayBadge, item.kind == .video { playBadge }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemFill))
+                    .overlay {
+                        if failed {
+                            Image(systemName: placeholderIcon)
+                                .font(.system(size: 20, weight: .regular))
+                                .foregroundStyle(.tertiary)
+                        } else {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
             }
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .contentShape(Rectangle())
-            .task(id: item.id) {
-                await load()
-            }
+        }
+        // 撑满展示框并居中：横屏图上下留白、竖屏图左右留白，都是均匀的
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .contentShape(Rectangle())
+        .task(id: item.id) {
+            await load()
+        }
+    }
+
+    private var playBadge: some View {
+        Image(systemName: "play.fill")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 18, height: 18)
+            .background(.black.opacity(0.45), in: Circle())
+            .padding(5)
     }
 
     private var placeholderIcon: String {
@@ -164,16 +181,6 @@ struct MediaTile: View {
                 order: order
             )
             .aspectRatio(TileAspect.box, contentMode: .fit)
-            .overlay(alignment: .bottomLeading) {
-                if item.kind == .video {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 18, height: 18)
-                        .background(.black.opacity(0.45), in: Circle())
-                        .padding(5)
-                }
-            }
 
             FileNameLabel(name: item.name)
             TileCaption(size: Format.bytes(item.size), date: Format.shortDate(item.modified))
@@ -182,8 +189,15 @@ struct MediaTile: View {
 
     private var listBody: some View {
         HStack(spacing: 12) {
-            ThumbnailImage(item: item, serverID: serverID, connection: connection, cornerRadius: 6, order: order)
-                .frame(width: 56, height: 56)
+            ThumbnailImage(
+                item: item,
+                serverID: serverID,
+                connection: connection,
+                cornerRadius: 6,
+                order: order,
+                showPlayBadge: false
+            )
+            .frame(width: 56, height: 56)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.name)

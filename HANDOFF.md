@@ -19,9 +19,9 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.9`（build 10），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.0.9 由 run **#15**（sha `57d26e7`）全绿产出，14 个步骤（含「自检：包结构与依赖」）全 success |
-| 产物自检 | `Info.plist` = 1.0.9 / build 10、`MinimumOSVersion` 16.0、可执行文件 arm64、**Payload 内无 `Frameworks` 目录**、`.app` 里只有一个可执行文件（1.31 MB）；已交付 `D:\下载\互传\SMBViewer-v1.0.9-unsigned.ipa` |
+| 版本 | `1.0.10`（build 11），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ 1.0.9 由 run **#15**（sha `57d26e7`）全绿产出，14 个步骤（含「自检：包结构与依赖」）全 success；1.0.10 待本机构建验证 |
+| 产物自检 | 1.0.9：`Info.plist` = 1.0.9 / build 10、`MinimumOSVersion` 16.0、可执行文件 arm64、**Payload 内无 `Frameworks` 目录**、`.app` 里只有一个可执行文件（1.31 MB） |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -36,8 +36,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
 - **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。
-- **目录页布局**（1.0.4，1.0.6 调整，1.0.9 定为固定框）：固定三列网格、同一行顶部对齐（`LazyVGrid` + `GridItem(alignment: .top)`），单元格为「缩略图 + 两行文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。**1.0.9 起缩略图展示框高度固定**（`TileAspect.box = 0.87`，即宽:高 ≈ 1:1.15，照片/视频/文件夹/其它文件共用同一个框），图片一律 `.scaledToFit()` 完整显示并**贴框顶部**（`frame(maxHeight: .infinity, alignment: .top)`），横屏内容只在下方留白，`FileNameLabel` 固定两行高度，所以同一行三列的图片顶端成一条线、下面的文件名/大小/日期也齐平。1.0.6 曾用 `.scaledToFill` 裁切，1.0.8 曾按真实宽高比撑格子，两者都已废弃。
-  - ⚠️ `LazyVGrid` 的 `alignment` 参数是 **`HorizontalAlignment`**（不是 `VerticalAlignment`），传 `.top` 编译不过；行内垂直对齐要靠 `GridItem(alignment: .top)` 或单元格内部的 `frame(alignment: .top)`。
+- **目录页布局**（1.0.4，1.0.6 调整，1.0.9 定框，1.0.10 去灰底+居中）：固定三列网格、同一行顶部对齐（`LazyVGrid` + `GridItem(alignment: .top)`），单元格为「缩略图 + 两行文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。**1.0.9 起缩略图展示框高度固定**（`TileAspect.box = 0.87`，即宽:高 ≈ 1:1.15，照片/视频/文件夹/其它文件共用同一个框）；**1.0.10 起框内不再铺灰底**——有图时只在图片自身范围内画圆角，空格子是页面底色；图片 `.scaledToFit()` 完整显示后**在框内居中**（横屏上下留白、竖屏左右留白都均匀），播放角标跟着图片左下角走。`FileNameLabel` 固定两行高度，所以同一行三列的图片顶端成一条线、下面的文件名/大小/日期也齐平。1.0.6 的 `.scaledToFill` 裁切、1.0.8 的按真实比例撑格子均已废弃。
+  - ⚠️ `LazyVGrid` 的 `alignment` 参数是 **`HorizontalAlignment`**（不是 `VerticalAlignment`），传 `.top` 编译不过；行内垂直对齐要靠 `GridItem(alignment: .top)` 或单元格内部的 `frame(alignment:)`。
 - **缩略图**（1.0.2 重写，1.0.6 修正读取，1.0.7 换镜像实现）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3（`OrderedLimiter`，按格子序号放行，缩略图按「左上→右下」顺序出现）、视频封面并发 1 各自独立闸门；**图片一律整份读满再解码**（上限 64 MB、分块 8 MB，读不满就放弃、绝不拿残缺数据解码）；**视频封面一律走「迷你镜像」**（文件头 12 MB + moov，临时文件十几兆、不留空洞，见第 7 节 11），流式抽帧降为兜底；失败进 180 秒负缓存并记录原因（设置页可见）；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
@@ -212,6 +212,18 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
    - 修复：改为**固定展示框**——`TileAspect.box = 0.87`（宽:高 ≈ 1:1.15，媒体/文件夹/其它文件共用），`ThumbnailImage` 内部 `Image.scaledToFit()` 后套 `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)`，让留白只出现在图片下方、绝不上下均分；`FileNameLabel` 加 `minHeight: 32`（固定两行高度），于是同一行三列的图顶端齐平、文字行也齐平。`BrowserView` 删除 `aspects` 状态与 `onAspectChange` 回调，`MediaTile` 不再接收比例参数。
    - 观感取舍：横屏图在竖幅固定框里下方会留白（这是「不裁切 + 全部对顶」的必然代价，参考软件同样如此）。若以后想让内容更满，只改 `TileAspect.box` 一个常量即可（调小→更方、调大→更竖）。
 
+14. **✅ 已修（1.0.10）：格子里出现灰色边、横屏缩略图贴顶应该居中**
+   - 现象：1.0.9 的格子里，图片没铺满展示框的部分露出**灰色方块**（横屏图下方一大块灰）；横屏图被顶到框的最上方，看着别扭。
+   - 根因：1.0.9 把灰底当作「整格背景」（`Rectangle().fill(secondarySystemFill)`），图片 `.scaledToFit()` 后又被 `alignment: .top` 顶到上面，于是没被图片盖住的区域就是灰的。
+   - 修复：`ThumbnailImage` 改成 `ZStack` 两态——**有图时只画图片本身**（圆角裁在图片上，不再有底板），无图/失败时才画灰色占位块；图片在外层 `frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)` 里居中，横屏上下留白均匀、竖屏左右留白均匀。播放角标从「整格左下角」移到**图片自身的左下角**（`overlay` 挂在 `Image` 上），不会飘到留白里。列表页传 `showPlayBadge: false`，避免和文字行里的播放图标重复。
+   - 备注：没有图片时的失败占位仍是灰块 + 图标（这是要让人看出「这里有东西但没图」）。
+
+15. **✅ 已修（1.0.10）：个别大文件视频始终抽帧失败（诊断显示「已取 12288 KB + moov」）**
+   - 现象：`桃桃酱-白衬无缝肉丝.mp4` 等片子，1.0.7 的迷你镜像已经能拿到 moov，但抽帧还是失败，设置页诊断写「抽帧失败（已取 12288 KB + moov）」。
+   - 根因：文件头固定只读 12 MB，而这类片子单个 GOP 就有 16 MB 左右，第一帧（关键帧）的数据被切断，解码器拿不到完整的首帧 → 抽帧必然失败。
+   - 修复：`VideoThumbnailMirror` 的头部长度改成**逐级重试**（12 MB → 24 MB → 40 MB，读到文件尾即止），moov 只读一次、多轮复用；`extractFrame` 改成返回 `(image, error)`，把 AVFoundation 的真实报错（含错误码）写进 `ThumbnailDiagnostics`，下一轮出问题能直接看原因而不是靠猜；实测整份读入仍失败才放弃。
+   - 代价：失败时最多多读 ~28 MB（仅在 LAN、且只在封面抽不出来时发生），成功路径通常第一轮 12 MB 就够。
+
 ## 8. 约定（改代码前先看）
 
 - **不要提交 `SMBViewer.xcodeproj`**：改工程必须改 `project.yml`。
@@ -250,6 +262,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.0.10 | 2026-10-31 | 网格去掉灰底：有图时只画图片本身（圆角裁在图上），无图才铺灰块；图片在展示框内居中（横屏上下、竖屏左右留白均匀），播放角标改挂到图片左下角；视频封面镜像的头部长度改为 12→24→40 MB 逐级重试（修复单个 GOP 大于 12 MB 时抽帧失败），并把 AVFoundation 真实报错写进设置页诊断 |
 | 1.0.9 | 2026-10-31 | 网格改为固定展示框（`TileAspect.box` 宽:高 ≈ 1:1.15）：缩略图完整显示并贴框顶部，横屏图下方留白、竖屏图不再被撑成过高的竖条，文件名固定两行高度，同一行三列顶端与文字行全部齐平；删除 1.0.8 的 `onAspectChange` / `aspects` 真实比例管线 |
 | 1.0.8 | 2026-10-31 | 缩略图网格改为按真实宽高比显示：去掉写死的照片 3:4 / 视频 16:9，`ThumbnailImage` 加载后用 `onAspectChange` 回传真实比例、`BrowserView` 存 `aspects` 再喂 `.aspectRatio`，竖屏撑竖条、横屏撑横条，同一行顶部对齐、底部随内容错落；文件名/大小/日期字号微调（1.0.9 已废弃该方案） |
 | 1.0.7 | 2026-10-31 | 修复大文件视频封面始终出不来：镜像改为「文件头 12 MB + moov + 修正 mdat 声明长度」的连续小文件（不再生成与原片等大的稀疏文件）；播放页弃用 AVKit `VideoPlayer`，改 `AVPlayerLayer` + 自绘控件并清空 Now Playing，去掉灵动岛媒体胶囊；缩略图改用 `OrderedLimiter` 按网格顺序加载；设置页新增缩略图失败原因诊断 |

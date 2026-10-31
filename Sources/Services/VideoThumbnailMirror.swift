@@ -11,7 +11,7 @@ import UIKit
 ///
 /// 这里改成确定性的做法：
 /// 1. 只读 16 字节的盒子头，顺着顶层盒子找到 `moov` 与 `mdat`（moov 在最前、最后都行）；
-/// 2. 取**文件开头一小段**（默认 12 MB，够解码头几秒）和 `moov`；
+/// 2. 取**文件开头一小段**（12 → 24 → 40 MB 逐级加大，单个 GOP 大的片子要更多）和 `moov`；
 /// 3. 把 mdat 的「声明长度」改成实际拿到的字节数，拼成一个小而连续的文件（**不留空洞**）；
 /// 4. 让 `AVAssetImageGenerator` 从本地文件抽帧。
 ///
@@ -21,8 +21,13 @@ import UIKit
 enum VideoThumbnailMirror {
     /// moov 读进内存的上限
     private static let maxMoovSize: Int64 = 8 * 1024 * 1024
-    /// 文件开头取的字节数（覆盖头几秒的画面数据，够抽第一帧）
-    private static let prefixLength: Int64 = 12 * 1024 * 1024
+    /// 文件开头依次尝试取的字节数（覆盖头几秒的画面数据，够抽第一帧）。
+    /// 单个 GOP 大的片子（4K / 高码率）12 MB 装不下第一帧，所以要逐级加大。
+    private static let prefixAttempts: [Int64] = [
+        12 * 1024 * 1024,
+        24 * 1024 * 1024,
+        40 * 1024 * 1024
+    ]
     /// 极小的片子至少也要读这么多
     private static let minPrefixLength: Int64 = 2 * 1024 * 1024
 
@@ -47,66 +52,84 @@ enum VideoThumbnailMirror {
             return nil
         }
 
-        var prefix = min(fileSize, max(minPrefixLength, prefixLength))
-        // moov 刚好压在前缀边界上：把前缀延长到 moov 结束，避免出现两个 moov
-        if layout.moovOffset < prefix, layout.moovOffset + layout.moovSize > prefix {
-            prefix = layout.moovOffset + layout.moovSize
-        }
-        guard prefix > 0, prefix <= Int64(Int.max) else { return nil }
-
-        var head: Data
-        do {
-            head = try await connection.read(path, offset: 0, length: Int(prefix), cancel: cancel)
-        } catch {
-            return nil
-        }
-        guard Int64(head.count) == prefix else {
-            ThumbnailDiagnostics.record(name, "文件头只读到 \(head.count) 字节")
-            return nil
-        }
-
-        // moov 不在前缀里就单独读回来，接在文件末尾
-        var tail = Data()
-        if layout.moovOffset >= prefix {
-            do {
-                tail = try await connection.read(
-                    path, offset: layout.moovOffset, length: Int(layout.moovSize), cancel: cancel
-                )
-            } catch {
-                return nil
-            }
-            guard Int64(tail.count) == layout.moovSize else {
-                ThumbnailDiagnostics.record(name, "moov 只读到 \(tail.count) 字节")
-                return nil
-            }
-        }
-        if cancel.isCancelled { return nil }
-
-        // 把 mdat 的声明长度改成「实际拿到的字节数」，否则解析器会认为文件被截断
-        head = patchMdatSize(head, layout: layout)
-
         let ext = fileExtension.isEmpty ? "mp4" : fileExtension
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("smbthumb-\(UUID().uuidString).\(ext)")
-        do {
-            var data = head
-            data.append(tail)
-            try data.write(to: tempURL, options: .atomic)
-        } catch {
-            ThumbnailDiagnostics.record(name, "写临时文件失败：\(error.localizedDescription)")
-            return nil
-        }
-        defer { try? FileManager.default.removeItem(at: tempURL) }
+        var moovData: Data?
+        var lastFailure = "未知原因"
+        var triedPrefix = 0
 
-        if let image = await extractFrame(at: tempURL, cancel: cancel) {
-            return image
+        for base in prefixAttempts {
+            if cancel.isCancelled { return nil }
+
+            var prefix = min(fileSize, max(minPrefixLength, base))
+            // moov 刚好压在前缀边界上：把前缀延长到 moov 结束，避免出现两个 moov
+            if layout.moovOffset < prefix, layout.moovOffset + layout.moovSize > prefix {
+                prefix = layout.moovOffset + layout.moovSize
+            }
+            guard prefix > 0, prefix <= Int64(Int.max) else { return nil }
+            if prefix == Int64(triedPrefix) { continue }
+            triedPrefix = Int(prefix)
+
+            var head: Data
+            do {
+                head = try await connection.read(path, offset: 0, length: Int(prefix), cancel: cancel)
+            } catch {
+                continue
+            }
+            guard Int64(head.count) == prefix else {
+                ThumbnailDiagnostics.record(name, "文件头只读到 \(head.count) 字节")
+                continue
+            }
+
+            // moov 不在前缀里就单独读回来，接在文件末尾（多轮重试共用一份）
+            var tail = Data()
+            if layout.moovOffset >= prefix {
+                if moovData == nil {
+                    guard let data = try? await connection.read(
+                        path, offset: layout.moovOffset, length: Int(layout.moovSize), cancel: cancel
+                    ), Int64(data.count) == layout.moovSize else {
+                        ThumbnailDiagnostics.record(name, "moov 只读到部分字节")
+                        return nil
+                    }
+                    moovData = data
+                }
+                tail = moovData ?? Data()
+            }
+            if cancel.isCancelled { return nil }
+
+            // 把 mdat 的声明长度改成「实际拿到的字节数」，否则解析器会认为文件被截断
+            head = patchMdatSize(head, layout: layout)
+
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("smbthumb-\(UUID().uuidString).\(ext)")
+            do {
+                var data = head
+                data.append(tail)
+                try data.write(to: tempURL, options: .atomic)
+            } catch {
+                ThumbnailDiagnostics.record(name, "写临时文件失败：\(error.localizedDescription)")
+                return nil
+            }
+
+            let attempt = await extractFrame(at: tempURL, cancel: cancel)
+            try? FileManager.default.removeItem(at: tempURL)
+
+            if let image = attempt.image { return image }
+            if !attempt.error.isEmpty { lastFailure = attempt.error }
+
+            // 已经整份读进来了，再加大没有意义
+            if prefix >= fileSize { break }
         }
-        ThumbnailDiagnostics.record(name, "抽帧失败（已取 \(head.count / 1024) KB + moov）")
+
+        ThumbnailDiagnostics.record(
+            name, "抽帧失败（文件头试到 \(triedPrefix / 1024 / 1024) MB）：\(lastFailure)"
+        )
         return nil
     }
 
-    /// 从镜像文件抽一帧
-    private static func extractFrame(at url: URL, cancel: CancellationBox) async -> UIImage? {
+    /// 从镜像文件抽一帧；失败时把 AVFoundation 的真实报错带回去，方便设置页诊断
+    private static func extractFrame(
+        at url: URL, cancel: CancellationBox
+    ) async -> (image: UIImage?, error: String) {
         let asset = AVURLAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
@@ -115,15 +138,21 @@ enum VideoThumbnailMirror {
         generator.requestedTimeToleranceBefore = .positiveInfinity
         generator.requestedTimeToleranceAfter = .positiveInfinity
 
+        var lastError = ""
         // 从小时间点试起：镜像里只有头十几兆，越靠后越可能没有数据
         for seconds in [1.0, 0.0, 3.0, 0.5] {
-            if cancel.isCancelled { return nil }
+            if cancel.isCancelled { return (nil, "已取消") }
             let time = CMTime(seconds: seconds, preferredTimescale: 600)
-            if let result = try? await generator.image(at: time) {
-                return UIImage(cgImage: result.image)
+            do {
+                let result = try await generator.image(at: time)
+                return (UIImage(cgImage: result.image), "")
+            } catch {
+                let code = (error as NSError).code
+                let text = error.localizedDescription
+                lastError = text.isEmpty ? "错误码 \(code)" : "\(text)(\(code))"
             }
         }
-        return nil
+        return (nil, lastError)
     }
 
     // MARK: - 顶层盒子扫描

@@ -275,8 +275,8 @@ final class ThumbnailStore: @unchecked Sendable {
         }
         guard size > 0 else { return nil }
 
-        // 一律先走「迷你镜像」：只读文件头 12 MB + moov，跟文件总大小无关，
-        // 也不会被 AVFoundation「一直读到文件尾」的请求拖住（大文件封面失败的根因）。
+        // 一律先走「迷你镜像」：只读文件头（12 MB 起，不够再逐级加到 24 / 40 MB）+ moov，
+        // 跟文件总大小无关，也不会被 AVFoundation「一直读到文件尾」的请求拖住（大文件封面失败的根因）。
         if let mirrored = await VideoThumbnailMirror.makeImage(
             connection: connection,
             path: item.path,
