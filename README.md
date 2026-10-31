@@ -4,6 +4,8 @@
 
 工程里不带任何签名配置，配合 GitHub Actions 直接产出**未签名 IPA**，你再自行重签名安装。
 
+> 接手 / 继续开发请看 [`HANDOFF.md`](HANDOFF.md)：里面有当前版本状态、文件地图、构建细节、已知待办和版本记录，**每次发版都会更新**。
+
 ---
 
 ## 功能
@@ -28,6 +30,7 @@
 
 ```
 .
+├── HANDOFF.md                      # 交接说明（当前状态 / 待办 / 版本记录）
 ├── project.yml                     # XcodeGen 工程描述（SPM 依赖在这里声明）
 ├── Config/Info.plist               # 手写 Info.plist（含本地网络权限说明）
 ├── Sources/
@@ -57,7 +60,7 @@
 ### 方式一：GitHub Actions（推荐，不需要 Mac）
 
 1. 新建一个仓库，把本目录所有文件推上去（默认分支 `main`）。
-2. 打开仓库的 **Actions** 页面，选择 `Build unsigned IPA`，点 **Run workflow**。
+2. 打开仓库的 **Actions** 页面，选择「构建未签名 IPA」，点 **Run workflow**。
 3. 构建完成后，在该次运行页面底部 **Artifacts** 下载 `SMBViewer-unsigned-ipa`，解压得到 `SMBViewer-unsigned.ipa`。
 4. 如果推送 `v1.0.0` 这类 tag，IPA 会自动附加到对应的 Release 里。
 

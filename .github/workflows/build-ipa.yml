@@ -1,8 +1,12 @@
-name: Build unsigned IPA
+name: 构建未签名 IPA
+run-name: 构建未签名 IPA · ${{ github.ref_name }}
 
 # 镜像说明：
 #   xcode-27 = macOS 27 + Xcode 27（镜像默认 Xcode 即 27.x，SDK 为 iOS 27）
 #   想改回旧版：把 runs-on 换成 macos-26 / macos-15，并把 XCODE_VERSION 改成对应主版本号
+#
+# 注意：Actions 页面里的「Set up job」「Post Checkout」「Complete job」是 GitHub 内置步骤，
+#       名字由平台固定生成，无法改成中文，其余步骤名都是下面自定的。
 env:
   XCODE_VERSION: "27"
 
@@ -19,24 +23,24 @@ concurrency:
 
 jobs:
   build:
-    name: Build SMBViewer (Xcode 27, unsigned)
+    name: 构建 SMBViewer（Xcode 27 · 不签名）
     runs-on: xcode-27
     timeout-minutes: 60
     permissions:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: Show runner info
+      - name: 查看运行器信息
         run: |
           set -euo pipefail
           sw_vers
           echo "== 镜像里的 Xcode =="
           ls -d /Applications/Xcode*.app || true
 
-      - name: Select Xcode
+      - name: 选择 Xcode 27
         run: |
           set -euo pipefail
           echo "目标主版本：$XCODE_VERSION"
@@ -64,7 +68,7 @@ jobs:
           swift --version 2>&1 | head -2
 
       # Xcode 27 预览镜像可能没带 Metal 工具链（actool 编译图标时会报 missing Metal Toolchain）
-      - name: Ensure Metal toolchain
+      - name: 准备 Metal 工具链
         continue-on-error: true
         timeout-minutes: 15
         run: |
@@ -75,23 +79,23 @@ jobs:
             xcodebuild -downloadComponent MetalToolchain || echo "下载失败，继续构建（本项目不需要 Metal 着色器）"
           fi
 
-      - name: Install XcodeGen
+      - name: 安装 XcodeGen
         run: |
           brew update --quiet || true
           brew install xcodegen
           xcodegen --version
 
-      - name: Generate Xcode project
+      - name: 生成 Xcode 工程
         run: xcodegen generate
 
-      - name: Resolve Swift packages
+      - name: 解析 Swift 依赖
         run: |
           xcodebuild -resolvePackageDependencies \
             -project SMBViewer.xcodeproj \
             -scheme SMBViewer \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm"
 
-      - name: Archive (unsigned)
+      - name: 归档构建（不签名）
         run: |
           set -o pipefail
           xcodebuild archive \
@@ -108,7 +112,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             ONLY_ACTIVE_ARCH=NO
 
-      - name: Package IPA
+      - name: 打包 IPA
         run: |
           APP="$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app"
           if [ ! -d "$APP" ]; then
@@ -124,15 +128,16 @@ jobs:
           zip -qry SMBViewer-unsigned.ipa Payload
           ls -lh SMBViewer-unsigned.ipa
 
-      - name: Show IPA info
+      - name: 输出 IPA 信息
         run: |
           set -euo pipefail
           INFO="$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO" || true
-          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$INFO" || true
+          echo "Bundle ID: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO" || true)"
+          echo "最低系统: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$INFO" || true)"
+          echo "版本号: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO" || true) ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO" || true))"
           otool -L "$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app/SMBViewer" | head -20 || true
 
-      - name: Upload IPA artifact
+      - name: 上传 IPA 产物
         uses: actions/upload-artifact@v4
         with:
           name: SMBViewer-unsigned-ipa
@@ -140,7 +145,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach IPA to release
+      - name: 附加 IPA 到 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
