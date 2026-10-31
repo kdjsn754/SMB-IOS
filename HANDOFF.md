@@ -144,6 +144,14 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 - 提交信息沿用 `feat:` / `fix:` / `ci:` / `chore:` 前缀。
 - **不要**把 `Packages/AMSMB2/Package.swift` 的 `type: .static` 改回 `.dynamic`，也不要改回远程 URL 依赖，否则闪退问题会复发（CI 有断言兜底）。
 
+### 发版取包（本地交付目录）
+
+CI 通过后把 IPA 交付到 `D:\下载\互传`，命名 `SMBViewer-vX.Y.Z-unsigned.ipa`。
+
+- 该目录**只处理 `SMBViewer-*.ipa`**：保留最新一版、删除其余 SMBViewer 旧包。
+- 同目录下的其它项目文件（`LanBox-*.apk`、`Monitor-iOS-*.zip`、`OpenWrt-Monitor-*.apk`、各类 `.md/.txt`）**一律不动**。
+- 交付前自检三项并记录：版本号、`Payload` 内是否还有 `Frameworks` 目录（应无）、`otool -L` 是否只剩系统库。
+
 ### 依赖升级（AMSMB2）
 
 ```bash
