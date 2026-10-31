@@ -31,7 +31,9 @@ final class VideoPlaybackModel: ObservableObject {
     init() {
         let stored = UserDefaults.standard.object(forKey: Self.volumeKey) as? Double
         volume = Float(min(max(stored ?? 1, 0), 1))
-        player.volume = volume
+        // App 内音量固定拉满：音量统一交给系统输出音量（见 setVolume），
+        // 两边都调的话只会互相打折。
+        player.volume = 1
         player.actionAtItemEnd = .pause
         player.preventsDisplaySleepDuringVideoPlayback = true
         installTimeObserver()
@@ -130,14 +132,14 @@ final class VideoPlaybackModel: ObservableObject {
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
-    /// 音量统一走这里：手势上下拖、右上角音量面板、静音按钮都调它，保证 UI 与播放器一致。
-    /// 用 `AVPlayer.volume`（App 内音量）而不是 `MPVolumeView`，不弹系统音量条、也不动系统音量。
+    /// 音量状态统一走这里（HUD 的百分比、持久化）。
+    /// 真正改声音的地方在 `VideoPlayerView.updatePan`：那里调 `SystemVolume`，
+    /// 也就是**系统输出音量**。不要再用 `AVPlayer.volume` 当交互音量——
+    /// 它只影响 App 内部，手机音量条不动，用户会以为「音量手势没作用」。
     func setVolume(_ value: Float) {
         let clamped = min(max(value, 0), 1)
-        guard abs(clamped - volume) > 0.0005 else { return }
+        guard abs(clamped - volume) > 0.005 else { return }
         volume = clamped
-        player.volume = clamped
-        player.isMuted = clamped <= 0.001
         UserDefaults.standard.set(Double(clamped), forKey: Self.volumeKey)
     }
 
@@ -435,6 +437,8 @@ struct VideoPlayerView: View {
         }
         .task {
             await model.start(item: item, serverID: serverID, connection: connection)
+            // 用户可能用实体音量键调过，进页面先对齐一次
+            model.volume = SystemVolume.shared.current
             scheduleHide()
         }
         .onDisappear {
@@ -619,7 +623,7 @@ struct VideoPlayerView: View {
             Text("音量 \(Int((model.volume * 100).rounded()))% · 缩放 \(String(format: "%.1f", zoom))× · 亮度 \(Int(((1 - dimLevel) * 100).rounded()))%")
                 .font(.caption2.monospacedDigit())
             // 左边是界面状态，右边是真正落到播放器/画面上的值，两者不一致就是这一层断了
-            Text("生效 player \(String(format: "%.2f", model.player.volume))\(model.player.isMuted ? " 静音" : "") · 遮罩 \(String(format: "%.2f", dimLevel)) · 画面 \(String(format: "%.2f", zoom))×")
+            Text("生效 系统音量 \(String(format: "%.2f", SystemVolume.shared.current)) · 遮罩 \(String(format: "%.2f", dimLevel)) · 画面 \(String(format: "%.2f", zoom))×")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.75))
             Text("开关：\(gestures.isEnabled ? "开" : "关") · 上下拖动：\(gestures.vertical.title)")
@@ -680,7 +684,7 @@ struct VideoPlayerView: View {
         case .brightness:
             dragStartValue = 1 - dimLevel
         case .volume:
-            dragStartValue = Double(model.volume)
+            dragStartValue = Double(SystemVolume.shared.current)
         default:
             dragStartValue = 0
         }
@@ -713,6 +717,8 @@ struct VideoPlayerView: View {
                 showHUD(.brightness(value), autoHide: false)
             } else {
                 model.setVolume(Float(value))
+                // 真正调手机音量：AVPlayer.volume 只影响 App 内，用户会觉得音量条没动
+                SystemVolume.shared.set(Float(value))
                 showHUD(.volume(value), autoHide: false)
             }
 

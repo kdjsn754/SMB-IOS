@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.1.9`（build 21），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.1.9 由 run **#27**（sha `fe6dbd2`）全绿产出（含「自检：包结构与依赖」） |
+| 版本 | `1.1.10`（build 22），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ⏳ 1.1.10 已推送触发 CI |
 | 产物自检 | 1.1.9：`Info.plist` = 1.1.9 / build 21、`MinimumOSVersion` 16.0、可执行文件 arm64（1.54 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:/下载/互传/SMBViewer-v1.1.9-unsigned.ipa` |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
@@ -74,6 +74,7 @@ Sources/
   Views/Components/ToastBanner.swift 底部轻提示（.toast($msg) 修饰器）
   Views/Settings/*.swift         设置二级页：外观 / 播放手势 / 缩略图（含失败记录）/ 缓存 / 关于
   Utilities/AppInfo.swift        版本号、build、最低系统（设置首页与关于页共用）
+  Services/SystemVolume.swift    系统输出音量控制（隐藏 MPVolumeView + slider）
   Views/Components/MediaTiles.swift 网格/列表单元格 + FileNameLabel（中间省略）/ TileCaption
   Services/VideoThumbnailMirror.swift 大文件视频封面的稀疏镜像抽帧（moov + 关键帧）
   Utilities/Formatters.swift     字节、时间（短日期 yyyy/MM/dd）格式化
@@ -322,7 +323,12 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
        用来挡住 0.25 秒的时间回调，否则 HUD 会被真实进度抢回去。
      - **亮度 = 一层黑色 `Color.black.opacity(dimLevel)`**（0~0.85），不改系统亮度：
        不需要权限、退出即恢复、不会影响用户其它 App；代价是不能调得比原始更亮。
-     - **音量直接写 `player.volume`**（0~1），不接管系统音量、不弹 HUD。
+     - **音量改的是系统输出音量**（`Services/SystemVolume.swift`：把 `MPVolumeView` 塞到屏幕外，
+       改它内部那个 `UISlider` 的 value 再 `sendActions(for: .valueChanged)`），
+       和抖音 / 系统播放器一致：手机音量条会跟着动，但不会弹系统音量 HUD。
+       **不要退回只用 `AVPlayer.volume`**：它只影响 App 内部，用户看到百分比在变、
+       手机音量条不动、听感也可能没变化（1.1.9 及之前的问题）。
+       App 内 `player.volume` 固定 1，两条通路都调只会互相打折。
      - **长按加速**要记录「按住前是否在播」，松手后回到原状态（`wasPlayingBeforeHold`）；
        直接把 `player.rate` 设为 1 会让暂停的片子莫名其妙开始播。
      - **画面缩放用 SwiftUI 的 `.scaleEffect(zoom)`**（1.1.9 定稿），直接挂在 `PlayerSurface` 上，1~4 倍，
@@ -389,6 +395,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.1.10 | 2026-11-01 | **音量手势改为调手机系统音量**（`SystemVolume`：屏幕外 `MPVolumeView` 的 slider + `sendActions`），`player.volume` 固定 1；**首页重做**：标题改「资源库」、自定义大标题与「+」和服务器卡片共用 20pt 边距、服务器改成卡片（长按出编辑/删除）、空态合并成一张卡片；**设置页改成方块卡片网格**（2 列，淡色图标块 + 标题 + 当前状态，分「偏好设置 / 浏览与存储 / 其他」三组，关于为整行卡片）；两个首页都隐藏系统导航栏，二级页显式 `.toolbar(.visible)` 保住返回按钮 |
 | 1.1.9 | 2026-11-01 | **修「手势数值在变、画面/声音不动」**：画面缩放从「改 `AVPlayerLayer` 仿射变换」改为 SwiftUI `.scaleEffect(zoom)`（视频层会覆盖外来变换，1.1.8 实测无效）；音量在 0% 时同时 `isMuted`，保证 0 真的静音；诊断浮层新增「生效」一行，直接打 `player.volume` / 遮罩 / 画面缩放。**设置页改为「分类入口 + 二级页」**：首页只留外观 / 播放手势 / 缩略图 / 缓存 / 关于五个带摘要值的行，点进去才是详细设置；失败记录单独一页；新增 `AppInfo` 统一版本信息 |
 | 1.1.8 | 2026-11-01 | **手势彻底换实现**：删掉 UIKit 手势层（`PlayerGestureLayer`/`PlayerGestureCoordinator`），改成「0.1% 白矩形 + `DragGesture(minimumDistance:0)` + `MagnificationGesture`」，单击/双击/拖动/长按全部手写判定（之前透明视图当手势层在真机上完全收不到触摸）；右上角三个按钮收回「⋯」菜单（手势设置进菜单，音量/缩放入口移除）；**设置页重做**：分「外观 / 播放手势 / 缩略图 / 缓存 / 关于」五组，删掉大段小字说明与「使用说明」区块，失败记录改成可折叠 |
 | 1.1.7 | 2026-11-01 | **修播放手势完全没反应**：手势识别器从「SwiftUI 透明覆盖层」改挂到承载 `AVPlayerLayer` 的画面视图 `PlayerUIView` 本身（不再依赖透明层能否命中），`isMultipleTouchEnabled = true` 修双指捏合，位移改用父视图坐标系（放大后拖动不变迟钝）；缩放改为直接给 `AVPlayerLayer` 设仿射变换（给 view 套 transform 会被 SwiftUI 布局重置）；新增「显示手势诊断」开关，播放页左上角实时显示收到的手势与音量/缩放/亮度 |

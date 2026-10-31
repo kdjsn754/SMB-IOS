@@ -1,82 +1,117 @@
 import SwiftUI
+import UIKit
 
-/// 设置首页：只放分类入口，每个分类的摘要值直接显示在右侧，
-/// 点进去是二级页（详细设置）。这样首页一眼能看完，不会堆满开关和小字。
+/// 设置首页：方块卡片网格。
+/// 每张卡片 = 淡色图标 + 标题 + 当前状态，点进去是二级页（详细设置）。
 @MainActor
 struct SettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
     @ObservedObject private var gestures = PlayerGestureSettings.shared
 
     @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.system.rawValue
-    @AppStorage(SettingsKey.gridLayout) private var useGrid: Bool = true
     @AppStorage(SettingsKey.thumbnailsEnabled) private var thumbnailsEnabled: Bool = true
     @AppStorage(SettingsKey.videoThumbnails) private var videoThumbnails: Bool = true
 
+    private let margin: CGFloat = 20
+    private let columns = [
+        GridItem(.flexible(), spacing: 12),
+        GridItem(.flexible(), spacing: 12)
+    ]
+
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    NavigationLink {
-                        AppearanceSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "paintbrush.fill",
-                            tint: .indigo,
-                            title: "外观",
-                            value: themeTitle
-                        )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("设置")
+                        .font(.system(size: 32, weight: .bold))
+                        .padding(.bottom, 2)
+
+                    groupTitle("偏好设置")
+
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        NavigationLink {
+                            GestureSettingsView()
+                        } label: {
+                            SettingsCard(
+                                icon: "hand.draw.fill",
+                                tint: .orange,
+                                title: "播放手势",
+                                subtitle: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭"
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink {
+                            AppearanceSettingsView()
+                        } label: {
+                            SettingsCard(
+                                icon: "circle.lefthalf.filled",
+                                tint: .indigo,
+                                title: "外观",
+                                subtitle: themeTitle
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
 
-                    NavigationLink {
-                        GestureSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "hand.draw.fill",
-                            tint: .orange,
-                            title: "播放手势",
-                            value: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭"
-                        )
+                    groupTitle("浏览与存储")
+
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        NavigationLink {
+                            ThumbnailSettingsView()
+                        } label: {
+                            SettingsCard(
+                                icon: "photo.on.rectangle.angled",
+                                tint: .pink,
+                                title: "缩略图",
+                                subtitle: thumbnailSummary
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink {
+                            CacheSettingsView()
+                        } label: {
+                            SettingsCard(
+                                icon: "internaldrive.fill",
+                                tint: .green,
+                                title: "缓存",
+                                subtitle: Format.bytes(cache.totalBytes)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
 
-                    NavigationLink {
-                        ThumbnailSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "photo.on.rectangle.angled",
-                            tint: .pink,
-                            title: "缩略图",
-                            value: thumbnailSummary
-                        )
-                    }
-                }
-
-                Section {
-                    NavigationLink {
-                        CacheSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "internaldrive.fill",
-                            tint: .blue,
-                            title: "缓存",
-                            value: Format.bytes(cache.totalBytes)
-                        )
-                    }
+                    groupTitle("其他")
 
                     NavigationLink {
                         AboutSettingsView()
                     } label: {
-                        SettingsRow(
+                        SettingsCardRow(
                             icon: "info.circle.fill",
                             tint: .gray,
                             title: "关于",
-                            value: AppInfo.version
+                            subtitle: "版本 " + AppInfo.versionWithBuild
                         )
                     }
+                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, margin)
+                .padding(.top, 6)
+                .padding(.bottom, 28)
             }
-            .navigationTitle("设置")
+            .background(Color(uiColor: .systemGroupedBackground))
+            .toolbar(.hidden, for: .navigationBar)
             .onAppear { cache.refresh() }
         }
+    }
+
+    private func groupTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.leading, 4)
+            .padding(.top, 10)
     }
 
     private var themeTitle: String {

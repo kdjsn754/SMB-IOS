@@ -66,6 +66,8 @@ struct BrowserView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        // 首页把导航栏藏了（自己做标题），这里必须显式显示，否则没有返回按钮
+        .toolbar(.visible, for: .navigationBar)
         .toolbar { toolbarContent }
         .task { await load() }
         .fullScreenCover(item: $overlay) { item in
