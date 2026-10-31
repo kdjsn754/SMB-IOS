@@ -113,6 +113,13 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 3. **单共享**：一台服务器只连一个共享名，没有「先列共享再选」的流程。
 4. **无真机回归**：功能正确性依赖代码审查，用户反馈时优先怀疑 `SMBConnection` 的路径拼接与 `SMBAssetLoader` 的 range 换算。
 5. **缩略图首次慢**：视频要读文件头（`moov` 在尾部时还要读末尾），属预期行为。
+6. **🔴 排查中：iOS 27 装机后打开闪退（2026-10-31 用户反馈）**
+   - 已知：构建成功、安装成功，点图标后立即退回桌面。
+   - 代码侧已排查：启动路径只渲染 `ServerListView`（空态）+ `SettingsView`，无网络、无强制解包、无 `fatalError`；SwiftUI `App` 生命周期在 iOS 27 的「必须采用 UIScene」新规里是**豁免**的（该规定只针对 UIKit app-based 生命周期），所以不太像代码问题。
+   - **最可能原因**：AMSMB2 的 SPM 产物是 `type: .dynamic`，IPA 里带 `Frameworks/AMSMB2.framework`；若重签工具只签主程序没签嵌套框架，iOS 会在启动 dyld 阶段直接杀掉进程 → 表现为闪退。
+   - 判别方法：看崩溃日志里是 `Library not loaded: @rpath/AMSMB2.framework/AMSMB2` / `CODESIGNING`（签名/框架问题），还是 `EXC_BAD_ACCESS` + SwiftUI 栈（代码问题）。
+   - CI 已加「自检：包结构与依赖」步骤，会打印 `.app` 结构、`Frameworks` 内容、`LC_RPATH`、签名状态、关键 Info.plist 键。
+   - **根治方案（若确认是框架签名）**：把 `Packages/AMSMB2` vendor 进仓库并把 product 改成 `.static`，IPA 就不再包含任何动态框架，任何重签工具都不会漏签。
 
 ---
 

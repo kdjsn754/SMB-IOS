@@ -131,11 +131,46 @@ jobs:
       - name: 输出 IPA 信息
         run: |
           set -euo pipefail
-          INFO="$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app/Info.plist"
+          APP="$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app"
+          INFO="$APP/Info.plist"
           echo "Bundle ID: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO" || true)"
           echo "最低系统: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$INFO" || true)"
           echo "版本号: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO" || true) ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO" || true))"
-          otool -L "$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app/SMBViewer" | head -20 || true
+          echo "可执行文件: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO" || true)"
+          otool -L "$APP/SMBViewer" | head -20 || true
+
+      # 闪退排查用：确认包结构、动态库依赖、rpath、签名状态
+      - name: 自检：包结构与依赖
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app"
+          INFO="$APP/Info.plist"
+          echo "=== .app 结构 ==="
+          find "$APP" -maxdepth 3 -not -path "*/_CodeSignature/*" | sed "s|$APP|.|" | head -40
+          echo
+          echo "=== 内嵌框架 ==="
+          if [ -d "$APP/Frameworks" ]; then
+            ls -la "$APP/Frameworks" || true
+            for fw in "$APP/Frameworks"/*.framework; do
+              [ -e "$fw" ] || continue
+              echo "--- $fw"
+              otool -L "$fw/$(basename "$fw" .framework)" | head -5 || true
+            done
+          else
+            echo "没有 Frameworks 目录（SPM 可能被静态链接）"
+          fi
+          echo
+          echo "=== LC_RPATH / 依赖 ==="
+          otool -l "$APP/SMBViewer" | grep -A2 LC_RPATH | head -20 || true
+          echo
+          echo "=== 签名状态（未签名应有 CodeSignature 缺失提示）==="
+          codesign -dvvv "$APP" 2>&1 | head -8 || true
+          echo
+          echo "=== Info.plist 关键键 ==="
+          for k in CFBundlePackageType CFBundleSupportedPlatforms MinimumOSVersion UIDeviceFamily UIApplicationSceneManifest UILaunchScreen; do
+            printf '%s = ' "$k"
+            /usr/libexec/PlistBuddy -c "Print :$k" "$INFO" 2>/dev/null || echo "(缺失)"
+          done
 
       - name: 上传 IPA 产物
         uses: actions/upload-artifact@v4
