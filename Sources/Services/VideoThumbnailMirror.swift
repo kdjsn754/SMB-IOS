@@ -1,7 +1,6 @@
 import Foundation
 import AVFoundation
 import UIKit
-import CoreImage
 
 /// 远端视频封面的「迷你镜像」抽帧器。
 ///
@@ -41,8 +40,8 @@ enum VideoThumbnailMirror {
     private static let fragmentCap: Int64 = 24 * 1024 * 1024
     /// 顶层盒子的探测上限（分片文件每个 moof/mdat 都要走一轮）
     private static let probeBoxLimit = 64
-    /// 小于这个大小的片子，最后可以整份读进来试一次
-    private static let wholeFileLimit: Int64 = 64 * 1024 * 1024
+    /// 小于这个大小的片子可以整份读进来（等于不截断），镜像才安全
+    static let wholeFileLimit: Int64 = 64 * 1024 * 1024
 
     private struct Probe {
         let summary: MP4Inspector.Summary
@@ -67,7 +66,7 @@ enum VideoThumbnailMirror {
         }
         let summary = probe.summary
         guard let moov = summary.moov else {
-            ThumbnailDiagnostics.record(name, "找不到 moov · \(summary.descriptionLine)")
+            ThumbnailDiagnostics.record(name, "结构 \(summary.compactLine)")
             return nil
         }
         guard moov.size >= 8, moov.size <= maxMoovSize else {
@@ -129,7 +128,7 @@ enum VideoThumbnailMirror {
                 return nil
             }
 
-            let attempt = await decodeFrame(at: url)
+            let attempt = await VideoFrameDecoder.firstFrame(from: AVURLAsset(url: url))
             try? FileManager.default.removeItem(at: url)
 
             if let image = attempt.image { return image }
@@ -137,9 +136,9 @@ enum VideoThumbnailMirror {
             if length >= fileSize { break }
         }
 
+        ThumbnailDiagnostics.record(name, "结构 \(summary.compactLine)")
         ThumbnailDiagnostics.record(
-            name,
-            "抽帧失败（镜像 \(triedLength / 1024 / 1024) MB · \(summary.descriptionLine)）：\(lastError)"
+            name, "抽帧失败（镜像 \(triedLength / 1024 / 1024)MB）\(VideoFrameDecoder.shortError(lastError))"
         )
         return nil
     }
@@ -157,6 +156,12 @@ enum VideoThumbnailMirror {
                 boundary = box.end
             }
             if boundary > 0 { return [min(boundary, fileSize)] }
+        }
+
+        // 超过镜像上限（48 MB）但还小到能整份读进来：直接整份读一次，
+        // 别按 12/24/40/48 一次次试 —— 截断的镜像本来就会被判「样本偏移越界」，白费流量
+        if fileSize > maxPrefix, fileSize <= wholeFileLimit {
+            return [fileSize]
         }
 
         var first = min(fileSize, max(minPrefix, prefixAttempts[0]))
@@ -284,109 +289,5 @@ enum VideoThumbnailMirror {
             }
         }
         return out
-    }
-
-    // MARK: - 抽帧
-
-    /// 先顺着样本读第一帧（不需要 seek，和播放走同一条解读路径），失败才退回按时间取帧。
-    private static func decodeFrame(at url: URL) async -> (image: UIImage?, error: String) {
-        let byReader = await firstFrameByReader(at: url)
-        if let image = byReader.image { return (image, "") }
-
-        let byGenerator = await frameByGenerator(at: url)
-        if let image = byGenerator.image { return (image, "") }
-
-        var text = byReader.error
-        if !byGenerator.error.isEmpty {
-            text = text.isEmpty ? byGenerator.error : "\(text) / \(byGenerator.error)"
-        }
-        return (nil, text)
-    }
-
-    /// 顺着样本读第一个画面。这是最贴近播放器的方法：只往前进、不 seek，
-    /// 所以镜像被截断在 GOP 中间也不会因为「找不到目标时间的样本」直接报 -11821。
-    private static func firstFrameByReader(at url: URL) async -> (image: UIImage?, error: String) {
-        let asset = AVURLAsset(url: url)
-        do {
-            let tracks = try await asset.loadTracks(withMediaType: .video)
-            guard let track = tracks.first else { return (nil, "没有视频轨道") }
-            let transform = (try? await track.load(.preferredTransform)) ?? .identity
-
-            let reader = try AVAssetReader(asset: asset)
-            let output = AVAssetReaderTrackOutput(
-                track: track,
-                outputSettings: [
-                    kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: kCVPixelFormatType_32BGRA)
-                ]
-            )
-            output.alwaysCopiesSampleData = false
-            guard reader.canAdd(output) else { return (nil, "reader 不接受这个轨道") }
-            reader.add(output)
-            guard reader.startReading() else {
-                let reason = reader.error?.localizedDescription ?? "未知原因"
-                return (nil, "reader 启动失败：\(reason)")
-            }
-            defer { reader.cancelReading() }
-
-            var seen = 0
-            while let sample = output.copyNextSampleBuffer() {
-                seen += 1
-                if let buffer = CMSampleBufferGetImageBuffer(sample),
-                   let image = makeImage(from: buffer, transform: transform) {
-                    return (image, "")
-                }
-                if seen >= 8 { break }
-            }
-            if let error = reader.error {
-                let ns = error as NSError
-                return (nil, "\(ns.localizedDescription)(\(ns.code))")
-            }
-            return (nil, "读到 \(seen) 个样本但解不出图像")
-        } catch {
-            let ns = error as NSError
-            return (nil, "\(ns.localizedDescription)(\(ns.code))")
-        }
-    }
-
-    /// 兜底：让 AVAssetImageGenerator 取第 0 秒（容差无限，等价于「取最靠前的关键帧」）。
-    private static func frameByGenerator(at url: URL) async -> (image: UIImage?, error: String) {
-        let asset = AVURLAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 480, height: 480)
-        generator.requestedTimeToleranceBefore = .positiveInfinity
-        generator.requestedTimeToleranceAfter = .positiveInfinity
-        do {
-            let result = try await generator.image(at: .zero)
-            return (UIImage(cgImage: result.image), "")
-        } catch {
-            let ns = error as NSError
-            return (nil, "\(ns.localizedDescription)(\(ns.code))")
-        }
-    }
-
-    /// CVPixelBuffer → UIImage，套上轨道的旋转/镜像变换，并缩到长边 480
-    private static let renderContext = CIContext(options: [.cacheIntermediates: false])
-
-    private static func makeImage(from buffer: CVPixelBuffer, transform: CGAffineTransform) -> UIImage? {
-        var image = CIImage(cvPixelBuffer: buffer)
-        if !transform.isIdentity {
-            image = image.transformed(by: transform)
-        }
-        var extent = image.extent
-        guard extent.width > 1, extent.height > 1 else { return nil }
-        if extent.origin != .zero {
-            image = image.transformed(
-                by: CGAffineTransform(translationX: -extent.origin.x, y: -extent.origin.y)
-            )
-            extent = image.extent
-        }
-        let longest = max(extent.width, extent.height)
-        if longest > 480 {
-            let scale = 480 / longest
-            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        }
-        guard let cgImage = renderContext.createCGImage(image, from: image.extent) else { return nil }
-        return UIImage(cgImage: cgImage)
     }
 }

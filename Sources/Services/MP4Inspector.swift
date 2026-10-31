@@ -40,27 +40,23 @@ enum MP4Inspector {
         var moofCount: Int { boxes.filter { $0.type == "moof" }.count }
         var videoTrack: Track? { tracks.first { $0.handler == "vide" } }
 
-        /// 一行诊断摘要，例：`ftyp@0 moov@32(6KB) mdat@6240(512MB) · 视频 avc1 1080×1920 首帧@6240+24576`
-        var descriptionLine: String {
-            var names: [String] = []
-            for box in boxes.prefix(5) {
-                if box.type == "moov" || box.type == "mdat" {
-                    names.append("\(box.type)@\(box.offset)(\(Self.sizeText(box.size)))")
-                } else {
-                    names.append("\(box.type)@\(box.offset)")
-                }
+        /// 一行诊断摘要（尽量短：设置页一行显示不下会被省略号截掉）。
+        /// 例：`mdat@40 522MB · moov尾 412KB · avc1 1080×1920 · 首帧@40+2.4MB`
+        var compactLine: String {
+            var parts: [String] = []
+            if let mdat {
+                parts.append("mdat@\(mdat.offset) \(Self.sizeText(mdat.size))")
             }
-            if boxes.count > 5 { names.append("…共 \(boxes.count) 个") }
-
-            var parts = [names.joined(separator: " ")]
-            if isFragmented { parts.append("分片 moof×\(moofCount)") }
+            if let moov {
+                let atEnd = moov.offset > (mdat?.offset ?? 0)
+                parts.append("\(atEnd ? "moov尾" : "moov头") \(Self.sizeText(moov.size))")
+            }
+            if isFragmented { parts.append("分片×\(moofCount)") }
             if let video = videoTrack {
-                var text = "视频 \(video.codec) \(video.width)×\(video.height)"
-                text += " 首帧@\(video.firstSampleOffset)+\(video.firstSampleSize)"
-                if video.hasEditList { text += " elst" }
-                parts.append(text)
+                parts.append("\(video.codec) \(video.width)×\(video.height)")
+                parts.append("首帧@\(video.firstSampleOffset)+\(Self.sizeText(video.firstSampleSize))")
             } else {
-                parts.append(tracks.isEmpty ? "moov 里没解出轨道" : "无视频轨道")
+                parts.append(tracks.isEmpty ? "moov无轨道" : "无视频轨道")
             }
             return parts.joined(separator: " · ")
         }

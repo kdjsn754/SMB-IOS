@@ -19,9 +19,9 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.12`（build 13），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.0.12 由 run **#18**（sha `acffae3`）全绿产出（含「自检：包结构与依赖」） |
-| 产物自检 | 1.0.12：`Info.plist` = 1.0.12 / build 13、`MinimumOSVersion` 16.0、可执行文件 arm64（1.31 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:\下载\互传\SMBViewer-v1.0.12-unsigned.ipa` |
+| 版本 | `1.0.13`（build 14），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ 1.0.12 由 run **#18**（sha `acffae3`）全绿产出；1.0.13 由本次 CI 产出 |
+| 产物自检 | 1.0.13：`Info.plist` = 1.0.13 / build 14、`MinimumOSVersion` 16.0、可执行文件 arm64（1.31 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:\下载\互传\SMBViewer-v1.0.12-unsigned.ipa` |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -38,7 +38,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。
 - **目录页布局**（1.0.4，1.0.6 调整，1.0.9 定框，1.0.10 去灰底+居中）：固定三列网格、同一行顶部对齐（`LazyVGrid` + `GridItem(alignment: .top)`），单元格为「缩略图 + 两行文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。**1.0.9 起缩略图展示框高度固定**（`TileAspect.box = 0.87`，即宽:高 ≈ 1:1.15，照片/视频/文件夹/其它文件共用同一个框）；**1.0.10 起框内不再铺灰底**——有图时只在图片自身范围内画圆角，空格子是页面底色；图片 `.scaledToFit()` 完整显示后**在框内居中**（横屏上下留白、竖屏左右留白都均匀），播放角标跟着图片左下角走。`FileNameLabel` 固定两行高度，所以同一行三列的图片顶端成一条线、下面的文件名/大小/日期也齐平。1.0.6 的 `.scaledToFill` 裁切、1.0.8 的按真实比例撑格子均已废弃。
   - ⚠️ `LazyVGrid` 的 `alignment` 参数是 **`HorizontalAlignment`**（不是 `VerticalAlignment`），传 `.top` 编译不过；行内垂直对齐要靠 `GridItem(alignment: .top)` 或单元格内部的 `frame(alignment:)`。
-- **缩略图**（1.0.2 重写，1.0.6 修正读取，1.0.7 换镜像实现）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；**图片和视频共用一道有序闸门（`OrderedLimiter(limit: 1, graceMilliseconds: 60)`，一次只跑一个，按格子序号放行，1.0.11 起）**，所以缩略图严格按「左上→右下」依次出现；**图片一律整份读满再解码**（上限 64 MB、分块 8 MB，读不满就放弃、绝不拿残缺数据解码）；**视频封面一律走「迷你镜像」**：先用 `MP4Inspector` 摸清盒子结构（moov/mdat/moof 位置、首个视频样本落点、编码 fourcc），**普通 MP4** 取文件头 12→24→40 MB（按首帧落点可自动加大）+ 末尾接 moov，并把 mdat 声明长度改成实际字节数；**分片 MP4**（moof+mdat）切在**完整 fragment 边界**上、一个字节都不截断；抽帧本身**先 `AVAssetReader` 顺着样本读第一帧**（不 seek，和播放同一条路），失败才退回 `AVAssetImageGenerator` 取最靠前的关键帧。见第 7 节 11/15/18。流式抽帧（`smbstream://` + 字节预算）降为兜底；失败进 180 秒负缓存并记录原因（设置页可见）；视图划走即取消传输。
+- **缩略图**（1.0.2 重写，1.0.6 修正读取，1.0.7 换镜像实现）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；**图片和视频共用一道有序闸门（`OrderedLimiter(limit: 1, graceMilliseconds: 60)`，一次只跑一个，按格子序号放行，1.0.11 起）**，所以缩略图严格按「左上→右下」依次出现；**图片一律整份读满再解码**（分块 8 MB，读不满就放弃、绝不拿残缺数据解码；上限 160 MB，超过 24 MB 的改为边读边落临时文件、让 ImageIO 从文件解码，避免「几十兆 Data + 几十兆位图」同时占内存）；**视频封面一律走「迷你镜像」**：先用 `MP4Inspector` 摸清盒子结构（moov/mdat/moof 位置、首个视频样本落点、编码 fourcc），**普通 MP4** 取文件头 12→24→40 MB（按首帧落点可自动加大）+ 末尾接 moov，并把 mdat 声明长度改成实际字节数；**分片 MP4**（moof+mdat）切在**完整 fragment 边界**上、一个字节都不截断；抽帧本身**先 `AVAssetReader` 顺着样本读第一帧**（不 seek，和播放同一条路），失败才退回 `AVAssetImageGenerator` 取最靠前的关键帧。见第 7 节 11/15/18。**1.0.13 起按文件大小分流**：≤ 64 MB 走本地镜像（整份读进来、不截断），> 64 MB 直接走 `smbstream://` + `AVAssetReader` 顺序解码（只读 moov + 第一个 GOP，无截断）—— 因为截断的镜像会让 `moov` 里的样本偏移越界，AVFoundation 一律判损坏（`-11821`）；失败进 180 秒负缓存并记录原因（设置页可见）；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
 - **主题**：`@AppStorage` + `preferredColorScheme`，三档（跟随系统/浅色/深色）。
@@ -241,7 +241,16 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
         非分片 MP4 也可能因为首个 GOP 的样本落在 40 MB 之外被切掉。
      2. **`AVAssetImageGenerator` 的 seek 语义**：它要按时间找样本，镜像里没有目标时间附近的数据就直接抛 decodeFailed；
         而播放是顺序解码，所以能播。
-   - 1.0.12 的改法：
+   - **1.0.12 的实测结果（关键证据）**：诊断升级后拿到结构行
+     `ftyp@0 free@32 mdat@40(522MB) moov@547662742(412KB) · 视…` ——
+     文件 522 MB、`moov` 在**尾部**、`mdat` 从 40 开始，镜像 48 MB 仍然 `-11821`。
+     说明**根因不是「首帧没被覆盖」**，而是：镜像把 `mdat` 砍短后，`moov` 里按原始文件写的样本偏移全部越界，
+     AVFoundation 直接判定电影文件损坏 —— 和首帧在不在镜像里无关。**所以对大文件做截断镜像这条路根本走不通。**
+   - **1.0.13 的改法**：镜像只用于 ≤ 64 MB（能整份读进来、等于不截断）的片子；
+     大文件改走 `smbstream://` + `AVAssetReader` 顺序解码，按样本表逐个区间取数据（只读 `moov` + 第一个 GOP），
+     流量通常比 48 MB 的镜像还小。抽帧实现统一抽到 `VideoFrameDecoder`（reader 优先、generator 兜底）。
+     诊断也拆成两条短句（`结构 …` / `抽帧失败…`），避免设置页一行显示不下被省略号截掉。
+   - 1.0.12 的改法（保留作历史）：
      - 新增 `MP4Inspector`（顶层盒子扫描 + moov 内 trak/stsd/stsz/stco/elst 解析），镜像按结构装配：
        分片文件切在**完整 fragment 结尾**、不修补不改长度；普通文件按 `首个视频样本 offset+size` 保证覆盖到首帧。
      - 抽帧先用 **`AVAssetReader` + `AVAssetReaderTrackOutput`（BGRA）读第一个样本**，用 `CIImage` 套 `preferredTransform` 缩到 480；
@@ -249,6 +258,15 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
      - 失败诊断升级成一行「镜像长度 + 结构摘要 + 解码器报错」，例如
        `抽帧失败（镜像 40 MB · ftyp@0 moov@32(6KB) mdat@6240(512MB) · 视频 avc1 1920×1080 首帧@6240+24576）：…`，
        以后看截图就能判断「首帧落点是否被镜像覆盖」「是不是分片」「编码是什么」。
+
+18. **✅ 已修（1.0.13）：大图（`.bmp` 38–69 MB）有的出不来缩略图**
+   - 现象：同目录 `懒懒睡不醒(*).bmp`，37–38.9 MB 的能出，69.1 MB 的全部显示照片占位图标。
+   - 根因：`imageHardLimit = 64 MB` 直接把 69 MB 的文件挡掉，而且**挡掉时不写诊断**，所以设置页里看不到任何记录。
+   - 修复：
+     - 上限 64 → **160 MB**；超过 24 MB 改为**边读边写临时文件**、用 `CGImageSourceCreateWithURL` 解码缩略图
+       （`ImageDownsampler.downsample(url:maxPixel:)`），避免 Data 和解码位图同时压在内存里；
+     - 失败原因全部写进诊断：超出上限 / 只读到 xMB / 解码失败（带扩展名和大小）/ 读取失败，
+       下次同类问题一眼能看出是「太大」还是「ImageIO 解不了这种 BMP 变体」。
 
 ## 8. 约定（改代码前先看）
 
@@ -290,6 +308,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 | --- | --- | --- |
 | 1.0.11 | 2026-10-31 | 缩略图严格按顺序出现：图片/视频合并成一道有序闸门（`limit: 1` + 60 ms 宽限 + 队伍优先），修掉跨类型乱序与抢名额；视频抽帧先零容差取第 0 秒关键帧，失败信息附编码 fourcc 与流式兜底的报错 |
 | 1.0.12 | 2026-10-31 | 视频封面抽帧改为「按结构装配镜像 + 顺序解码」：新增 `MP4Inspector` 解析盒子/轨道/首帧落点，分片 MP4 切在完整 fragment 边界不再截断、普通 MP4 按首帧位置决定镜像长度；抽帧先 `AVAssetReader` 顺读第一帧、失败再退回 `AVAssetImageGenerator`；失败诊断附带结构摘要（盒子布局 + 编码 + 首帧落点）；诊断保留条数 5→8 |
+| 1.0.13 | 2026-10-31 | 视频封面按大小分流：≤64MB 走本地镜像、>64MB 走 `smbstream://` + `AVAssetReader` 顺序解码（截断镜像会让样本偏移越界→-11821，大文件镜像方案废弃）；抽帧逻辑统一到 `VideoFrameDecoder`；诊断拆成「结构 / 失败」两条短句；大图上限 64→160MB、>24MB 走临时文件解码，失败原因全部落诊断 |
 | 1.0.10 | 2026-10-31 | 网格去掉灰底：有图时只画图片本身（圆角裁在图上），无图才铺灰块；图片在展示框内居中（横屏上下、竖屏左右留白均匀），播放角标改挂到图片左下角；视频封面镜像的头部长度改为 12→24→40 MB 逐级重试（修复单个 GOP 大于 12 MB 时抽帧失败），并把 AVFoundation 真实报错写进设置页诊断 |
 | 1.0.9 | 2026-10-31 | 网格改为固定展示框（`TileAspect.box` 宽:高 ≈ 1:1.15）：缩略图完整显示并贴框顶部，横屏图下方留白、竖屏图不再被撑成过高的竖条，文件名固定两行高度，同一行三列顶端与文字行全部齐平；删除 1.0.8 的 `onAspectChange` / `aspects` 真实比例管线 |
 | 1.0.8 | 2026-10-31 | 缩略图网格改为按真实宽高比显示：去掉写死的照片 3:4 / 视频 16:9，`ThumbnailImage` 加载后用 `onAspectChange` 回传真实比例、`BrowserView` 存 `aspects` 再喂 `.aspectRatio`，竖屏撑竖条、横屏撑横条，同一行顶部对齐、底部随内容错落；文件名/大小/日期字号微调（1.0.9 已废弃该方案） |

@@ -16,12 +16,12 @@ final class ThumbnailStore: @unchecked Sendable {
     /// 图片必须整份读到才解码：JPEG / PNG 被截断时 ImageIO 不会返回 nil，
     /// 而是给出一张「上半张正常、下半张灰」的假图（缩略图加载不全的根因）。
     /// 所以这里不再按大小分阶段试探，一律读满；超过上限的直接放弃。
-    private static let imageHardLimit: Int64 = 64 * 1024 * 1024
+    /// 上限放到 160 MB：BMP 动辄几十兆（手机截图/无损导出很常见），64 MB 会把它们全挡在外面。
+    private static let imageHardLimit: Int64 = 160 * 1024 * 1024
+    /// 超过这个大小就不再整份塞进内存，改成边读边落临时文件，让 ImageIO 从文件里取
+    private static let imageMemoryLimit: Int64 = 24 * 1024 * 1024
     /// 分块读取大小（单次 SMB 读请求上限）
     private static let imageReadChunk: Int = 8 * 1024 * 1024
-    /// 视频封面允许消耗的字节额度（仅流式兜底路径使用）。
-    /// 大文件的 moov 索引本身就有十几兆，额度给紧了会被中途截断 —— 报错同样是 -11821。
-    private static let videoByteBudget: Int64 = 64 * 1024 * 1024
     /// 失败冷却时间
     private static let failureTTL: TimeInterval = 180
     /// AVFoundation 无法解码的容器，直接不做封面，避免白读十几兆
@@ -230,22 +230,40 @@ final class ThumbnailStore: @unchecked Sendable {
 
     // MARK: - 图片
 
-    /// 图片缩略图：整份读回来再解码。
+    /// 图片缩略图。
     ///
-    /// 这里刻意不做「先读 8MB 试试能不能解开」的分阶段优化——1.0.5 之前就是这么干的，
+    /// 这里刻意不做「先读 8MB 试试能不能解开」的分阶段优化 —— 1.0.5 之前就是这么干的，
     /// 结果 16MB 以上的 JPEG 在读到 8MB 时 ImageIO 直接返回一张「上半张有内容、下半张灰」的图，
     /// 而 `CGImageSourceCreateThumbnailAtIndex` 认为成功、我们就把这张残图写进了缓存。
-    /// JPEG 的结束标记 EOI 在文件末尾，除了读满没有别的办法确认完整，所以只能整份读。
+    ///
+    /// 1.0.13 起大图（> 24 MB）改为边读边落临时文件、让 ImageIO 从文件里取：
+    /// BMP 这类格式动辄几十兆，同时压着 Data + 解码位图很容易被系统回收。
     private func imageThumbnail(item: FileItem, connection: SMBConnection, cancel: CancellationBox) async -> UIImage? {
         var size = item.size
         if size <= 0 {
             size = (try? await connection.fileSize(item.path)) ?? 0
         }
-        guard size > 0, size <= Self.imageHardLimit else { return nil }
+        guard size > 0 else {
+            ThumbnailDiagnostics.record(item.name, "拿不到文件大小")
+            return nil
+        }
+        guard size <= Self.imageHardLimit else {
+            ThumbnailDiagnostics.record(
+                item.name,
+                "图片 \(size / 1024 / 1024)MB 超出上限 \(Self.imageHardLimit / 1024 / 1024)MB"
+            )
+            return nil
+        }
+
+        if size > Self.imageMemoryLimit {
+            return await largeImageThumbnail(
+                item: item, size: size, connection: connection, cancel: cancel
+            )
+        }
 
         let total = Int(size)
         var data = Data()
-        // 只预留在 16MB 以内，避免一张几十兆的图一上来就吃掉大块内存
+        // 只预留在 16MB 以内，避免一张大图一上来就吃掉大块内存
         data.reserveCapacity(min(total, 16 * 1024 * 1024))
         var offset: Int64 = 0
 
@@ -258,6 +276,7 @@ final class ThumbnailStore: @unchecked Sendable {
             } catch is CancellationError {
                 return nil
             } catch {
+                ThumbnailDiagnostics.record(item.name, "读取失败：\(error.localizedDescription)")
                 return nil
             }
             if chunk.isEmpty { break }
@@ -270,7 +289,67 @@ final class ThumbnailStore: @unchecked Sendable {
             ThumbnailDiagnostics.record(item.name, "图片只读到 \(data.count)/\(total) 字节")
             return nil
         }
-        return ImageDownsampler.downsample(data: data, maxPixel: Self.pixelSize)
+        guard let image = ImageDownsampler.downsample(data: data, maxPixel: Self.pixelSize) else {
+            ThumbnailDiagnostics.record(item.name, "解码失败（\(item.fileExtension) \(size / 1024 / 1024)MB）")
+            return nil
+        }
+        return image
+    }
+
+    /// 大图：边读边写临时文件，再让 ImageIO 从文件里解码出缩略图。
+    /// 好处是内存里不会同时存在「几十兆的 Data」和「几十兆的解码位图」。
+    private func largeImageThumbnail(
+        item: FileItem,
+        size: Int64,
+        connection: SMBConnection,
+        cancel: CancellationBox
+    ) async -> UIImage? {
+        let ext = item.fileExtension.isEmpty ? "img" : item.fileExtension
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("smbimg-\(UUID().uuidString).\(ext)")
+        _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: url) else {
+            ThumbnailDiagnostics.record(item.name, "建不了临时文件")
+            return nil
+        }
+        defer {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        var written: Int64 = 0
+        do {
+            while written < size {
+                if cancel.isCancelled { return nil }
+                let want = Int(min(Int64(Self.imageReadChunk), size - written))
+                let chunk = try await connection.read(
+                    item.path, offset: written, length: want, cancel: cancel
+                )
+                if chunk.isEmpty { break }
+                try handle.write(contentsOf: chunk)
+                written += Int64(chunk.count)
+            }
+        } catch is CancellationError {
+            return nil
+        } catch {
+            ThumbnailDiagnostics.record(item.name, "读取失败：\(error.localizedDescription)")
+            return nil
+        }
+
+        guard written >= size else {
+            ThumbnailDiagnostics.record(
+                item.name, "图片只读到 \(written / 1024 / 1024)MB/\(size / 1024 / 1024)MB"
+            )
+            return nil
+        }
+        try? handle.synchronize()
+        guard let image = ImageDownsampler.downsample(url: url, maxPixel: Self.pixelSize) else {
+            ThumbnailDiagnostics.record(
+                item.name, "解码失败（\(ext) \(size / 1024 / 1024)MB）"
+            )
+            return nil
+        }
+        return image
     }
 
     // MARK: - 视频
@@ -285,71 +364,29 @@ final class ThumbnailStore: @unchecked Sendable {
         }
         guard size > 0 else { return nil }
 
-        // 一律先走「迷你镜像」：只读文件头（12 MB 起，不够再逐级加到 24 / 40 MB）+ moov，
-        // 跟文件总大小无关，也不会被 AVFoundation「一直读到文件尾」的请求拖住（大文件封面失败的根因）。
-        if let mirrored = await VideoThumbnailMirror.makeImage(
-            connection: connection,
-            path: item.path,
-            fileSize: size,
-            fileExtension: item.fileExtension,
-            cancel: cancel
-        ) {
-            return mirrored
-        }
-        if cancel.isCancelled { return nil }
-
-        // 兜底：流式抽帧（镜像失败时，比如封装里找不到 moov）
-        return await streamingVideoThumbnail(
-            item: item, connection: connection, size: size, cancel: cancel
-        )
-    }
-
-    /// 原始做法：让 AVFoundation 通过自定义 scheme 边读边解析
-    private func streamingVideoThumbnail(
-        item: FileItem,
-        connection: SMBConnection,
-        size: Int64,
-        cancel: CancellationBox
-    ) async -> UIImage? {
-        let budget = ByteBudget(limit: Self.videoByteBudget)
-        let asset = MediaAssetFactory.shared.makeAsset(
-            connection: connection,
-            path: item.path,
-            fileSize: size,
-            fileExtension: item.fileExtension,
-            budget: budget,
-            cancel: cancel
-        )
-        defer { MediaAssetFactory.shared.release(asset) }
-
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 480, height: 480)
-        // 允许取最近的关键帧，这样只需读 moov 和一小段样本数据
-        generator.requestedTimeToleranceBefore = .positiveInfinity
-        generator.requestedTimeToleranceAfter = .positiveInfinity
-
-        let candidates: [CMTime] = [
-            CMTime(seconds: 1, preferredTimescale: 600),
-            .zero,
-            CMTime(seconds: 5, preferredTimescale: 600)
-        ]
-        var lastError = ""
-        for time in candidates {
-            if cancel.isCancelled { return nil }
-            do {
-                let result = try await generator.image(at: time)
-                return UIImage(cgImage: result.image)
-            } catch {
-                let code = (error as NSError).code
-                lastError = code == 0 ? error.localizedDescription : "\(error.localizedDescription)(\(code))"
+        // ① 小文件：整份读进来做「镜像」，等于一个不截断的本地文件，最稳
+        if size <= VideoThumbnailMirror.wholeFileLimit {
+            if let mirrored = await VideoThumbnailMirror.makeImage(
+                connection: connection,
+                path: item.path,
+                fileSize: size,
+                fileExtension: item.fileExtension,
+                cancel: cancel
+            ) {
+                return mirrored
             }
-            if cancel.isCancelled || budget.remaining() <= 0 { return nil }
+            if cancel.isCancelled { return nil }
         }
-        if !lastError.isEmpty {
-            ThumbnailDiagnostics.record(item.name, "流式抽帧也失败：\(lastError)")
-        }
-        return nil
+
+        // ② 大文件：镜像必然截断 mdat，样本偏移越界就报 -11821（和首帧在不在镜像里无关），
+        //    所以直接对流式资产做顺序解码：只读 moov + 第一个 GOP，没有截断
+        return await VideoThumbnailStream.makeImage(
+            connection: connection,
+            path: item.path,
+            fileSize: size,
+            fileExtension: item.fileExtension,
+            cancel: cancel
+        )
     }
 
     // MARK: - 辅助
