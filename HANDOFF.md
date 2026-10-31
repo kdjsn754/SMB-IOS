@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.8`（build 9），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.7 均已验证）；1.0.8 改缩略图网格按真实比例显示，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
+| 版本 | `1.0.9`（build 10），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.8 均已验证）；1.0.9 把网格改成「固定展示框 + 贴顶显示」，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -35,7 +35,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
 - **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。
-- **目录页布局**（1.0.4，1.0.6 调整，1.0.8 改真实比例）：固定三列网格、同一行顶部对齐（`LazyVGrid` + `alignment: .top`），单元格为「缩略图 + 两行居中文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。1.0.6 起缩略图**一律 `.scaledToFit` 完整显示、不做填充裁切**；1.0.8 起**格子比例不再是写死的照片 3:4 / 视频 16:9，而是按缩略图的真实宽高比**（`ThumbnailImage` 加载后通过 `onAspectChange` 回传，父级存进 `aspects: [id: 比例]` 再喂给 `.aspectRatio`），所以竖屏视频撑成竖条、横屏视频撑成横条，同一行高度随内容错落但顶部对齐，竖屏内容不再被压成中间一条。
+- **目录页布局**（1.0.4，1.0.6 调整，1.0.9 定为固定框）：固定三列网格、同一行顶部对齐（`LazyVGrid` + `GridItem(alignment: .top)`），单元格为「缩略图 + 两行文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。**1.0.9 起缩略图展示框高度固定**（`TileAspect.box = 0.87`，即宽:高 ≈ 1:1.15，照片/视频/文件夹/其它文件共用同一个框），图片一律 `.scaledToFit()` 完整显示并**贴框顶部**（`frame(maxHeight: .infinity, alignment: .top)`），横屏内容只在下方留白，`FileNameLabel` 固定两行高度，所以同一行三列的图片顶端成一条线、下面的文件名/大小/日期也齐平。1.0.6 曾用 `.scaledToFill` 裁切，1.0.8 曾按真实宽高比撑格子，两者都已废弃。
+  - ⚠️ `LazyVGrid` 的 `alignment` 参数是 **`HorizontalAlignment`**（不是 `VerticalAlignment`），传 `.top` 编译不过；行内垂直对齐要靠 `GridItem(alignment: .top)` 或单元格内部的 `frame(alignment: .top)`。
 - **缩略图**（1.0.2 重写，1.0.6 修正读取，1.0.7 换镜像实现）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3（`OrderedLimiter`，按格子序号放行，缩略图按「左上→右下」顺序出现）、视频封面并发 1 各自独立闸门；**图片一律整份读满再解码**（上限 64 MB、分块 8 MB，读不满就放弃、绝不拿残缺数据解码）；**视频封面一律走「迷你镜像」**（文件头 12 MB + moov，临时文件十几兆、不留空洞，见第 7 节 11），流式抽帧降为兜底；失败进 180 秒负缓存并记录原因（设置页可见）；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
@@ -185,8 +186,15 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
 12. **✅ 已修（1.0.8）：竖屏视频/照片被压成中间一条、两侧大片留白，整体布局与同类软件对不上**
    - 现象：目录里竖屏内容（竖拍视频、人像照片）在格子里被 `scaledToFit` 缩成中间一条竖幅，左右两侧大片灰白；横屏内容也塞不进合适的格子，整页显得很空、很丑。
    - 根因：1.0.6 给格子比例**写死了**「照片 `3:4`、视频 `16:9`」（`TileAspect`），再用 `.scaledToFit` 把真实图片往这个固定比例框里塞。竖屏视频（9:16）放进 16:9 的横框，自然只剩中间一条。参照软件（用户给的截图）是**按内容真实宽高比给格子高度**——竖屏撑成竖条、横屏撑成横条，同一行顶部对齐、底部随高度错落。
-   - 修复：去掉写死的 `TileAspect.photo/video`。`ThumbnailImage` 加载到真实缩略图后，用 `image.size` 算出真实宽高比并通过新增的 `onAspectChange` 回传给 `BrowserView`，父级把它存进 `@State aspects: [String: CGFloat]`（key 为 `item.id`），再喂回 `MediaTile` 的 `.aspectRatio`。`LazyVGrid` 保持 `alignment: .top`（顶部对齐），所以同一行三列顶端齐平、格子高度随内容比例自然错落。加载完成前用正方形（`TileAspect.placeholder = 1`）占位。
+   - 修复：去掉写死的 `TileAspect.photo/video`。`ThumbnailImage` 加载到真实缩略图后，用 `image.size` 算出真实宽高比并通过新增的 `onAspectChange` 回传给 `BrowserView`，父级把它存进 `@State aspects: [String: CGFloat]`（key 为 `item.id`），再喂回 `MediaTile` 的 `.aspectRatio`。加载完成前用正方形（`TileAspect.placeholder = 1`）占位。
    - 附带：文件名 / 大小 / 日期三行字号微调（12→13 / 11→12），整体更接近参照软件的信息密度。
+   - ⚠️ **这套「按真实比例撑格子」在 1.0.9 已被废弃**（见下一条），相关代码（`onAspectChange` / `aspects` / `TileAspect.placeholder`）已删除。
+
+13. **✅ 已修（1.0.9）：竖屏缩略图过大、横屏缩略图不与竖屏对顶（看着像在格子里居中）**
+   - 现象：1.0.8 按真实宽高比撑格子后，9:16 竖屏视频的格子高度被拉成「列宽 × 1.78」，整页被竖条占满、显得又大又长；同一行里横屏图比竖屏矮，行高被最高的格子撑起，矮的那个看起来像垂直居中，横屏图与竖屏图的顶端没有对齐；三列的「大小 / 日期」也跟着错位。
+   - 根因：格子高度由每张图的真实比例分别决定 → 同一行三列高度不等，`LazyVGrid` 只能把矮格子放在被撑高的行里（观感就是居中）；同时竖屏比例 9:16 没有任何上限，格子可以无限高。
+   - 修复：改为**固定展示框**——`TileAspect.box = 0.87`（宽:高 ≈ 1:1.15，媒体/文件夹/其它文件共用），`ThumbnailImage` 内部 `Image.scaledToFit()` 后套 `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)`，让留白只出现在图片下方、绝不上下均分；`FileNameLabel` 加 `minHeight: 32`（固定两行高度），于是同一行三列的图顶端齐平、文字行也齐平。`BrowserView` 删除 `aspects` 状态与 `onAspectChange` 回调，`MediaTile` 不再接收比例参数。
+   - 观感取舍：横屏图在竖幅固定框里下方会留白（这是「不裁切 + 全部对顶」的必然代价，参考软件同样如此）。若以后想让内容更满，只改 `TileAspect.box` 一个常量即可（调小→更方、调大→更竖）。
 
 ## 8. 约定（改代码前先看）
 
@@ -226,7 +234,8 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
-| 1.0.8 | 2026-10-31 | 缩略图网格改为按真实宽高比显示：去掉写死的照片 3:4 / 视频 16:9，`ThumbnailImage` 加载后用 `onAspectChange` 回传真实比例、`BrowserView` 存 `aspects` 再喂 `.aspectRatio`，竖屏撑竖条、横屏撑横条，同一行顶部对齐、底部随内容错落；文件名/大小/日期字号微调 |
+| 1.0.9 | 2026-10-31 | 网格改为固定展示框（`TileAspect.box` 宽:高 ≈ 1:1.15）：缩略图完整显示并贴框顶部，横屏图下方留白、竖屏图不再被撑成过高的竖条，文件名固定两行高度，同一行三列顶端与文字行全部齐平；删除 1.0.8 的 `onAspectChange` / `aspects` 真实比例管线 |
+| 1.0.8 | 2026-10-31 | 缩略图网格改为按真实宽高比显示：去掉写死的照片 3:4 / 视频 16:9，`ThumbnailImage` 加载后用 `onAspectChange` 回传真实比例、`BrowserView` 存 `aspects` 再喂 `.aspectRatio`，竖屏撑竖条、横屏撑横条，同一行顶部对齐、底部随内容错落；文件名/大小/日期字号微调（1.0.9 已废弃该方案） |
 | 1.0.7 | 2026-10-31 | 修复大文件视频封面始终出不来：镜像改为「文件头 12 MB + moov + 修正 mdat 声明长度」的连续小文件（不再生成与原片等大的稀疏文件）；播放页弃用 AVKit `VideoPlayer`，改 `AVPlayerLayer` + 自绘控件并清空 Now Playing，去掉灵动岛媒体胶囊；缩略图改用 `OrderedLimiter` 按网格顺序加载；设置页新增缩略图失败原因诊断 |
 | 1.0.6 | 2026-10-31 | 修复 16 MB 以上图片缩略图「只显示上半张、下半截变灰」：去掉分阶段截断读取，一律读满再解码，读不满直接放弃（缓存版本递增到 3）；缩略图由 `.scaledToFill` 裁切改为 `.scaledToFit` 完整显示，卡片比例按照片 3:4 / 视频 16:9 / 文件夹 1:1 |
 | 1.0.5 | 2026-10-31 | 修复大文件 MP4 无封面：视频封面改用「稀疏镜像」抽帧（只读 moov + 首个关键帧，约 10 MB），流式抽帧降为兜底；设置页两个确认框由 confirmationDialog 改为 alert，避免 iOS 26/27 锚定到按钮上方压住开关；清理完成提示改为底部轻提示 |

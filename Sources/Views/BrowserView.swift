@@ -14,9 +14,6 @@ struct BrowserView: View {
     @State private var showSearch = false
     @State private var query = ""
     @FocusState private var searchFocused: Bool
-    /// 每个媒体的真实宽高比（item.id -> width/height）。缩略图加载后回填，
-    /// 用来做瀑布流布局：竖屏内容完整撑满竖条、横屏内容撑满横条，不再被压成一条。
-    @State private var aspects: [String: CGFloat] = [:]
 
     init(server: SMBServer, path: String) {
         self.server = server
@@ -41,7 +38,8 @@ struct BrowserView: View {
         return currentSort.sorted(base)
     }
 
-    /// 三列等宽，顶部对齐（同一行三列顶端对齐成一条线，格子高度随内容比例变化）。
+    /// 三列等宽、列内顶部对齐。每个格子的缩略图展示框高度固定（见 `TileAspect.box`），
+    /// 所以同一行三列的图片顶端成一条线、下面的文字也齐平。
     private var gridColumns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
     }
@@ -145,11 +143,7 @@ struct BrowserView: View {
                     serverID: server.id,
                     connection: app.connection(for: server),
                     useGrid: useGrid,
-                    order: order,
-                    aspect: aspects[item.id] ?? TileAspect.placeholder,
-                    onAspectChange: { newAspect in
-                        aspects[item.id] = newAspect
-                    }
+                    order: order
                 )
             }
             .buttonStyle(.plain)

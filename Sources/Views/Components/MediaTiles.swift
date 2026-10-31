@@ -1,18 +1,17 @@
 import SwiftUI
 import UIKit
 
-/// 网格缩略图的长宽比。所有格子都用 `.fit` 完整显示图片。
-/// 这里只给出「加载完成前」的占位比例（正方形最中性），
-/// 图片真正加载出来后会用它的真实宽高比撑开格子，竖幅就竖条、横幅就横条。
+/// 网格缩略图的展示框尺寸。所有格子共用同一个固定框，图片一律 `.fit` 完整显示且顶部对齐：
+/// 同一行顶端成一条线，横屏内容下方自然留白，竖屏内容也不会被撑成过高的竖条，
+/// 框下面的文件名 / 大小 / 日期三列齐平。
 enum TileAspect {
-    /// 加载完成前的占位比例（正方形）
-    static let placeholder: CGFloat = 1
+    /// 展示框的「宽度 / 高度」（0.87 ≈ 宽:高 = 1 : 1.15）
+    static let box: CGFloat = 0.87
 }
 
 /// 通用缩略图视图：先看缓存，再按需从服务器读取。
 /// 失败会退化成占位图标（不会一直转圈），划走时会取消传输。
-/// 加载到真实图片后，通过 `onAspectChange` 把真实宽高比回传给父级，
-/// 父级用它做瀑布流布局，让竖屏内容也能完整撑满格子、不被压成一条。
+/// 图片完整显示（不裁切）并贴展示框顶部，留白只出现在图片下方。
 @MainActor
 struct ThumbnailImage: View {
     let item: FileItem
@@ -21,8 +20,6 @@ struct ThumbnailImage: View {
     var cornerRadius: CGFloat = 4
     /// 在目录里的显示序号：让缩略图按「左上 → 右下」的顺序出现，而不是随机位置冒出来
     var order: Int = 0
-    /// 加载到真实图片后回传宽高比（width / height）
-    var onAspectChange: (CGFloat) -> Void = { _ in }
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -32,10 +29,12 @@ struct ThumbnailImage: View {
             .fill(Color(uiColor: .secondarySystemFill))
             .overlay {
                 if let image {
-                    // 完整显示整张图，不做填充裁切（参照同类文件管理软件的做法）
+                    // 完整显示整张图，不做填充裁切；frame 撑满展示框后把内容顶到最上面，
+                    // 这样横屏图的留白只会落在下方，不会上下各一半（看起来像居中）
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 } else if failed {
                     Image(systemName: placeholderIcon)
                         .font(.system(size: 20, weight: .regular))
@@ -83,10 +82,6 @@ struct ThumbnailImage: View {
     private func apply(_ image: UIImage) {
         self.image = image
         failed = false
-        let w = image.size.width
-        let h = image.size.height
-        guard w > 0, h > 0 else { return }
-        onAspectChange(w / h)
     }
 }
 
@@ -121,6 +116,8 @@ struct FileNameLabel: View {
         .multilineTextAlignment(.center)
         .foregroundStyle(.primary)
         .frame(maxWidth: .infinity)
+        // 固定成两行的高度：同一行里短文件名不会把下面的「大小 / 日期」提上去
+        .frame(minHeight: 32, alignment: .top)
     }
 }
 
@@ -149,10 +146,6 @@ struct MediaTile: View {
     let connection: SMBConnection
     let useGrid: Bool
     var order: Int = 0
-    /// 当前已知的缩略图宽高比（width / height），加载完成前用占位比例
-    var aspect: CGFloat = TileAspect.placeholder
-    /// 缩略图加载后回传真实宽高比
-    var onAspectChange: (CGFloat) -> Void = { _ in }
 
     var body: some View {
         if useGrid {
@@ -163,15 +156,14 @@ struct MediaTile: View {
     }
 
     private var gridBody: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 6) {
             ThumbnailImage(
                 item: item,
                 serverID: serverID,
                 connection: connection,
-                order: order,
-                onAspectChange: onAspectChange
+                order: order
             )
-            .aspectRatio(aspect, contentMode: .fit)
+            .aspectRatio(TileAspect.box, contentMode: .fit)
             .overlay(alignment: .bottomLeading) {
                 if item.kind == .video {
                     Image(systemName: "play.fill")
@@ -231,7 +223,7 @@ struct FolderTile: View {
     }
 
     private var gridBody: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 6) {
             ZStack {
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(Color.accentColor.opacity(0.12))
@@ -239,7 +231,7 @@ struct FolderTile: View {
                     .font(.system(size: 34))
                     .foregroundStyle(Color.accentColor)
             }
-            .aspectRatio(1, contentMode: .fit)
+            .aspectRatio(TileAspect.box, contentMode: .fit)
 
             FileNameLabel(name: item.name)
             TileCaption(size: "文件夹", date: Format.shortDate(item.modified))
@@ -286,7 +278,7 @@ struct OtherTile: View {
     }
 
     private var gridBody: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 6) {
             ZStack {
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(Color(uiColor: .secondarySystemFill))
@@ -294,7 +286,7 @@ struct OtherTile: View {
                     .font(.system(size: 30))
                     .foregroundStyle(.secondary)
             }
-            .aspectRatio(1, contentMode: .fit)
+            .aspectRatio(TileAspect.box, contentMode: .fit)
 
             FileNameLabel(name: item.name)
             TileCaption(size: Format.bytes(item.size), date: Format.shortDate(item.modified))
