@@ -98,7 +98,7 @@ struct BrowserView: View {
                 if visibleItems.isEmpty {
                     noMatchState
                 } else {
-                    LazyVGrid(columns: gridColumns, alignment: .top, spacing: 16) {
+                    LazyVGrid(columns: gridColumns, alignment: .center, spacing: 16) {
                         ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
                             cell(for: item, order: index)
                         }
