@@ -27,7 +27,9 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 60
     permissions:
-      contents: write
+      contents: read
+      # 末尾「清理历史产物」要删旧 artifact，需要 actions: write
+      actions: write
 
     steps:
       - name: 检出代码
@@ -187,11 +189,38 @@ jobs:
           name: SMBViewer-unsigned-ipa
           path: build/SMBViewer-unsigned.ipa
           if-no-files-found: error
-          retention-days: 30
+          # 每次发版都会生成一份，仓库里只留最近几份（见下一步），这里不设太长
+          retention-days: 14
 
-      - name: 附加 IPA 到 Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/SMBViewer-unsigned.ipa
-          generate_release_notes: true
+      # 仓库只保留最近 5 份产物，更早的自动删除（避免 Actions 存储无限增长）
+      - name: 清理历史产物（只留最近 5 个）
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+          keep = 5
+
+          def call(url, method="GET"):
+              req = urllib.request.Request(url, method=method, headers={
+                  "Authorization": "Bearer " + token,
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "smbviewer-ci",
+              })
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  body = resp.read()
+                  return json.loads(body) if body else None
+
+          data = call("https://api.github.com/repos/%s/actions/artifacts?per_page=100" % repo)
+          arts = sorted(data.get("artifacts", []), key=lambda a: a["id"], reverse=True)
+          print("现有产物 %d 个，保留最新 %d 个" % (len(arts), keep))
+          for a in arts[keep:]:
+              print("  删除 #%s %s（%s）" % (a["id"], a["name"], a["created_at"]))
+              call("https://api.github.com/repos/%s/actions/artifacts/%s" % (repo, a["id"]), "DELETE")
+          print("清理完成")
+          PY
