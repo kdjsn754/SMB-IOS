@@ -1,0 +1,88 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build SMBViewer
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project SMBViewer.xcodeproj \
+            -scheme SMBViewer \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm"
+
+      - name: Archive (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project SMBViewer.xcodeproj \
+            -scheme SMBViewer \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/SMBViewer.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO
+
+      - name: Package IPA
+        run: |
+          APP="$RUNNER_TEMP/SMBViewer.xcarchive/Products/Applications/SMBViewer.app"
+          if [ ! -d "$APP" ]; then
+            echo "找不到构建产物 SMBViewer.app"
+            ls -R "$RUNNER_TEMP/SMBViewer.xcarchive/Products" || true
+            exit 1
+          fi
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          rm -rf build/Payload/SMBViewer.app/_CodeSignature
+          find build/Payload -name "embedded.mobileprovision" -delete
+          cd build
+          zip -qry SMBViewer-unsigned.ipa Payload
+          ls -lh SMBViewer-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMBViewer-unsigned-ipa
+          path: build/SMBViewer-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach IPA to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/SMBViewer-unsigned.ipa
+          generate_release_notes: true
