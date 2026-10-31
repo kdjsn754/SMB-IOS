@@ -20,8 +20,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 | 项 | 值 |
 | --- | --- |
 | 版本 | `1.0.12`（build 13），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.0.11 由 run **#17**（sha `4580f49`）全绿产出；1.0.12 由本次 CI 产出（见 7.18） |
-| 产物自检 | 1.0.12：`Info.plist` = 1.0.12 / build 13、`MinimumOSVersion` 16.0、可执行文件 arm64（1.31 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:\下载\互传\SMBViewer-v1.0.11-unsigned.ipa` |
+| 构建 | ✅ 1.0.12 由 run **#18**（sha `acffae3`）全绿产出（含「自检：包结构与依赖」） |
+| 产物自检 | 1.0.12：`Info.plist` = 1.0.12 / build 13、`MinimumOSVersion` 16.0、可执行文件 arm64（1.31 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:\下载\互传\SMBViewer-v1.0.12-unsigned.ipa` |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
