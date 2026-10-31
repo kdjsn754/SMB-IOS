@@ -1,6 +1,7 @@
 import AVFoundation
 import AVKit
 import Combine
+import MediaPlayer
 import SwiftUI
 
 @MainActor

@@ -173,7 +173,7 @@ enum VideoThumbnailMirror {
                 moovOffset = offset
                 moovSize = size
                 // mdat 已经拿到了，没必要再往后扫
-                if mdatOffset >= 0 { return makeLayout(moovOffset, moovSize, mdatOffset, mdatSize) }
+                if mdatOffset >= 0 { return makeLayout(offset, size, mdatOffset, mdatSize) }
             case "mdat":
                 mdatOffset = offset
                 mdatSize = size
