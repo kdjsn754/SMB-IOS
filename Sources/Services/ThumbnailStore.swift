@@ -19,8 +19,9 @@ final class ThumbnailStore: @unchecked Sendable {
     private static let imageHardLimit: Int64 = 64 * 1024 * 1024
     /// 分块读取大小（单次 SMB 读请求上限）
     private static let imageReadChunk: Int = 8 * 1024 * 1024
-    /// 视频封面允许消耗的字节额度（仅流式兜底路径使用）
-    private static let videoByteBudget: Int64 = 32 * 1024 * 1024
+    /// 视频封面允许消耗的字节额度（仅流式兜底路径使用）。
+    /// 大文件的 moov 索引本身就有十几兆，额度给紧了会被中途截断 —— 报错同样是 -11821。
+    private static let videoByteBudget: Int64 = 64 * 1024 * 1024
     /// 失败冷却时间
     private static let failureTTL: TimeInterval = 180
     /// AVFoundation 无法解码的容器，直接不做封面，避免白读十几兆

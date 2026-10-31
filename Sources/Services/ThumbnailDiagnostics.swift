@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-/// 缩略图失败原因的简易记录，设置页里能看到最近 5 条。
+/// 缩略图失败原因的简易记录，设置页里能看到最近 8 条。
 ///
 /// 用户那边只能靠截图反馈，所以失败原因必须「可读」：到底是找不到 moov、
 /// 还是临时文件写不下、还是抽帧失败，一眼就能分辨。
@@ -48,7 +48,7 @@ final class ThumbnailDiagnostics: ObservableObject, @unchecked Sendable {
             let line = "\(name)｜\(reason)"
             var list = self.entries.filter { $0.id != line }
             list.insert(Entry(id: line, name: name, reason: reason), at: 0)
-            if list.count > 5 { list.removeLast(list.count - 5) }
+            if list.count > 8 { list.removeLast(list.count - 8) }
             self.entries = list
             UserDefaults.standard.set(list.map(\.id), forKey: Self.storageKey)
         }
