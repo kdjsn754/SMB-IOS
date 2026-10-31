@@ -25,8 +25,6 @@ final class ThumbnailStore: @unchecked Sendable {
     private static let fullImageReadLimit: Int64 = 64 * 1024 * 1024
     /// 完整读取时的分块大小
     private static let fullReadChunk: Int = 8 * 1024 * 1024
-    /// 视频封面允许消耗的字节额度
-    private static let videoByteBudget: Int64 = 10 * 1024 * 1024
     /// 失败冷却时间
     private static let failureTTL: TimeInterval = 180
     /// AVFoundation 无法解码的容器，直接不做封面，避免白读十几兆
