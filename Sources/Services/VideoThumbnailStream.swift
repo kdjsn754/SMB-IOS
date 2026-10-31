@@ -35,12 +35,14 @@ enum VideoThumbnailStream {
         )
         defer { MediaAssetFactory.shared.release(asset) }
 
-        let attempt = await VideoFrameDecoder.firstFrame(from: asset)
+        // 流式资产优先走播放器管线：App 里点开能播，说明这条路拿得到画面；
+        // reader / generator 在自定义资源加载器上要按样本表随机偏移取样，取不到就报 -11821
+        let attempt = await VideoFrameDecoder.firstFrame(from: asset, preferPlayer: true)
         if let image = attempt.image { return image }
         if cancel.isCancelled { return nil }
 
         ThumbnailDiagnostics.record(
-            name, "流式解码失败 \(VideoFrameDecoder.shortError(attempt.error))"
+            name, "流式取帧失败 \(attempt.error)"
         )
         return nil
     }

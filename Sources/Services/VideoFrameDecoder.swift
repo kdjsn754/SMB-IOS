@@ -9,19 +9,111 @@ import CoreImage
 /// 和播放器走同一条路径；`AVAssetImageGenerator` 只作兜底，因为它要按时间找样本，
 /// 数据没覆盖到目标时间就直接抛 `-11821`。
 enum VideoFrameDecoder {
-    /// 本地镜像 / 流式资产通用：先顺序解码第一帧，失败再按时间取帧
-    static func firstFrame(from asset: AVURLAsset) async -> (image: UIImage?, error: String) {
-        let byReader = await readerFrame(from: asset)
-        if let image = byReader.image { return (image, "") }
+    /// 取第一个画面。
+    ///
+    /// 两条路各有适用范围，按资产类型排先后：
+    /// - **本地文件（镜像）**：先 `AVAssetReader` 顺序解码，失败再按时间取帧；
+    /// - **流式资产（`smbstream://`）**：先走**播放器管线**（`AVPlayer` + 视频输出），
+    ///   因为 App 里点开能播说明这条路一定拿得到画面；reader / generator 在
+    ///   自定义资源加载器上要求按样本表随机偏移取样，取不到就直接抛 `-11821`。
+    static func firstFrame(
+        from asset: AVURLAsset,
+        preferPlayer: Bool = false
+    ) async -> (image: UIImage?, error: String) {
+        var errors: [String] = []
 
-        let byGenerator = await generatorFrame(from: asset)
-        if let image = byGenerator.image { return (image, "") }
-
-        var text = byReader.error
-        if !byGenerator.error.isEmpty {
-            text = text.isEmpty ? byGenerator.error : "\(text) / \(byGenerator.error)"
+        let steps: [Step]
+        if preferPlayer {
+            steps = [.player, .reader, .generator]
+        } else {
+            steps = [.reader, .generator, .player]
         }
-        return (nil, text)
+
+        for step in steps {
+            if Task.isCancelled { return (nil, "已取消") }
+            let attempt: (image: UIImage?, error: String)
+            switch step {
+            case .player:
+                attempt = await playerFrame(from: asset)
+            case .reader:
+                attempt = await readerFrame(from: asset)
+            case .generator:
+                attempt = await generatorFrame(from: asset)
+            }
+            if let image = attempt.image { return (image, "") }
+            if !attempt.error.isEmpty {
+                errors.append("\(step.label) \(shortError(attempt.error))")
+            }
+        }
+        return (nil, errors.joined(separator: " / "))
+    }
+
+    private enum Step {
+        case player, reader, generator
+
+        var label: String {
+            switch self {
+            case .player: return "播放器"
+            case .reader: return "顺序解码"
+            case .generator: return "按时间取帧"
+            }
+        }
+    }
+
+    /// 播放器管线取帧：`AVPlayer` 负责把数据拉下来并解码（和 App 里播放完全同一条路），
+    /// `AVPlayerItemVideoOutput` 负责把画面截下来。
+    ///
+    /// 这条路的代价是要「真的播一下」：静音、不接管音频会话、拿到第一帧就停。
+    /// 好处是对远端资产最友好 —— 播放器会自己决定要读哪些区间，不依赖样本表的随机偏移。
+    @MainActor
+    static func playerFrame(from asset: AVURLAsset) async -> (image: UIImage?, error: String) {
+        var transform = CGAffineTransform.identity
+        if let track = (try? await asset.loadTracks(withMediaType: .video))?.first,
+           let preferred = try? await track.load(.preferredTransform) {
+            transform = preferred
+        }
+
+        let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = 0
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: kCVPixelFormatType_32BGRA)
+        ])
+        item.add(output)
+
+        let player = AVPlayer(playerItem: item)
+        player.isMuted = true
+        player.actionAtItemEnd = .pause
+        player.automaticallyWaitsToMinimizeStalling = false
+        player.play()
+
+        defer {
+            player.pause()
+            item.remove(output)
+            player.replaceCurrentItem(with: nil)
+        }
+
+        let deadline = Date().addingTimeInterval(12)
+        var waited = 0
+        while Date() < deadline {
+            if Task.isCancelled { return (nil, "已取消") }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            waited += 80
+            if item.status == .failed, let error = item.error {
+                let ns = error as NSError
+                return (nil, "\(ns.localizedDescription)(\(ns.code))")
+            }
+            let time = item.currentTime()
+            if output.hasNewPixelBuffer(forItemTime: time),
+               let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil),
+               let image = makeImage(from: buffer, transform: transform) {
+                return (image, "")
+            }
+            // 播了 4 秒还没画面、且已经有时间进度：说明起点就是黑的/只有音频，别再等了
+            if waited >= 4000, item.currentTime().seconds >= 3 {
+                break
+            }
+        }
+        return (nil, "\(waited)ms 内没取到画面")
     }
 
     /// 顺着样本读第一个能解出画面的 sample。

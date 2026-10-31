@@ -138,7 +138,7 @@ enum VideoThumbnailMirror {
 
         ThumbnailDiagnostics.record(name, "结构 \(summary.compactLine)")
         ThumbnailDiagnostics.record(
-            name, "抽帧失败（镜像 \(triedLength / 1024 / 1024)MB）\(VideoFrameDecoder.shortError(lastError))"
+            name, "抽帧失败（镜像 \(triedLength / 1024 / 1024)MB）\(lastError)"
         )
         return nil
     }

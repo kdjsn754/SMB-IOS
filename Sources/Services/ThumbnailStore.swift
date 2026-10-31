@@ -62,8 +62,8 @@ final class ThumbnailStore: @unchecked Sendable {
     /// 缩略图唯一的闸门：图片和视频共用，一次只跑一个、按格子序号放行。
     /// 分成「图片 3 并发 + 视频 1 并发」两道闸门时是排不出全局顺序的
     /// （视频可能比它前面几张图片先返回），所以合并成一道。
-    /// 宽限 60 ms 让同一批创建的格子先把序号登记进队伍。
-    private let displayLimiter = OrderedLimiter(limit: 1, graceMilliseconds: 60)
+    /// 空闲后的新一批先聚集 250 ms 再挑最小序号，避免「后出现的格子抢到第一个名额」。
+    private let displayLimiter = OrderedLimiter(limit: 1, settleMilliseconds: 250)
 
     init() {
         memory.countLimit = 600
