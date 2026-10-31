@@ -19,8 +19,8 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.0.6`（build 7），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.5 均已验证）；1.0.6 只改缩略图读取与网格排版，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
+| 版本 | `1.0.7`（build 8），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ✅ `xcode-27` 全流程跑通（1.0.0 ~ 1.0.6 均已验证）；1.0.7 改视频封面镜像、播放器与缩略图排队，push 后确认「自检：包结构与依赖」里没有 `Frameworks` 目录 |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -34,8 +34,9 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），**已 vendor 到 `Packages/AMSMB2` 并改成静态链接**（见第 7 节 1.0.1 修复）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，升级上游时要重点核这几个签名。
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
+- **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。
 - **目录页布局**（1.0.4，1.0.6 调整）：固定三列网格，单元格为「缩略图 + 两行居中文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。1.0.6 起缩略图**一律 `.scaledToFit` 完整显示、不做填充裁切**，格子比例按内容类型给：照片 `3:4`、视频 `16:9`、文件夹/其它 `1:1`（`TileAspect`）。
-- **缩略图**（1.0.2 重写，见第 7 节 7；1.0.6 修正读取策略）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3、视频封面并发 1 各自独立闸门；**图片一律整份读满再解码**（上限 64 MB、分块 8 MB，读不满就放弃、绝不拿残缺数据解码），**视频封面默认走「稀疏镜像」**（只读 moov + 第一个关键帧，约 10 MB，见第 7 节 9），流式抽帧降为兜底；失败进 180 秒负缓存；视图划走即取消传输。
+- **缩略图**（1.0.2 重写，1.0.6 修正读取，1.0.7 换镜像实现）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；图片并发 3（`OrderedLimiter`，按格子序号放行，缩略图按「左上→右下」顺序出现）、视频封面并发 1 各自独立闸门；**图片一律整份读满再解码**（上限 64 MB、分块 8 MB，读不满就放弃、绝不拿残缺数据解码）；**视频封面一律走「迷你镜像」**（文件头 12 MB + moov，临时文件十几兆、不留空洞，见第 7 节 11），流式抽帧降为兜底；失败进 180 秒负缓存并记录原因（设置页可见）；视图划走即取消传输。
 - **缓存**：`Library/Caches/SMBViewer/{Thumbnails,Media}`，文件名 = `SHA256(服务器ID + 路径 + 大小 + 修改时间)`，服务器文件变了自动失效；上限 200MB/500MB/1GB/2GB/5GB/不限，超限按写入时间删到 80%，启动/进后台/写缓存时触发。
 - **密码**：优先钥匙串；不可用（自签名场景常见）时退化为本地混淆存储 → 属于**已知安全折中**，UI 里已提示。
 - **主题**：`@AppStorage` + `preferredColorScheme`，三档（跟随系统/浅色/深色）。
@@ -168,6 +169,19 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
    - 修复 A：删掉分阶段读取，图片统一整份读满（分块 8 MB、上限 64 MB）后再解码；`data.count < size` 直接判失败显示占位图标，宁可没有图也不糊半截图。`CacheManager.thumbnailVersion` 递增到 3，旧残图自动失效。
    - 修复 B：`ThumbnailImage` 改 `.scaledToFit()`；网格卡片比例按类型给（照片 `3:4`、视频 `16:9`、文件夹 `1:1`），照片按竖幅铺满，视频按横幅铺满，都不再裁切。
 
+11. **✅ 已修（1.0.7）：1.0.5/1.0.6 里「大文件视频封面仍然出不来」的真正原因 + 播放时灵动岛弹胶囊 + 缩略图乱序出现**
+   - 现象 A：`桃桃酱-白衬无缝肉丝.mp4`（548 MB）、`1.mp4`（1.02 GB、421 MB）在目录里始终只有胶片图标。
+   - 根因 A：1.0.5 的镜像方案是「按原始偏移把 moov 写到文件末尾」。这三个片子都是 `ftyp → free → mdat → moov` 布局，moov 在最后，于是临时文件的**逻辑大小直接等于原片大小**（548 MB / 1 GB），中间全是空洞。手机上写这种文件极慢、空间不足时直接抛错，`makeImage` 就只能返回 nil。
+   - 现场核对（本地解析真实文件）：三者 moov 分别位于 547662742 / 1024471689 / 420634637，`stco` 首项都是 48（首帧就在文件开头），首个 GOP 分别 16.5 MB / 15.9 MB / 11.7 MB。
+   - 修复 A：改成「迷你镜像」——只读**文件头 12 MB** + moov，把 `mdat` 盒子的**声明长度改成实际拿到的字节数**，拼成一个小而连续的文件（不再有空洞、也不再等于原片大小）；抽帧失败时按 1.0 → 0 → 3 秒依次重试。临时文件稳定在 13 MB 左右，与影片大小无关。
+   - 现象 B：播放视频时灵动岛弹出一块「喇叭 + 五个点」的媒体胶囊。
+   - 根因 B：SwiftUI `VideoPlayer` 背后是 `AVPlayerViewController`，它会自动把播放注册成系统「正在播放」，iOS 26 会为此起一个媒体 Live Activity。
+   - 修复 B：播放页改用 `AVPlayerLayer`（`PlayerSurface`）+ 自绘控件，不再经过 AVKit；开始播放与结束时都把 `MPNowPlayingInfoCenter.default().nowPlayingInfo` 置空。
+   - 现象 C：进目录时缩略图在随机位置一张张冒出来。
+   - 根因 C：几十个格子的请求几乎是同时发出的，`AsyncLimiter` 只按「到达顺序」放行，而 Task 调度顺序并不等于网格顺序。
+   - 修复 C：新增 `OrderedLimiter`（按格子序号优先放行），`ThumbnailStore.thumbnail` 增加 `order` 参数，`BrowserView` 用 `visibleItems` 的下标传入，缩略图按「左上 → 右下」填充。
+   - 附带：新增 `ThumbnailDiagnostics`，把最近 5 条失败原因（找不到 moov / moov 过大 / 临时文件写失败 / 抽帧失败 / 图片读不全）显示在设置页「缩略图」里，方便下轮直接定位。
+
 ## 8. 约定（改代码前先看）
 
 - **不要提交 `SMBViewer.xcodeproj`**：改工程必须改 `project.yml`。
@@ -206,6 +220,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.0.7 | 2026-10-31 | 修复大文件视频封面始终出不来：镜像改为「文件头 12 MB + moov + 修正 mdat 声明长度」的连续小文件（不再生成与原片等大的稀疏文件）；播放页弃用 AVKit `VideoPlayer`，改 `AVPlayerLayer` + 自绘控件并清空 Now Playing，去掉灵动岛媒体胶囊；缩略图改用 `OrderedLimiter` 按网格顺序加载；设置页新增缩略图失败原因诊断 |
 | 1.0.6 | 2026-10-31 | 修复 16 MB 以上图片缩略图「只显示上半张、下半截变灰」：去掉分阶段截断读取，一律读满再解码，读不满直接放弃（缓存版本递增到 3）；缩略图由 `.scaledToFill` 裁切改为 `.scaledToFit` 完整显示，卡片比例按照片 3:4 / 视频 16:9 / 文件夹 1:1 |
 | 1.0.5 | 2026-10-31 | 修复大文件 MP4 无封面：视频封面改用「稀疏镜像」抽帧（只读 moov + 首个关键帧，约 10 MB），流式抽帧降为兜底；设置页两个确认框由 confirmationDialog 改为 alert，避免 iOS 26/27 锚定到按钮上方压住开关；清理完成提示改为底部轻提示 |
 | 1.0.4 | 2026-10-31 | 目录页改版：三列网格 + 缩略图下方两行文件名（中间省略）/ 大小 / 日期；新增目录内搜索、6 种排序、网格⇄列表切换 |

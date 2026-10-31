@@ -19,11 +19,8 @@ final class ThumbnailStore: @unchecked Sendable {
     private static let imageHardLimit: Int64 = 64 * 1024 * 1024
     /// 分块读取大小（单次 SMB 读请求上限）
     private static let imageReadChunk: Int = 8 * 1024 * 1024
-    /// 视频封面允许消耗的字节额度。1GB 以上的 MP4，`moov` 索引本身就可能十几兆，
-    /// 额度给小了会导致索引读不全、直接解析失败（大文件缩略图出不来的根因）
+    /// 视频封面允许消耗的字节额度（仅流式兜底路径使用）
     private static let videoByteBudget: Int64 = 32 * 1024 * 1024
-    /// 小于这个大小的视频直接流式抽帧（一次就能读完），更大的走稀疏镜像
-    private static let smallVideoLimit: Int64 = 24 * 1024 * 1024
     /// 失败冷却时间
     private static let failureTTL: TimeInterval = 180
     /// AVFoundation 无法解码的容器，直接不做封面，避免白读十几兆
@@ -61,7 +58,7 @@ final class ThumbnailStore: @unchecked Sendable {
     private var jobs: [String: Job] = [:]
     private var failures: [String: Date] = [:]
 
-    private let imageLimiter = AsyncLimiter(limit: 3)
+    private let imageLimiter = OrderedLimiter(limit: 3)
     private let videoLimiter = AsyncLimiter(limit: 1)
 
     init() {
@@ -81,7 +78,8 @@ final class ThumbnailStore: @unchecked Sendable {
     }
 
     /// 取缩略图。返回 nil 表示「没有 / 暂时失败」，界面应显示占位图标，不要一直转圈。
-    func thumbnail(for item: FileItem, serverID: UUID, connection: SMBConnection) async -> UIImage? {
+    /// - Parameter order: 该文件在目录里的显示序号，用来让缩略图按「左上 → 右下」的顺序出现。
+    func thumbnail(for item: FileItem, serverID: UUID, connection: SMBConnection, order: Int = 0) async -> UIImage? {
         guard item.isMedia else { return nil }
 
         let key = Self.key(for: item, serverID: serverID)
@@ -97,7 +95,7 @@ final class ThumbnailStore: @unchecked Sendable {
 
         if isCoolingDown(key: key) { return nil }
 
-        let job = makeJob(key: key, item: item, serverID: serverID, connection: connection)
+        let job = makeJob(key: key, item: item, serverID: serverID, connection: connection, order: order)
         let waiter = Waiter()
         let result = await withTaskCancellationHandler {
             await job.task.value
@@ -125,7 +123,7 @@ final class ThumbnailStore: @unchecked Sendable {
 
     // MARK: - 任务管理
 
-    private func makeJob(key: String, item: FileItem, serverID: UUID, connection: SMBConnection) -> Job {
+    private func makeJob(key: String, item: FileItem, serverID: UUID, connection: SMBConnection, order: Int) -> Job {
         lock.lock()
         if let existing = jobs[key] {
             existing.waiters += 1
@@ -137,7 +135,7 @@ final class ThumbnailStore: @unchecked Sendable {
         let task = Task<UIImage?, Never> { [weak self] in
             guard let self else { return nil }
             return await self.produce(
-                key: key, item: item, serverID: serverID, connection: connection, cancel: box
+                key: key, item: item, serverID: serverID, connection: connection, order: order, cancel: box
             )
         }
         let job = Job(task: task, box: box)
@@ -182,6 +180,7 @@ final class ThumbnailStore: @unchecked Sendable {
         item: FileItem,
         serverID: UUID,
         connection: SMBConnection,
+        order: Int,
         cancel: CancellationBox
     ) async -> UIImage? {
         let cache = CacheManager.shared
@@ -196,7 +195,7 @@ final class ThumbnailStore: @unchecked Sendable {
         var image: UIImage?
         switch item.kind {
         case .image:
-            await imageLimiter.acquire()
+            await imageLimiter.acquire(order: order)
             image = await imageThumbnail(item: item, connection: connection, cancel: cancel)
             await imageLimiter.release()
         case .video:
@@ -257,7 +256,10 @@ final class ThumbnailStore: @unchecked Sendable {
         }
 
         // 没读满就是残缺数据：宁可显示占位图标，也不要糊一张半截图上去
-        guard data.count >= total else { return nil }
+        guard data.count >= total else {
+            ThumbnailDiagnostics.record(item.name, "图片只读到 \(data.count)/\(total) 字节")
+            return nil
+        }
         return ImageDownsampler.downsample(data: data, maxPixel: Self.pixelSize)
     }
 
@@ -273,24 +275,7 @@ final class ThumbnailStore: @unchecked Sendable {
         }
         guard size > 0 else { return nil }
 
-        // 小文件一次流式读完最省请求；大文件走稀疏镜像，避免被字节预算截断。
-        if size <= Self.smallVideoLimit {
-            if let image = await streamingVideoThumbnail(
-                item: item, connection: connection, size: size, cancel: cancel
-            ) {
-                return image
-            }
-            if cancel.isCancelled { return nil }
-            return await VideoThumbnailMirror.makeImage(
-                connection: connection,
-                path: item.path,
-                fileSize: size,
-                fileExtension: item.fileExtension,
-                cancel: cancel
-            )
-        }
-
-        // 大文件：只读 moov + 第一个关键帧（约 10 MB），跟文件总大小无关，
+        // 一律先走「迷你镜像」：只读文件头 12 MB + moov，跟文件总大小无关，
         // 也不会被 AVFoundation「一直读到文件尾」的请求拖住（大文件封面失败的根因）。
         if let mirrored = await VideoThumbnailMirror.makeImage(
             connection: connection,
@@ -303,7 +288,7 @@ final class ThumbnailStore: @unchecked Sendable {
         }
         if cancel.isCancelled { return nil }
 
-        // 兜底：流式抽帧（moov 在文件头部、或稀疏镜像解析失败时）
+        // 兜底：流式抽帧（镜像失败时，比如封装里找不到 moov）
         return await streamingVideoThumbnail(
             item: item, connection: connection, size: size, cancel: cancel
         )

@@ -96,8 +96,8 @@ struct BrowserView: View {
                     noMatchState
                 } else {
                     LazyVGrid(columns: gridColumns, alignment: .center, spacing: 16) {
-                        ForEach(visibleItems) { item in
-                            cell(for: item)
+                        ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
+                            cell(for: item, order: index)
                         }
                     }
                     .padding(.horizontal, 12)
@@ -107,8 +107,8 @@ struct BrowserView: View {
             }
         } else {
             List {
-                ForEach(visibleItems) { item in
-                    cell(for: item)
+                ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
+                    cell(for: item, order: index)
                         .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
                         .listRowSeparator(.hidden)
                 }
@@ -123,7 +123,7 @@ struct BrowserView: View {
     }
 
     @ViewBuilder
-    private func cell(for item: FileItem) -> some View {
+    private func cell(for item: FileItem, order: Int) -> some View {
         switch item.kind {
         case .folder:
             NavigationLink {
@@ -141,7 +141,8 @@ struct BrowserView: View {
                     item: item,
                     serverID: server.id,
                     connection: app.connection(for: server),
-                    useGrid: useGrid
+                    useGrid: useGrid,
+                    order: order
                 )
             }
             .buttonStyle(.plain)

@@ -17,6 +17,8 @@ struct ThumbnailImage: View {
     let serverID: UUID
     let connection: SMBConnection
     var cornerRadius: CGFloat = 4
+    /// 在目录里的显示序号：让缩略图按「左上 → 右下」的顺序出现，而不是随机位置冒出来
+    var order: Int = 0
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -61,7 +63,8 @@ struct ThumbnailImage: View {
         let result = await ThumbnailStore.shared.thumbnail(
             for: item,
             serverID: serverID,
-            connection: connection
+            connection: connection,
+            order: order
         )
 
         // 被取消（划走 / 翻页）时不要写状态，回来时还要重新尝试
@@ -134,6 +137,7 @@ struct MediaTile: View {
     let serverID: UUID
     let connection: SMBConnection
     let useGrid: Bool
+    var order: Int = 0
 
     var body: some View {
         if useGrid {
@@ -145,7 +149,7 @@ struct MediaTile: View {
 
     private var gridBody: some View {
         VStack(spacing: 5) {
-            ThumbnailImage(item: item, serverID: serverID, connection: connection)
+            ThumbnailImage(item: item, serverID: serverID, connection: connection, order: order)
                 .aspectRatio(
                     item.kind == .video ? TileAspect.video : TileAspect.photo,
                     contentMode: .fit
@@ -168,7 +172,7 @@ struct MediaTile: View {
 
     private var listBody: some View {
         HStack(spacing: 12) {
-            ThumbnailImage(item: item, serverID: serverID, connection: connection, cornerRadius: 6)
+            ThumbnailImage(item: item, serverID: serverID, connection: connection, cornerRadius: 6, order: order)
                 .frame(width: 56, height: 56)
 
             VStack(alignment: .leading, spacing: 4) {

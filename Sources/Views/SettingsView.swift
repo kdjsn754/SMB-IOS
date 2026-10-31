@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
     @ObservedObject private var cache = CacheManager.shared
+    @ObservedObject private var diagnostics = ThumbnailDiagnostics.shared
 
     @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.system.rawValue
     @AppStorage(SettingsKey.cacheLimitMB) private var cacheLimit: Int = 500
@@ -40,10 +41,29 @@ struct SettingsView: View {
                     } label: {
                         Text("重新尝试加载失败的缩略图")
                     }
+
+                    // 排障用：显示最近几次「没生成出来」的原因，用户截图即可定位
+                    if !diagnostics.entries.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(diagnostics.entries.prefix(3)) { entry in
+                                Text("\(entry.name)：\(entry.reason)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Button {
+                                diagnostics.clear()
+                            } label: {
+                                Text("清除诊断记录")
+                                    .font(.footnote)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
                 } header: {
                     Text("缩略图")
                 } footer: {
-                    Text("只有出现在屏幕上的图片才会去读取，划走时会立刻中断传输。图片缩略图需要读取原图（单张最多 16 MB）；视频封面只读索引和第一个关键帧（约 10 MB），不会下载整部影片。关闭后列表只显示图标，可以明显减少流量。")
+                    Text("只有出现在屏幕上的图片才会去读取，划走时会立刻中断传输。图片缩略图需要整份读取原图才能正确解码；视频封面只读文件头和索引（约 12 MB），不会下载整部影片。关闭后列表只显示图标，可以明显减少流量。")
                 }
 
                 Section {
