@@ -6,6 +6,12 @@ import UIKit
 /// 分页不用 `TabView(.page)`：它的翻页手势是 UIKit 内部 pan，
 /// 会和外层「下拉退出」的 `DragGesture` 互相抢（要么翻不了页，要么拖不动退）。
 /// 这里用 `HStack + offset` 自己算位移，一个手势同时处理「横向翻页 / 纵向下拉退出」。
+///
+/// 为什么不用系统自带的下滑退出：`fullScreenCover` 的呈现方式是 `fullScreen`，
+/// 系统只给 `sheet`（pageSheet/formSheet）配交互式下滑，而 sheet 顶部会留出一条
+/// 露出底层的缝、也拿不到全屏，做看图不合适。所以手势自己做，但**位移只走图层**
+/// （offset / scaleEffect），并且用 `PageStack` 把图片内容按「不可变”隔离掉，
+/// 拖动时不会重建页面树，手感和系统一样跟手。
 @MainActor
 struct ImageViewerView: View {
     let items: [FileItem]
@@ -17,8 +23,10 @@ struct ImageViewerView: View {
     @State private var chromeVisible = true
     /// 当前页是否处于放大状态：放大时手势交给页内的 pan（移动画面），外层不做翻页/退出
     @State private var isZoomed = false
-    /// 手势过程中的实时位移
+    /// 手势过程中的实时位移（只影响图层，不触发图片内容重建）
     @State private var drag: CGSize = .zero
+    /// 松手后正在收尾退出，期间忽略新手势
+    @State private var isDismissing = false
 
     init(items: [FileItem], startIndex: Int, serverID: UUID, connection: SMBConnection) {
         self.items = items
@@ -33,6 +41,15 @@ struct ImageViewerView: View {
         min(1, max(0, drag.height) / 380)
     }
 
+    /// 只保留「上一页 / 当前页 / 下一页」三张：目录可能有几百张图，
+    /// 全建出来的话不但白占内存，换页时也要重算几百个视图。
+    private var pageRange: ClosedRange<Int> {
+        guard !items.isEmpty else { return 0...0 }
+        let lower = max(0, index - 1)
+        let upper = min(items.count - 1, index + 1)
+        return lower...max(lower, upper)
+    }
+
     var body: some View {
         ZStack {
             GeometryReader { proxy in
@@ -41,37 +58,39 @@ struct ImageViewerView: View {
 
                 ZStack {
                     // 往下拖时背景逐渐透明，能看见下面被遮住的目录页，明确「松手就退出」
-                    Color.black.opacity(1 - pullProgress * 0.92)
+                    Color.black
+                        .opacity(max(0, 1 - pullProgress * 1.1))
+                        .ignoresSafeArea()
 
-                    HStack(spacing: 0) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { offset, item in
-                            ZoomableImageView(
-                                item: item,
-                                serverID: serverID,
-                                connection: connection,
-                                // 只加载当前这一页：分页容器会把所有页都建出来，
-                                // 不加限制的话打开一张图就会把整个目录的原图全下一遍。
-                                isActive: offset == index,
-                                isZoomed: $isZoomed
-                            )
-                            .frame(width: width, height: height)
-                        }
+                    if items.isEmpty {
+                        Color.clear
+                    } else {
+                        PageStack(
+                            items: items,
+                            range: pageRange,
+                            index: index,
+                            serverID: serverID,
+                            connection: connection,
+                            width: width,
+                            height: height,
+                            isZoomed: $isZoomed
+                        )
+                        .equatable()
+                        // 只在最外层动 offset / scale：这是图层变换，GPU 直接给，
+                        // 不会引起里面 Image 的任何重新布局（这就是不卡的关键）。
+                        .offset(
+                            x: -CGFloat(index - pageRange.lowerBound) * width + drag.width,
+                            y: drag.height
+                        )
+                        .scaleEffect(1 - pullProgress * 0.14)
+                        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
+                        .frame(width: width, height: height, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .gesture(pagingGesture(width: width, height: height))
+                        .onTapGesture { toggleChrome() }
                     }
-                    // 内层给 HStack 真实宽度，外层固定成屏幕宽度并左对齐，offset 才从左上角算起
-                    .frame(width: width * CGFloat(max(items.count, 1)), alignment: .leading)
-                    .frame(width: width, height: height, alignment: .leading)
-                    .offset(x: -CGFloat(index) * width + drag.width, y: drag.height)
-                    .scaleEffect(1 - pullProgress * 0.14)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.88), value: index)
                 }
                 .frame(width: width, height: height)
-                .contentShape(Rectangle())
-                .gesture(pagingGesture(width: width))
-                .onTapGesture {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        chromeVisible.toggle()
-                    }
-                }
             }
             .ignoresSafeArea()
 
@@ -92,12 +111,18 @@ struct ImageViewerView: View {
         }
     }
 
+    private func toggleChrome() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            chromeVisible.toggle()
+        }
+    }
+
     // MARK: - 手势
 
-    private func pagingGesture(width: CGFloat) -> some Gesture {
+    private func pagingGesture(width: CGFloat, height: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12)
             .onChanged { value in
-                guard !isZoomed else { return }
+                guard !isZoomed, !isDismissing else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
 
@@ -114,16 +139,16 @@ struct ImageViewerView: View {
                 }
             }
             .onEnded { value in
-                guard !isZoomed else { return }
+                guard !isZoomed, !isDismissing else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
 
                 if abs(dy) > abs(dx) {
                     // 位移超过 130pt，或者甩得够快，就退出
                     if dy > 130 || value.predictedEndTranslation.height > 320 {
-                        dismiss()
+                        startDismiss(height: height)
                     } else {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                             drag = .zero
                         }
                     }
@@ -142,6 +167,19 @@ struct ImageViewerView: View {
                     index = target
                 }
             }
+    }
+
+    /// 松手后的退出：先把画面顺着甩出去（单独一段动画），动画走完再真正关掉，
+    /// 直接 `dismiss()` 会让整个页面「啪」地消失，看起来像卡了一下。
+    private func startDismiss(height: CGFloat) {
+        guard !isDismissing else { return }
+        isDismissing = true
+        withAnimation(.easeOut(duration: 0.24)) {
+            drag = CGSize(width: 0, height: max(height * 0.95, drag.height))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            dismiss()
+        }
     }
 
     // MARK: - 顶部/底部浮层
@@ -191,6 +229,51 @@ struct ImageViewerView: View {
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
         }
+    }
+}
+
+// MARK: - 页面容器
+
+/// 三张页面的横向堆叠。
+///
+/// 单独抽出来并实现 `Equatable`，配合 `.equatable()` 使用：外层拖动时
+/// `drag` 每帧都在变、`body` 每帧都会重算，但只要这里的入参没变，
+/// SwiftUI 就会跳过它的 `body`，里面的 `Image` 一帧都不重建。
+private struct PageStack: View, Equatable {
+    let items: [FileItem]
+    let range: ClosedRange<Int>
+    let index: Int
+    let serverID: UUID
+    let connection: SMBConnection
+    let width: CGFloat
+    let height: CGFloat
+    @Binding var isZoomed: Bool
+
+    static func == (lhs: PageStack, rhs: PageStack) -> Bool {
+        lhs.index == rhs.index
+            && lhs.range == rhs.range
+            && lhs.width == rhs.width
+            && lhs.height == rhs.height
+            && lhs.items.count == rhs.items.count
+            && lhs.items.first?.id == rhs.items.first?.id
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(range, id: \.self) { offset in
+                ZoomableImageView(
+                    item: items[offset],
+                    serverID: serverID,
+                    connection: connection,
+                    // 只加载当前这一页，相邻页等翻过去再读，避免一次把整个目录的原图全下一遍。
+                    isActive: offset == index,
+                    isZoomed: $isZoomed
+                )
+                .frame(width: width, height: height)
+            }
+        }
+        // 给 HStack 真实总宽度，外层再压成屏幕宽度并左对齐，offset 才能从左上角算起
+        .frame(width: width * CGFloat(range.count), alignment: .leading)
     }
 }
 
