@@ -49,6 +49,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 ```
 docs/开发建议-远端媒体与缩略图踩坑复盘.md   1.0.0~1.0.14 全部踩坑的根因/取证/修法，跨平台对照（新人先读这个）
+docs/缩略图实现详解-按序加载与按比例显示.md 当前版本的缩略图实现：有序闸门怎么做到「一个一个按序出图」、竖屏横屏怎么按比例显示（改这块前必读）
 project.yml                     工程定义（依赖、Build Settings、scheme）★改配置先看这里
 Config/Info.plist               权限文案、URL scheme、文件共享开关
 Packages/AMSMB2/                 vendored 依赖（静态）：AMSMB2/*.swift + Dependencies/libsmb2/{lib,include}
