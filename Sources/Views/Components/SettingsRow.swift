@@ -1,79 +1,29 @@
 import SwiftUI
 import UIKit
 
-/// 设置首页的方块卡片：淡色图标块 + 标题 + 当前状态。
-struct SettingsCard: View {
+/// 设置首页的行：彩色图标块 + 标题 + 右侧当前值（系统「设置」的样式）。
+struct SettingsRow: View {
     let icon: String
     let tint: Color
     let title: String
-    let subtitle: String
+    let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 21, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 50, height: 50)
-                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-
-            Spacer(minLength: 12)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 30, height: 30)
+                .background(tint.gradient, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             Text(title)
-                .font(.system(size: 19, weight: .bold))
-                .foregroundStyle(.primary)
-
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .padding(.top, 2)
-        }
-        .frame(maxWidth: .infinity, minHeight: 124, alignment: .topLeading)
-        .padding(16)
-        .background(
-            Color(uiColor: .secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 24, style: .continuous)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-}
-
-/// 设置首页的整行卡片（单独一项时用，和方块卡片同一套底色与圆角）
-struct SettingsCardRow: View {
-    let icon: String
-    let tint: Color
-    let title: String
-    let subtitle: String
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 42, height: 42)
-                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.primary)
-                Text(subtitle)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
 
             Spacer(minLength: 8)
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.tertiary)
+            Text(value)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
-        .padding(14)
-        .background(
-            Color(uiColor: .secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 
@@ -93,7 +43,7 @@ struct SettingsDetail<Content: View>: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
-        // 设置首页把导航栏藏了（自己做标题），二级页必须显式显示才有返回按钮
+        // 设置首页自己的导航栏也要显示（别被别处的 .toolbar(.hidden) 带歪）
         .toolbar(.visible, for: .navigationBar)
     }
 }

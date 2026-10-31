@@ -1,8 +1,7 @@
 import SwiftUI
-import UIKit
 
-/// 设置首页：方块卡片网格。
-/// 每张卡片 = 淡色图标 + 标题 + 当前状态，点进去是二级页（详细设置）。
+/// 设置首页：只放分类入口，每行的当前值直接显示在右侧，
+/// 点进去是二级页（详细设置）。这样首页一眼能看完，不会堆满开关和小字。
 @MainActor
 struct SettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
@@ -12,106 +11,73 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.thumbnailsEnabled) private var thumbnailsEnabled: Bool = true
     @AppStorage(SettingsKey.videoThumbnails) private var videoThumbnails: Bool = true
 
-    private let margin: CGFloat = 20
-    private let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12)
-    ]
-
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("设置")
-                        .font(.system(size: 32, weight: .bold))
-                        .padding(.bottom, 2)
-
-                    groupTitle("偏好设置")
-
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        NavigationLink {
-                            GestureSettingsView()
-                        } label: {
-                            SettingsCard(
-                                icon: "hand.draw.fill",
-                                tint: .orange,
-                                title: "播放手势",
-                                subtitle: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭"
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink {
-                            AppearanceSettingsView()
-                        } label: {
-                            SettingsCard(
-                                icon: "circle.lefthalf.filled",
-                                tint: .indigo,
-                                title: "外观",
-                                subtitle: themeTitle
-                            )
-                        }
-                        .buttonStyle(.plain)
+            List {
+                Section {
+                    NavigationLink {
+                        AppearanceSettingsView()
+                    } label: {
+                        SettingsRow(
+                            icon: "circle.lefthalf.filled",
+                            tint: .indigo,
+                            title: "外观",
+                            value: themeTitle
+                        )
                     }
 
-                    groupTitle("浏览与存储")
+                    NavigationLink {
+                        GestureSettingsView()
+                    } label: {
+                        SettingsRow(
+                            icon: "hand.draw.fill",
+                            tint: .orange,
+                            title: "播放手势",
+                            value: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭"
+                        )
+                    }
+                }
 
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        NavigationLink {
-                            ThumbnailSettingsView()
-                        } label: {
-                            SettingsCard(
-                                icon: "photo.on.rectangle.angled",
-                                tint: .pink,
-                                title: "缩略图",
-                                subtitle: thumbnailSummary
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink {
-                            CacheSettingsView()
-                        } label: {
-                            SettingsCard(
-                                icon: "internaldrive.fill",
-                                tint: .green,
-                                title: "缓存",
-                                subtitle: Format.bytes(cache.totalBytes)
-                            )
-                        }
-                        .buttonStyle(.plain)
+                Section {
+                    NavigationLink {
+                        ThumbnailSettingsView()
+                    } label: {
+                        SettingsRow(
+                            icon: "photo.on.rectangle.angled",
+                            tint: .pink,
+                            title: "缩略图",
+                            value: thumbnailSummary
+                        )
                     }
 
-                    groupTitle("其他")
+                    NavigationLink {
+                        CacheSettingsView()
+                    } label: {
+                        SettingsRow(
+                            icon: "internaldrive.fill",
+                            tint: .green,
+                            title: "缓存",
+                            value: Format.bytes(cache.totalBytes)
+                        )
+                    }
+                }
 
+                Section {
                     NavigationLink {
                         AboutSettingsView()
                     } label: {
-                        SettingsCardRow(
+                        SettingsRow(
                             icon: "info.circle.fill",
                             tint: .gray,
                             title: "关于",
-                            subtitle: "版本 " + AppInfo.versionWithBuild
+                            value: AppInfo.version
                         )
                     }
-                    .buttonStyle(.plain)
                 }
-                .padding(.horizontal, margin)
-                .padding(.top, 6)
-                .padding(.bottom, 28)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .toolbar(.hidden, for: .navigationBar)
+            .navigationTitle("设置")
             .onAppear { cache.refresh() }
         }
-    }
-
-    private func groupTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.leading, 4)
-            .padding(.top, 10)
     }
 
     private var themeTitle: String {

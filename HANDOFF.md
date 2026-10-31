@@ -19,9 +19,9 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `1.1.10`（build 22），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
-| 构建 | ✅ 1.1.10 由 run **#28**（sha `03460a7`）全绿产出（含「自检：包结构与依赖」） |
-| 产物自检 | 1.1.10：`Info.plist` = 1.1.10 / build 22、`MinimumOSVersion` 16.0、可执行文件 arm64（1.57 MB）、**Payload 内无 `Frameworks` 目录**；已交付 `D:/下载/互传/SMBViewer-v1.1.10-unsigned.ipa` |
+| 版本 | `1.2.0`（build 23），见 `project.yml` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` |
+| 构建 | ⏳ 1.2.0 已推送触发 CI |
+| 产物自检 | 待 1.2.0 出包后填写（1.1.10：build 22 / 无 `Frameworks` / arm64 1.57 MB，已交付） |
 | 验证方式 | CI 编译通过即视为可编译；**未在真机上做过功能回归**（无设备/无 Mac），功能层面属于「代码审查过、逻辑自洽」状态 |
 | 已知待办 | 见第 7 节 |
 
@@ -35,7 +35,7 @@ iOS 端的 SMB 客户端（SwiftUI + AMSMB2），连局域网 NAS 看图片、�
 - **SMB**：[AMSMB2](https://github.com/amosavian/AMSMB2)（封装 libsmb2），**已 vendor 到 `Packages/AMSMB2` 并改成静态链接**（见第 7 节 1.0.1 修复）。**只用到** `connectShare` / `contentsOfDirectory` / `contents(atPath:range:)` / `downloadItem` / `attributesOfItem`，升级上游时要重点核这几个签名。
 - **工程生成**：XcodeGen（`project.yml` 是唯一工程定义，`SMBViewer.xcodeproj` 被 `.gitignore` 排除，**不要提交 pbxproj**）。
 - **视频边下边播**：自定义 scheme `smbstream://` + `AVAssetResourceLoaderDelegate`，把 AVFoundation 的字节请求翻译成 SMB 区间读取（每次 1 MB，减少 SMB 文件句柄开关次数）。加载器支持 **字节预算（`ByteBudget`）** 与 **取消（`CancellationBox`）**，1.0.2 起用它兜住「抽帧时被要求读到文件尾」的坑。
-- **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。1.0.15 起叠加一层**可配置手势**（1.1.8 起改为 SwiftUI 原生手势，一次 `DragGesture` 手写判定单击/双击/拖动/长按，外加 `MagnificationGesture` 捏合，见第 7 节 21），`PlayerGestureSettings`（`@MainActor` 单例 + `UserDefaults`）负责「哪个手势做什么」，设置页「播放手势」可逐项改：双击（两侧快进快退/中间暂停 · 播放暂停 · 单向左/右 · 关闭）、快进跨度（5/10/15/30 秒）、左右拖动（拖动进度/关闭）、上下拖动（左亮度右音量/纯音量/纯亮度/关闭）、长按（1.5×/2×/3× 倍速按住、松手恢复）、双指捏合（缩放 1~4 倍）。几个取舍：**拖进度只在松手时 seek 一次**（远端流每帧 seek 会把 SMB 打爆）、**亮度用黑色遮罩而不是 `UIScreen.main.brightness`**（不改系统亮度、不影响其它 App、iPad 也一致）、**音量用 `AVPlayer.volume` 而不是 `MPVolumeView`**（不弹系统音量条、不碰音频会话）。**1.1.8 起导航栏右上角只留一个「⋯」菜单**：还原画面缩放（缩放中才出现）、**播放手势设置**（弹出与设置页同一份 `PlayerGestureSettingsSections`，改完立刻生效）、手势说明、下载到本地播放。1.1.6 曾经在右上角放过音量/缩放浮层，按用户要求已移除（音量与缩放只走手势与「⋯」里的还原）。
+- **播放器**（1.0.7）：**不再用 AVKit 的 `VideoPlayer`**，改成 `AVPlayerLayer`（`PlayerSurface`）+ 自定义控件（居中播放/暂停、底部进度条、时间、4 秒自动隐藏）。原因：AVKit 会自动把播放注册成系统「正在播放」，iOS 26 会在灵动岛弹出媒体胶囊；换成裸 `AVPlayerLayer` 后系统不会再起这个活动，同时代码里显式把 `MPNowPlayingInfoCenter.nowPlayingInfo` 置空兜底。1.0.15 起叠加一层**可配置手势**（1.1.8 起改为 SwiftUI 原生手势，一次 `DragGesture` 手写判定单击/双击/拖动/长按，外加 `MagnificationGesture` 捏合，见第 7 节 21），`PlayerGestureSettings`（`@MainActor` 单例 + `UserDefaults`）负责「哪个手势做什么」，设置页「播放手势」可逐项改：双击（两侧快进快退/中间暂停 · 播放暂停 · 单向左/右 · 关闭）、快进跨度（5/10/15/30 秒）、左右拖动（拖动进度/关闭）、上下拖动（左亮度右音量/纯音量/纯亮度/关闭）、长按（1.5×/2×/3× 倍速按住、松手恢复）、双指捏合（缩放 1~4 倍）。几个取舍：**拖进度只在松手时 seek 一次**（远端流每帧 seek 会把 SMB 打爆）、**亮度用黑色遮罩而不是 `UIScreen.main.brightness`**（不改系统亮度、不影响其它 App、iPad 也一致）、**音量用 `AVPlayer.volume` 而不是 `MPVolumeView`**（不弹系统音量条、不碰音频会话）。**1.1.8 起右上角只留一个「⋯」菜单**：还原画面缩放（缩放中才出现）、**播放手势设置**（弹出与设置页同一份 `PlayerGestureSettingsSections`，改完立刻生效）、手势说明、下载到本地播放。1.1.6 曾经在右上角放过音量/缩放浮层，按用户要求已移除（音量与缩放只走手势与「⋯」里的还原）。**1.2.0 起导航栏整个隐藏**（`ToolbarItem` 不参与自动隐藏，播放中会一直挂在顶上看片），顶部栏改成自己画的「关闭 / 文件名 / ⋯」，和底部控件同处一个 `chromeVisible` 分支一起淡出。
 - **目录页布局**（1.0.4，1.0.6 调整，1.0.9 定框，1.0.10 去灰底+居中）：固定三列网格、同一行顶部对齐（`LazyVGrid` + `GridItem(alignment: .top)`），单元格为「缩略图 + 两行文件名（中间省略）+ 大小 + 日期」，与常见 NAS 客户端一致；导航栏提供搜索（当前目录内过滤）、排序（名称/时间/大小）、网格⇄列表切换。**1.0.9 起缩略图展示框高度固定**（`TileAspect.box = 0.87`，即宽:高 ≈ 1:1.15，照片/视频/文件夹/其它文件共用同一个框）；**1.0.10 起框内不再铺灰底**——有图时只在图片自身范围内画圆角，空格子是页面底色；图片 `.scaledToFit()` 完整显示后**在框内居中**（横屏上下留白、竖屏左右留白都均匀），播放角标跟着图片左下角走。`FileNameLabel` 固定两行高度，所以同一行三列的图片顶端成一条线、下面的文件名/大小/日期也齐平。1.0.6 的 `.scaledToFill` 裁切、1.0.8 的按真实比例撑格子均已废弃。
   - ⚠️ `LazyVGrid` 的 `alignment` 参数是 **`HorizontalAlignment`**（不是 `VerticalAlignment`），传 `.top` 编译不过；行内垂直对齐要靠 `GridItem(alignment: .top)` 或单元格内部的 `frame(alignment:)`。
 - **缩略图**（1.0.2 重写，1.0.6 修正读取，1.0.7 换镜像实现）：同一文件只生成一份 480px 缩略图供网格/列表共用；`NSCache` + 磁盘双层；**图片和视频共用一道有序闸门（`OrderedLimiter(limit: 1, settleMilliseconds: 250)`，一次只跑一个，按格子序号放行，1.0.11 起）**，所以缩略图严格按「左上→右下」依次出现；1.0.14 起闸门**空闲后先聚集 250 ms 再挑最小序号**（否则「谁先跑到闸门」取决于 SwiftUI 起 `.task` 的顺序，会先冒出一张靠后的图）；**图片一律整份读满再解码**（分块 8 MB，读不满就放弃、绝不拿残缺数据解码；上限 160 MB，超过 24 MB 的改为边读边落临时文件、让 ImageIO 从文件解码，避免「几十兆 Data + 几十兆位图」同时占内存）；**视频封面一律走「迷你镜像」**：先用 `MP4Inspector` 摸清盒子结构（moov/mdat/moof 位置、首个视频样本落点、编码 fourcc），**普通 MP4** 取文件头 12→24→40 MB（按首帧落点可自动加大）+ 末尾接 moov，并把 mdat 声明长度改成实际字节数；**分片 MP4**（moof+mdat）切在**完整 fragment 边界**上、一个字节都不截断；抽帧本身**先 `AVAssetReader` 顺着样本读第一帧**（不 seek，和播放同一条路），失败才退回 `AVAssetImageGenerator` 取最靠前的关键帧。见第 7 节 11/15/18。**1.0.13 起按文件大小分流**：≤ 64 MB 走本地镜像（整份读进来、不截断），> 64 MB 直接走 `smbstream://`，并**优先用播放器管线取帧**（`AVPlayer` + `AVPlayerItemVideoOutput`，与 App 里播放完全同一条路），失败才退回 `AVAssetReader` / `AVAssetImageGenerator`—— 因为截断的镜像会让 `moov` 里的样本偏移越界，AVFoundation 一律判损坏（`-11821`）；失败进 180 秒负缓存并记录原因（设置页可见）；视图划走即取消传输。
@@ -70,7 +70,7 @@ Sources/
   ViewModels/BrowserModel.swift 目录列举、排序、加载状态
   Views/*.swift                 服务器列表/编辑、浏览、看图、播放、设置
   Views/Components/PlayerGestureSettingsForm.swift 「播放手势」表单 + 播放页「⋯ → 播放手势设置」面板（设置页与播放页共用一份）
-  Views/Components/SettingsRow.swift 设置首页行（彩色图标 + 摘要值）+ SettingsDetail 二级页外壳
+  Views/Components/SettingsRow.swift 设置首页行（彩色图标 + 标题 + 右侧当前值）+ SettingsDetail 二级页外壳
   Views/Components/ToastBanner.swift 底部轻提示（.toast($msg) 修饰器）
   Views/Settings/*.swift         设置二级页：外观 / 播放手势 / 缩略图（含失败记录）/ 缓存 / 关于
   Utilities/AppInfo.swift        版本号、build、最低系统（设置首页与关于页共用）
@@ -342,6 +342,11 @@ XCODE_APP=/Applications/Xcode_27.0.app ./scripts/build-ipa.sh
        左边是界面状态，右边是真正落到 `player.volume`、遮罩不透明度、`scaleEffect` 上的值。
        手势没反应时先看这里：显示"还没收到任何手势"＝识别没挂上或视图没命中；
        有事件但「生效」那行不动＝响应逻辑断了；两者都在动＝画面/声音层的锅（1.1.8 就是栽在这里）。
+   - **顶部栏自己做，不用系统导航栏**（1.2.0 改）：`.toolbar(.hidden, for: .navigationBar)`，
+     关闭 / 文件名 / ⋯ 放在 ZStack 里同一个 `if chromeVisible` 分支，和底部播放键、进度条一起淡出。
+     **不要再用 `ToolbarItem`**：系统导航栏不受 `chromeVisible` 控制，播放中会一直挂在顶上（1.1.x 就是这样）。
+   - **手势 HUD 要抬到播放键上方**（`hudOffset(for:)` 返回 -110）：播放键在正中、HUD 也在正中，
+     音量胶囊会正好压在暂停键上（用户截图反馈）；「播放/暂停」气泡本身居中不动。
    - 已知取舍：拖动进度 HUD 只显示「目标时间」，没有缩略图预览（SMB 上逐帧预览太重，
      以后要用 1.0.13 的 `VideoFrameDecoder` 做「每 5% 抽一帧」的预览条）。
 
@@ -395,6 +400,7 @@ cp -r /tmp/amsmb2/Dependencies/libsmb2/lib /tmp/amsmb2/Dependencies/libsmb2/incl
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.2.0 | 2026-11-01 | **播放页顶部栏并入自动隐藏**：导航栏整个隐藏（`ToolbarItem` 不受 `chromeVisible` 控制，播放中一直挂在顶上），关闭 / 文件名 / ⋯ 改成自绘并跟底部控件一起淡出；**手势 HUD 上移 110pt**，不再压在中间的暂停键上（播放/暂停气泡仍居中）；**设置页退回上一版的列表样式**（`SettingsRow` 彩色图标 + 标题 + 右侧当前值，二级页不变）；**首页改回系统导航栏**：`.navigationTitle("资源库")` + 系统 `+` 按钮，`List` 承载卡片，卡片边距与系统大标题共用 20pt；标签页名字同步为「资源库」 |
 | 1.1.10 | 2026-11-01 | **音量手势改为调手机系统音量**（`SystemVolume`：屏幕外 `MPVolumeView` 的 slider + `sendActions`），`player.volume` 固定 1；**首页重做**：标题改「资源库」、自定义大标题与「+」和服务器卡片共用 20pt 边距、服务器改成卡片（长按出编辑/删除）、空态合并成一张卡片；**设置页改成方块卡片网格**（2 列，淡色图标块 + 标题 + 当前状态，分「偏好设置 / 浏览与存储 / 其他」三组，关于为整行卡片）；两个首页都隐藏系统导航栏，二级页显式 `.toolbar(.visible)` 保住返回按钮 |
 | 1.1.9 | 2026-11-01 | **修「手势数值在变、画面/声音不动」**：画面缩放从「改 `AVPlayerLayer` 仿射变换」改为 SwiftUI `.scaleEffect(zoom)`（视频层会覆盖外来变换，1.1.8 实测无效）；音量在 0% 时同时 `isMuted`，保证 0 真的静音；诊断浮层新增「生效」一行，直接打 `player.volume` / 遮罩 / 画面缩放。**设置页改为「分类入口 + 二级页」**：首页只留外观 / 播放手势 / 缩略图 / 缓存 / 关于五个带摘要值的行，点进去才是详细设置；失败记录单独一页；新增 `AppInfo` 统一版本信息 |
 | 1.1.8 | 2026-11-01 | **手势彻底换实现**：删掉 UIKit 手势层（`PlayerGestureLayer`/`PlayerGestureCoordinator`），改成「0.1% 白矩形 + `DragGesture(minimumDistance:0)` + `MagnificationGesture`」，单击/双击/拖动/长按全部手写判定（之前透明视图当手势层在真机上完全收不到触摸）；右上角三个按钮收回「⋯」菜单（手势设置进菜单，音量/缩放入口移除）；**设置页重做**：分「外观 / 播放手势 / 缩略图 / 缓存 / 关于」五组，删掉大段小字说明与「使用说明」区块，失败记录改成可折叠 |

@@ -7,85 +7,62 @@ struct ServerEditorTarget: Identifiable {
     let isNew: Bool
 }
 
-/// 首页（资源库）：自定义顶部标题 + 卡片式服务器列表。
-/// 标题、右上角「+」和下面的卡片共用同一条 20pt 边距，视觉上是一条竖线对齐。
+/// 首页（资源库）：系统大标题 + 右上角系统「+」，服务器以卡片形式列出。
+/// 用 `List` 承载卡片，卡片边距和系统大标题共用同一套 20pt，顶部天然对齐。
 @MainActor
 struct ServerListView: View {
     @EnvironmentObject private var app: AppModel
     @State private var editor: ServerEditorTarget?
 
-    private let margin: CGFloat = 20
-
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    header
-
-                    if app.servers.isEmpty {
-                        emptyCard
-                    } else {
-                        ForEach(app.servers) { server in
-                            NavigationLink {
-                                BrowserView(server: server, path: "/")
+            List {
+                if app.servers.isEmpty {
+                    emptyCard
+                        .cardRow()
+                } else {
+                    ForEach(app.servers) { server in
+                        NavigationLink {
+                            BrowserView(server: server, path: "/")
+                        } label: {
+                            serverCard(server)
+                        }
+                        .buttonStyle(.plain)
+                        .cardRow()
+                        .contextMenu {
+                            Button {
+                                edit(server)
                             } label: {
-                                serverCard(server)
+                                Label("编辑", systemImage: "pencil")
                             }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button {
-                                    edit(server)
-                                } label: {
-                                    Label("编辑", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    app.delete(server)
-                                } label: {
-                                    Label("删除", systemImage: "trash")
-                                }
+                            Button(role: .destructive) {
+                                app.delete(server)
+                            } label: {
+                                Label("删除", systemImage: "trash")
                             }
                         }
                     }
                 }
-                .padding(.horizontal, margin)
-                .padding(.top, 6)
-                .padding(.bottom, 28)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .background(Color(uiColor: .systemGroupedBackground))
-            .toolbar(.hidden, for: .navigationBar)
+            .navigationTitle("资源库")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        add()
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("添加服务器")
+                }
+            }
             .sheet(item: $editor) { target in
                 ServerEditView(server: target.server, isNew: target.isNew)
                     .environmentObject(app)
             }
         }
-    }
-
-    // MARK: - 顶部
-
-    private var header: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("资源库")
-                    .font(.system(size: 32, weight: .bold))
-                Text(app.servers.isEmpty ? "还没有连接" : "\(app.servers.count) 个位置")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 8)
-
-            Button {
-                add()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 36, height: 36)
-                    .background(Color.accentColor.opacity(0.14), in: Circle())
-            }
-            .accessibilityLabel("添加服务器")
-        }
-        .padding(.bottom, 6)
     }
 
     // MARK: - 卡片
@@ -172,5 +149,15 @@ struct ServerListView: View {
 
     private func edit(_ server: SMBServer) {
         editor = ServerEditorTarget(server: server, isNew: false)
+    }
+}
+
+private extension View {
+    /// 把卡片放进 `List`：去掉分隔线、行底色和额外缩进，左右各留 20pt（和系统大标题同一条线）
+    func cardRow() -> some View {
+        self
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
     }
 }

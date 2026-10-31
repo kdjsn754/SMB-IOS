@@ -352,12 +352,21 @@ struct VideoPlayerView: View {
                 gestureSurface
 
                 if let hud {
+                    // 抬到播放键上方：两者都在正中会重叠（音量胶囊正好压在暂停键上）
                     hudView(hud)
+                        .offset(y: hudOffset(for: hud))
                         .transition(.opacity)
                         .allowsHitTesting(false)
                 }
 
                 if chromeVisible {
+                    // 顶部栏（关闭 / 标题 / ⋯）和底部控件一起显隐，播放 4 秒后一起收起
+                    VStack(spacing: 0) {
+                        topBar
+                        Spacer(minLength: 0)
+                    }
+                    .transition(.opacity)
+
                     controls
                         .transition(.opacity)
                 }
@@ -365,7 +374,8 @@ struct VideoPlayerView: View {
                 if gestures.showDiagnostics {
                     diagnosticsOverlay
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .padding(.top, 8)
+                        // 让开顶部栏（关闭按钮在左上角）
+                        .padding(.top, 56)
                         .padding(.leading, 12)
                         .allowsHitTesting(false)
                         .transition(.opacity)
@@ -388,43 +398,8 @@ struct VideoPlayerView: View {
                     errorOverlay(message)
                 }
             }
-            .navigationTitle(item.name)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("关闭") { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if zoom > 1.01 {
-                            Button {
-                                setZoom(1)
-                            } label: {
-                                Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
-                            }
-                            Divider()
-                        }
-                        Button {
-                            showGestureSettings = true
-                        } label: {
-                            Label("播放手势设置", systemImage: "hand.draw")
-                        }
-                        Button {
-                            showGestureHelp = true
-                        } label: {
-                            Label("手势说明", systemImage: "questionmark.circle")
-                        }
-                        Divider()
-                        Button {
-                            Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
-                        } label: {
-                            Label("下载到本地播放", systemImage: "arrow.down.circle")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                }
-            }
+            // 导航栏整个不要：顶部控件自己做（关闭 / 标题 / ⋯），才能跟着自动隐藏一起淡出
+            .toolbar(.hidden, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
         .alert("播放器手势", isPresented: $showGestureHelp) {
@@ -882,6 +857,86 @@ struct VideoPlayerView: View {
     }
 
     // MARK: - 控件
+
+    /// 顶部栏：自己做，跟着 `chromeVisible` 一起淡出（系统导航栏不参与自动隐藏）
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            circleButton("xmark") { dismiss() }
+                .accessibilityLabel("关闭")
+
+            Text(item.name)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+
+            Menu {
+                if zoom > 1.01 {
+                    Button {
+                        setZoom(1)
+                    } label: {
+                        Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
+                    }
+                    Divider()
+                }
+                Button {
+                    showGestureSettings = true
+                    scheduleHide()
+                } label: {
+                    Label("播放手势设置", systemImage: "hand.draw")
+                }
+                Button {
+                    showGestureHelp = true
+                    scheduleHide()
+                } label: {
+                    Label("手势说明", systemImage: "questionmark.circle")
+                }
+                Divider()
+                Button {
+                    Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
+                } label: {
+                    Label("下载到本地播放", systemImage: "arrow.down.circle")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.black.opacity(0.45), in: Circle())
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .background(
+            LinearGradient(
+                colors: [.black.opacity(0.55), .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .top)
+        )
+    }
+
+    private func circleButton(_ systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(.black.opacity(0.45), in: Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 手势 HUD 的纵向偏移：除「播放/暂停」气泡外都抬到播放键上方，避免压住中间的暂停按钮
+    private func hudOffset(for value: GestureHUD) -> CGFloat {
+        switch value {
+        case .playPause:
+            return 0
+        default:
+            return -110
+        }
+    }
 
     private var controls: some View {
         ZStack {
