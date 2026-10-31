@@ -16,6 +16,10 @@ final class VideoPlaybackModel: ObservableObject {
     @Published var duration: Double = 0
     /// 拖动进度条 / 手势拖进度时暂停刷新，避免手指被时间回调抢走
     @Published var isSeeking = false
+    /// 播放器音量（0…1），右上角音量面板与上下拖动手势共用同一份，退出重进也记得
+    @Published fileprivate(set) var volume: Float = 1
+
+    private static let volumeKey = "settings.player.volume"
 
     private var currentAsset: AVURLAsset?
     private var statusCancellable: AnyCancellable?
@@ -25,6 +29,9 @@ final class VideoPlaybackModel: ObservableObject {
     private var wasPlayingBeforeHold = false
 
     init() {
+        let stored = UserDefaults.standard.object(forKey: Self.volumeKey) as? Double
+        volume = Float(min(max(stored ?? 1, 0), 1))
+        player.volume = volume
         player.actionAtItemEnd = .pause
         player.preventsDisplaySleepDuringVideoPlayback = true
         installTimeObserver()
@@ -121,6 +128,16 @@ final class VideoPlaybackModel: ObservableObject {
         guard seconds.isFinite, seconds >= 0 else { return }
         currentTime = seconds
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// 音量统一走这里：手势上下拖、右上角音量面板、静音按钮都调它，保证 UI 与播放器一致。
+    /// 用 `AVPlayer.volume`（App 内音量）而不是 `MPVolumeView`，不弹系统音量条、也不动系统音量。
+    func setVolume(_ value: Float) {
+        let clamped = min(max(value, 0), 1)
+        guard abs(clamped - volume) > 0.0005 else { return }
+        volume = clamped
+        player.volume = clamped
+        UserDefaults.standard.set(Double(clamped), forKey: Self.volumeKey)
     }
 
     /// 长按加速用：按住时把速率调高，松手还原。
@@ -270,6 +287,12 @@ private enum DragMode: Equatable {
     case vertical
 }
 
+/// 右上角浮层：音量 / 画面缩放
+private enum QuickPanel: Equatable {
+    case volume
+    case zoom
+}
+
 @MainActor
 struct VideoPlayerView: View {
     let item: FileItem
@@ -301,6 +324,10 @@ struct VideoPlayerView: View {
     /// 捏合期间要压掉拖动，否则缩放的同时还会冒出进度 HUD
     @State private var isPinching = false
     @State private var showGestureHelp = false
+    /// 右上角音量 / 缩放浮层
+    @State private var quickPanel: QuickPanel?
+    /// 右上角「手势」按钮弹出的设置面板
+    @State private var showGestureSettings = false
 
     var body: some View {
         NavigationStack {
@@ -318,6 +345,13 @@ struct VideoPlayerView: View {
 
                 gestureSurface
 
+                // 右上角浮层打开时，点空白处先收起浮层（同时挡住误触播放手势）
+                if quickPanel != nil {
+                    Color.black.opacity(0.001)
+                        .ignoresSafeArea()
+                        .onTapGesture { closeQuickPanel() }
+                }
+
                 if let hud {
                     hudView(hud)
                         .transition(.opacity)
@@ -327,6 +361,14 @@ struct VideoPlayerView: View {
                 if chromeVisible {
                     controls
                         .transition(.opacity)
+                }
+
+                if let panel = quickPanel {
+                    quickPanelView(panel)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(.top, 8)
+                        .padding(.trailing, 12)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
                 }
 
                 if let progress = model.downloadProgress {
@@ -353,29 +395,56 @@ struct VideoPlayerView: View {
                     Button("关闭") { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if zoom > 1.01 {
+                    HStack(spacing: 12) {
+                        Button {
+                            toggleQuickPanel(.volume)
+                        } label: {
+                            Image(systemName: volumeIconName)
+                                .font(.system(size: 16, weight: .medium))
+                        }
+                        .accessibilityLabel("音量")
+
+                        Button {
+                            toggleQuickPanel(.zoom)
+                        } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(zoom > 1.01 ? Color.accentColor : Color.primary)
+                        }
+                        .accessibilityLabel("画面缩放")
+
+                        Button {
+                            closeQuickPanel()
+                            showGestureSettings = true
+                        } label: {
+                            Image(systemName: "hand.draw")
+                                .font(.system(size: 16, weight: .medium))
+                        }
+                        .accessibilityLabel("播放手势设置")
+
+                        Menu {
+                            if zoom > 1.01 {
+                                Button {
+                                    setZoom(1)
+                                } label: {
+                                    Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
+                                }
+                                Divider()
+                            }
                             Button {
-                                withAnimation(.easeOut(duration: 0.2)) { zoom = 1 }
-                                showHUD(.zoom(1))
+                                Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
                             } label: {
-                                Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
+                                Label("下载到本地播放", systemImage: "arrow.down.circle")
                             }
                             Divider()
-                        }
-                        Button {
-                            Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
+                            Button {
+                                showGestureHelp = true
+                            } label: {
+                                Label("手势说明", systemImage: "hand.draw")
+                            }
                         } label: {
-                            Label("下载到本地播放", systemImage: "arrow.down.circle")
+                            Image(systemName: "ellipsis.circle")
                         }
-                        Divider()
-                        Button {
-                            showGestureHelp = true
-                        } label: {
-                            Label("手势说明", systemImage: "hand.draw")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
                     }
                 }
             }
@@ -385,6 +454,9 @@ struct VideoPlayerView: View {
             Button("知道了", role: .cancel) {}
         } message: {
             Text(gestureHelpText)
+        }
+        .sheet(isPresented: $showGestureSettings) {
+            PlayerGestureSettingsSheet()
         }
         .task {
             await model.start(item: item, serverID: serverID, connection: connection)
@@ -520,7 +592,7 @@ struct VideoPlayerView: View {
         case .brightness:
             dragStartValue = 1 - dimLevel
         case .volume:
-            dragStartValue = Double(model.player.volume)
+            dragStartValue = Double(model.volume)
         default:
             dragStartValue = 0
         }
@@ -552,7 +624,7 @@ struct VideoPlayerView: View {
                 dimLevel = 1 - value
                 showHUD(.brightness(value), autoHide: false)
             } else {
-                model.player.volume = Float(value)
+                model.setVolume(Float(value))
                 showHUD(.volume(value), autoHide: false)
             }
 
@@ -709,6 +781,117 @@ struct VideoPlayerView: View {
         rate == rate.rounded() ? "\(Int(rate))" : String(format: "%.1f", rate)
     }
 
+    // MARK: - 右上角浮层（音量 / 画面缩放）
+
+    private var volumeIconName: String {
+        let level = model.volume
+        if level <= 0.001 { return "speaker.slash.fill" }
+        if level < 0.34 { return "speaker.wave.1.fill" }
+        if level < 0.67 { return "speaker.wave.2.fill" }
+        return "speaker.wave.3.fill"
+    }
+
+    private func toggleQuickPanel(_ panel: QuickPanel) {
+        hideTask?.cancel()
+        if !chromeVisible {
+            withAnimation(.easeInOut(duration: 0.18)) { chromeVisible = true }
+        }
+        withAnimation(.easeOut(duration: 0.16)) {
+            quickPanel = quickPanel == panel ? nil : panel
+        }
+    }
+
+    private func closeQuickPanel() {
+        guard quickPanel != nil else { return }
+        withAnimation(.easeOut(duration: 0.14)) { quickPanel = nil }
+        scheduleHide()
+    }
+
+    @ViewBuilder
+    private func quickPanelView(_ panel: QuickPanel) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: panel == .volume ? volumeIconName : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(panel == .volume ? "音量" : "画面缩放")
+                    .font(.footnote.weight(.semibold))
+                Spacer(minLength: 12)
+                Text(panel == .volume
+                     ? "\(Int((model.volume * 100).rounded()))%"
+                     : String(format: "%.1f×", zoom))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+
+            if panel == .volume {
+                Slider(
+                    value: Binding(get: { Double(model.volume) },
+                                   set: { model.setVolume(Float($0)) }),
+                    in: 0...1
+                )
+                .tint(.white)
+
+                HStack(spacing: 8) {
+                    quickChip("静音") { model.setVolume(0) }
+                    quickChip("50%") { model.setVolume(0.5) }
+                    quickChip("100%") { model.setVolume(1) }
+                }
+            } else {
+                Slider(
+                    value: Binding(get: { Double(zoom) },
+                                   set: { setZoom(CGFloat($0)) }),
+                    in: 1...4
+                )
+                .tint(.white)
+
+                HStack(spacing: 6) {
+                    ForEach(Self.zoomChoices, id: \.self) { value in
+                        quickChip(zoomChipTitle(value), selected: abs(zoom - CGFloat(value)) < 0.01) {
+                            setZoom(CGFloat(value))
+                        }
+                    }
+                }
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(14)
+        .frame(width: 244)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+        )
+        .environment(\.colorScheme, .dark)
+    }
+
+    private static let zoomChoices: [Double] = [1, 1.5, 2, 3, 4]
+
+    private func zoomChipTitle(_ value: Double) -> String {
+        value == value.rounded() ? "\(Int(value))×" : String(format: "%.1f×", value)
+    }
+
+    private func quickChip(_ title: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.monospacedDigit())
+                .fontWeight(selected ? .semibold : .regular)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(
+                    Color.white.opacity(selected ? 0.26 : 0.12),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func setZoom(_ value: CGFloat) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            zoom = min(max(value, 1), 4)
+        }
+    }
+
     // MARK: - 控件
 
     private var controls: some View {
@@ -771,7 +954,8 @@ struct VideoPlayerView: View {
 
     private func scheduleHide() {
         hideTask?.cancel()
-        guard model.isPlaying else { return }
+        // 右上角浮层开着的时候不要自动收控件，否则浮层会跟着消失
+        guard model.isPlaying, quickPanel == nil else { return }
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if Task.isCancelled { return }
