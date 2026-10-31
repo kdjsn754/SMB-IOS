@@ -76,15 +76,16 @@ struct ImageViewerView: View {
                             isZoomed: $isZoomed
                         )
                         .equatable()
-                        // 只在最外层动 offset / scale：这是图层变换，GPU 直接给，
-                        // 不会引起里面 Image 的任何重新布局（这就是不卡的关键）。
+                        // 先压成屏幕大小（内容仍是三页总宽、左对齐、不裁剪），
+                        // 之后的 offset / scaleEffect 才是以「屏幕中心」为锚点的图层变换；
+                        // 顺序不能反：scaleEffect 挂在宽条上会绕整条的中间缩放，画面会往一边飘。
+                        .frame(width: width, height: height, alignment: .leading)
                         .offset(
                             x: -CGFloat(index - pageRange.lowerBound) * width + drag.width,
                             y: drag.height
                         )
                         .scaleEffect(1 - pullProgress * 0.14)
                         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
-                        .frame(width: width, height: height, alignment: .leading)
                         .contentShape(Rectangle())
                         .gesture(pagingGesture(width: width, height: height))
                         .onTapGesture { toggleChrome() }
