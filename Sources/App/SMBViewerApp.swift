@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 @MainActor
@@ -9,6 +10,9 @@ struct SMBViewerApp: App {
 
     init() {
         AppDefaults.register()
+        // 尽早装：崩溃只有在 handler 装好之后才记得下来。
+        // 上一次的判定结果由它自己落盘，设置 → 诊断里能看。
+        DiagnosticsStore.shared.start()
     }
 
     var body: some Scene {
@@ -21,6 +25,11 @@ struct SMBViewerApp: App {
                     if phase != .active {
                         app.cache.autoCleanIfNeeded()
                     }
+                }
+                // 用户从多任务里划掉 App 时会走到这里：抹掉会话标记，
+                // 免得下次启动把「正常关闭」误报成「被系统终止」。
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
+                    DiagnosticsStore.shared.markCleanExit()
                 }
         }
     }

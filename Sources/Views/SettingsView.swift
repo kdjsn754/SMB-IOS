@@ -64,6 +64,17 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
+                        DiagnosticsView()
+                    } label: {
+                        SettingsRow(
+                            icon: "stethoscope",
+                            tint: .teal,
+                            title: "诊断",
+                            value: DiagnosticsStore.shared.previousExit.shortTitle
+                        )
+                    }
+
+                    NavigationLink {
                         AboutSettingsView()
                     } label: {
                         SettingsRow(

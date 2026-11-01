@@ -13,17 +13,17 @@ import UIKit
 /// 改成每页位置只由 `(i - index) * width` 这个 offset 决定，位移全部走图层变换，`withAnimation` 一定能动画。
 ///
 /// 为什么不用系统自带的下滑退出：`fullScreenCover` 的呈现方式是 `fullScreen`，
-/// 系统只给 `sheet`（pageSheet/formSheet）配交互式下滑，而 sheet 顶部会留出一条
-/// 露出底层的缝、也拿不到全屏，做看图不合适。所以手势自己做，但**位移只走图层**
-/// （offset / scaleEffect），并且用 `PageStack` 把图片内容按「不可变」隔离掉，
+/// 系统交互式下滑在它上面并不可靠（iOS 18+ 配 zoom 转场之后更明显：手指落下能跟，
+/// 但拖快一点、或内容层还并挂着别的拖动识别器，它就退回不认）。所以手势自己做，
+/// 但**位移只走图层**（offset / scaleEffect），并且用 `PageStack` 把图片内容按「不可变」隔离掉，
 /// 拖动时不会重建页面树，手感和系统一样跟手。
 @MainActor
 struct ImageViewerView: View {
     let items: [FileItem]
     let serverID: UUID
     let connection: SMBConnection
-    /// 目录页传进来的缩放转场命名空间。非 nil 且系统是 iOS 18+ 时，进出都交给系统的
-    /// 「从缩略图长出来 / 缩回去」转场（照片 App 那套），下面自绘的下拉退出就会被关掉。
+    /// 目录页传进来的缩放转场命名空间。非 nil 且系统是 iOS 18+ 时，进出场交给系统的
+    /// 「从缩略图长出来 / 缩回去」转场（照片 App 那套）；下滑手势仍由本页自绘。
     let zoomNamespace: Namespace.ID?
     /// 当前这一页的文件路径，回写给目录页：退出时系统要按它找「缩回哪一格」，
     /// 左右翻页之后就能缩回当前那张的格子，而不是最初点开的那一格。
@@ -43,8 +43,13 @@ struct ImageViewerView: View {
     @State private var isZoomed = false
     /// 手势过程中的实时位移（只影响图层，不触发图片内容重建）
     @State private var drag: CGSize = .zero
+    /// 本次拖动锁定的方向：判一次就锁住，避免斜着拖时在翻页/下拉之间来回跳
+    @State private var dragAxis: DragAxis?
     /// 松手后正在收尾退出，期间忽略新手势
     @State private var isDismissing = false
+
+    /// 一次拖动只属于一个方向
+    private enum DragAxis { case horizontal, vertical }
 
     init(
         items: [FileItem],
@@ -71,17 +76,22 @@ struct ImageViewerView: View {
 
     /// 走系统缩放转场吗？
     ///
-    /// 走了之后：进出场由系统负责（从缩略图长大 / 缩回缩略图），并且系统**自带**单指下滑退出、
-    /// 双指捏合反悔，而且下滑时系统会在底下垫一层不透明背景 —— 我们自绘的「下拉渐隐露出目录页」
-    /// 既多余又会和系统手势抢，所以在这一支里整体关掉。
+    /// 走了之后：**进出场**由系统负责（从缩略图长大 / 缩回缩略图），点关闭或下滑退出都是这一套。
+    /// 但**下滑手势本身**仍是我们自己的：`fullScreenCover` 没有可靠的系统交互式下滑，
+    /// 所以 `interactiveDismissDisabled` 把系统那条关掉，纵向位移照旧写进 `drag`。
     private var usesSystemZoom: Bool {
         Self.supportsZoom(zoomNamespace)
     }
 
     /// 下拉退出的进度 0…1：背景变透明、画面缩小、顶部栏淡出都跟着它
+    ///
+    /// 系统缩放转场模式下也照常计算。原先这里把纵向整段交给系统的「下滑退出」，
+    /// 但它挂在 `fullScreenCover` 上时只在部分时机认手（内容层有并挂的拖动、
+    /// 或松手速度稍慢就退回），表现就是「很多时候下滑退不出去」。
+    /// 现在纵向一律由下面这支手势自己跟手，超过阈值再 `dismiss()`，
+    /// 由系统接着把画面缩回格子 —— 手感不依赖系统认不认手。
     private var pullProgress: CGFloat {
-        guard !usesSystemZoom else { return 0 }
-        return min(1, max(0, drag.height) / 380)
+        min(1, max(0, drag.height) / 380)
     }
 
     /// 只保留「上一页 / 当前页 / 下一页」三张：目录可能有几百张图，
@@ -133,7 +143,8 @@ struct ImageViewerView: View {
                             .offset(y: drag.height)
                             .scaleEffect(1 - pullProgress * 0.14)
                             .contentShape(Rectangle()),
-                            width: width
+                            width: width,
+                            height: height
                         )
                         .onTapGesture { toggleChrome() }
                     }
@@ -152,6 +163,9 @@ struct ImageViewerView: View {
             }
         }
         .preferredColorScheme(.dark)
+        // 下滑退出只留一条通路：自己那条手势。系统的交互式关闭在 `fullScreenCover` 上
+        // 时灵时不灵，放开的话会出现「手指拖到一半被系统接管、然后弹回去」的抖动。
+        .interactiveDismissDisabled(usesSystemZoom)
         .statusBarHidden(!chromeVisible || pullProgress > 0.05)
         .task {
             // 画面从缩略图长到位之后，浮层再淡入（照片 App 的节奏）。
@@ -181,6 +195,9 @@ struct ImageViewerView: View {
     /// 预热前后两页：已经缓存过的直接跳过，没缓存过的按顺序读进磁盘缓存。
     /// 用户很快又划走时任务会被取消，`CancellationBox` 会把底层 SMB 传输一起掐掉，
     /// 不会在后台白读几十兆。
+    ///
+    /// 走 `prefetch` 而不是 `image`：预热只需要磁盘上那份压缩图，
+    /// 用 `image` 会把解码后的整张大图也搬进内存（两张 ≈ 50 MB），纯属白占。
     private func prefetchNeighbors() async {
         for offset in [index + 1, index - 1] {
             guard !Task.isCancelled, items.indices.contains(offset) else { continue }
@@ -190,7 +207,7 @@ struct ImageViewerView: View {
 
             let box = CancellationBox()
             await withTaskCancellationHandler {
-                _ = await MediaStore.shared.image(
+                await MediaStore.shared.prefetch(
                     for: item,
                     serverID: serverID,
                     connection: connection,
@@ -218,56 +235,68 @@ struct ImageViewerView: View {
 
     // MARK: - 手势
 
-    /// 翻页手势的挂法分两种：
-    /// - 旧系统（自绘下拉退出）：`.gesture`，我们自己独占拖动；
-    /// - iOS 18+ 走系统缩放转场时改成 `.simultaneousGesture`——系统的「下滑退出」是它自己的手势，
-    ///   独占的话两边会互相把对方顶掉（表现为要么翻不了页、要么退不出去）。
-    ///   并列之后系统负责下滑退出，我们只处理横向翻页（纵向位移在 `pagingGesture` 里直接忽略）。
-    @ViewBuilder
-    private func paged<Content: View>(_ content: Content, width: CGFloat) -> some View {
-        if usesSystemZoom {
-            content.simultaneousGesture(pagingGesture(width: width))
-        } else {
-            content.gesture(pagingGesture(width: width))
-        }
+    /// 翻页 + 下拉退出的手势挂法。
+    ///
+    /// 一律用 `.gesture`（独占）：纵向位移要在 `onChanged` 里逐帧写进 `drag` 让画面跟手，
+    /// 这必须是同一条手势的连续事件。之前走系统缩放转场时改成 `.simultaneousGesture`
+    /// 想把纵向让给系统，结果两边都不干脆：系统的下滑关闭时好时坏，我们这边又因为
+    /// 收到纵向事件后直接 return，出现了「拖了半屏、松手什么都不发生」的空窗。
+    /// 现在纵向也归自己，系统的交互式关闭在 `body` 里用 `interactiveDismissDisabled` 关掉，
+    /// 只保留 `dismiss()` 时那一下缩回格子的转场。
+    private func paged<Content: View>(_ content: Content, width: CGFloat, height: CGFloat) -> some View {
+        content.gesture(pagingGesture(width: width, height: height))
     }
 
-    private func pagingGesture(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 12)
+    private func pagingGesture(width: CGFloat, height: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 10)
             .onChanged { value in
                 guard !isZoomed, !isDismissing else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
 
-                // 系统转场模式下纵向归系统的「下滑退出」，这里一点都不碰
-                if usesSystemZoom, abs(dy) > abs(dx) { return }
+                // 方向只判一次，判完就锁住。
+                //
+                // 逐帧比较 `abs(dy) > abs(dx)` 的话，手指稍微斜一点就会在
+                // 「横向翻页」和「纵向下拉」之间反复跳：这一帧按纵向把画面拉下来，
+                // 下一帧又按横向把 `drag.height` 清成 0，画面原地抖一下再回来。
+                // 用户看到的正是「拖了没反应 / 拖到一半弹回去」，也就是
+                // 「下滑退出很多时候触发不了」。锁定之后，一次拖动只会走一条路径。
+                if dragAxis == nil {
+                    guard max(abs(dx), abs(dy)) > 6 else { return }
+                    dragAxis = abs(dy) > abs(dx) ? .vertical : .horizontal
+                }
 
-                if abs(dy) > abs(dx) {
-                    // 纵向：只在往下时跟手（往上没有退出语义，别让画面乱飘）
+                switch dragAxis {
+                case .vertical?:
+                    // 往下才跟手：往上没有退出语义，别让画面乱飘
                     drag = CGSize(width: dx * 0.18, height: max(0, dy))
-                } else {
-                    // 横向：首尾页加阻尼，像系统那样拖到头有回弹感
+                case .horizontal?:
+                    // 首尾页加阻尼，像系统那样拖到头有回弹感
                     var x = dx
                     if (index == 0 && dx > 0) || (index == items.count - 1 && dx < 0) {
                         x *= 0.32
                     }
                     drag = CGSize(width: x, height: 0)
+                case .none:
+                    break
                 }
             }
             .onEnded { value in
-                guard !isZoomed, !isDismissing else { return }
+                let axis = dragAxis
+                dragAxis = nil
+                guard !isZoomed, !isDismissing, let axis else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drag = .zero }
+                    return
+                }
                 let dx = value.translation.width
                 let dy = value.translation.height
 
-                // 纵向交给系统的下滑退出，这里直接收手（回弹也由系统做）
-                if usesSystemZoom, abs(dy) > abs(dx) { return }
-
-                if abs(dy) > abs(dx) {
-                    // 位移超过 130pt，或者甩得够快，就退出
-                    if dy > 130 || value.predictedEndTranslation.height > 320 {
-                        // 退出只动一次：画面现在停在哪就留在哪，交给系统把整张全屏页
-                        // 顺着滑下去（coverVertical），两段动画接力会变成
-                        // 「图片先下去、黑底再跟一次」。
+                if axis == .vertical {
+                    // 拖过屏高约 1/7，或者甩得够快，就退出。
+                    // 阈值别定太高：手指从图片中部往下拖到下巴附近也就 200pt 出头。
+                    let distance = max(84, height * 0.14)
+                    if dy > distance || value.predictedEndTranslation.height > height * 0.3 {
+                        // 退出只动一次：画面现在停在哪就留在哪，交给系统转场缩回格子。
                         isDismissing = true
                         dismiss()
                     } else {
@@ -494,7 +523,18 @@ struct ZoomableImageView: View {
             .onTapGesture(count: 2) { toggleZoom() }
         }
         .task(id: isActive) {
-            guard isActive else { return }
+            guard isActive else {
+                // 变成前后页之后，把解码好的整张图放掉（3000 边长 ≈ 27 MB）。
+                // 这段睡眠会在「用户又翻回来」时被取消——`task(id:)` 换 id 会取消旧任务，
+                // 所以快速来回滑不会出现「刚清完又重新读一遍」。
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                guard !Task.isCancelled else { return }
+                if image != nil {
+                    placeholder = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
+                    image = nil
+                }
+                return
+            }
             await load()
         }
     }

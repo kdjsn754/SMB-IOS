@@ -33,6 +33,38 @@ final class MediaStore: @unchecked Sendable {
         return image
     }
 
+    /// 预热：只保证磁盘上有压缩过的副本，**不把 `UIImage` 留在内存里**。
+    ///
+    /// 原先预热复用的也是 `image(...)`：读回、解码成整张 3000 边长的大图（≈ 27 MB）、
+    /// 写完盘再丢掉。翻页时前后两张连着预热，内存峰值直接多出 50 MB 以上，
+    /// 正好撞在「切后台被系统回收」的枪口上。这里只做数据搬运，解码结果用完即弃。
+    func prefetch(
+        for item: FileItem,
+        serverID: UUID,
+        connection: SMBConnection,
+        cancel: CancellationBox? = nil
+    ) async {
+        let cache = CacheManager.shared
+        let url = cache.mediaURL(serverID: serverID, item: item, suffix: "jpg")
+        if FileManager.default.fileExists(atPath: url.path) { return }
+
+        let data: Data
+        do {
+            data = try await connection.readAll(item.path, cancel: cancel)
+        } catch {
+            return
+        }
+        if cancel?.isCancelled == true { return }
+
+        autoreleasepool {
+            if let image = ImageDownsampler.downsample(data: data, maxPixel: 3000),
+               let jpeg = image.jpegData(compressionQuality: 0.9) {
+                try? jpeg.write(to: url, options: .atomic)
+                cache.noteWrite(bytes: Int64(jpeg.count))
+            }
+        }
+    }
+
     func localVideoURL(
         for item: FileItem,
         serverID: UUID,
