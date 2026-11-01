@@ -957,9 +957,19 @@ struct VideoPlayerView: View {
     /// 顶部栏：自己做，跟着 `chromeVisible` 一起淡出（系统导航栏不参与自动隐藏）
     private var topBar: some View {
         HStack(spacing: 12) {
-            // iOS 26 系统标准关闭钮（Liquid Glass 圆钮），替代自绘 xmark + 黑圈
-            Button(role: .close) { dismiss() }
-                .accessibilityLabel("关闭")
+            // 和右边 ⋯ 完全同一套外观：白图标 + 36pt 黑色圆底（1.3.31）
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.black.opacity(0.45), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("关闭")
 
             Text(item.name)
                 .font(.headline)
@@ -1098,24 +1108,18 @@ private struct PlayerProgressBar: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            Slider(
-                // get 读的是 `displayTime`（拖动中＝scrubTime），set 只写本地值，
-                // 不触发任何播放器操作，所以滑块严格跟手、不会被时间回调拽回去
-                value: Binding(
-                    get: { progress.displayTime },
-                    set: { onScrub($0) }
-                ),
-                in: 0...max(progress.duration, 1),
-                onEditingChanged: { editing in
-                    if editing {
-                        onBegin()
-                    } else {
-                        onCommit()
-                    }
-                }
+            // 自绘进度条：整条 26pt 都是热区，**点哪儿就跳哪儿**（系统 Slider 只认拖、点不动）
+            ScrubBar(
+                value: progress.displayTime,
+                total: progress.duration,
+                isActive: progress.isSeeking,
+                onBegin: onBegin,
+                onScrub: onScrub,
+                onCommit: onCommit
             )
-            .tint(.white)
+            .frame(height: 26)
             .disabled(progress.duration <= 0)
+            .opacity(progress.duration > 0 ? 1 : 0.5)
 
             HStack(spacing: 6) {
                 Text(Format.duration(progress.displayTime))
@@ -1145,6 +1149,84 @@ private struct PlayerProgressBar: View {
             )
             .ignoresSafeArea(edges: .bottom)
         )
+    }
+}
+
+/// 自绘进度条。相比系统 `Slider` 多两件事：
+/// 1. **单击即跳转**——`DragGesture(minimumDistance: 0)` 让「按下」就等于「拖到该点」，
+///    松手立刻 commit；系统 Slider 只有拖才动，点一下没反应。
+/// 2. 拖动时轨道变粗、圆点变大，手指压着的地方有明确反馈。
+///
+/// 它仍然只写本地 `scrubTime`（走 `onScrub`），一次都不碰播放器，
+/// 所以拖动过程依旧不会像 1.3.30 之前那样每帧 seek 远端流。
+@MainActor
+private struct ScrubBar: View {
+    var value: Double
+    var total: Double
+    /// seek 在途（不只是手指在拖）：圆点保持放大，表示「正在跳」
+    var isActive: Bool
+    var onBegin: () -> Void
+    var onScrub: (Double) -> Void
+    var onCommit: () -> Void
+
+    @State private var isDragging = false
+
+    private var fraction: Double {
+        guard total > 0, value.isFinite else { return 0 }
+        return min(max(value / total, 0), 1)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = max(geo.size.width, 1)
+            let barHeight: CGFloat = (isDragging || isActive) ? 6 : 4
+            let knob: CGFloat = (isDragging || isActive) ? 15 : 11
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.28))
+                    .frame(height: barHeight)
+
+                Capsule(style: .continuous)
+                    .fill(Color.white)
+                    .frame(width: width * CGFloat(fraction), height: barHeight)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: knob, height: knob)
+                    .shadow(color: .black.opacity(0.35), radius: 2, y: 0.5)
+                    // 贴到两端时圆点不越界（否则最左/最右会露出半个圆）
+                    .offset(x: min(max(width * CGFloat(fraction) - knob / 2, 0), max(width - knob, 0)))
+            }
+            .frame(width: width, height: geo.size.height, alignment: .leading)
+            // 整块 26pt 高都是热区：点哪儿跳哪儿
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        if !isDragging {
+                            isDragging = true
+                            onBegin()
+                        }
+                        onScrub(seconds(at: gesture.location.x, width: width))
+                    }
+                    .onEnded { gesture in
+                        // 再取一次点按位置：单击时 onChanged 和 onEnded 的 x 相同，
+                        // 拖到边缘松手时这里能拿到最终落点
+                        onScrub(seconds(at: gesture.location.x, width: width))
+                        isDragging = false
+                        onCommit()
+                    }
+            )
+            .animation(.easeOut(duration: 0.14), value: isDragging)
+            .animation(.easeOut(duration: 0.14), value: isActive)
+        }
+    }
+
+    private func seconds(at x: CGFloat, width: CGFloat) -> Double {
+        guard total > 0, width > 0 else { return 0 }
+        let ratio = min(max(Double(x / width), 0), 1)
+        return ratio * total
     }
 }
 
