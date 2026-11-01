@@ -120,17 +120,10 @@ struct ServerListView: View {
 
             Spacer(minLength: 8)
 
-            VStack(alignment: .trailing, spacing: 4) {
-                if let date = server.lastConnected {
-                    Text(Format.date(date))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                // 唯一的一个小箭头：卡片自己画，不走 `List`/`NavigationLink` 的系统 accessory
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
+            // 唯一的一个小箭头：卡片自己画，不走 `List`/`NavigationLink` 的系统 accessory
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.tertiary)
         }
         .padding(14)
         .background(

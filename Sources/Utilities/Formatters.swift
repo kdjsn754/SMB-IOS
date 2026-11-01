@@ -10,14 +10,7 @@ enum Format {
         return formatter
     }()
 
-    /// 服务器卡片右侧的「最近连接」：只到天（1.2.8 起去掉时分，用户要求别显示时间）
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
-
+    /// 网格里用的短日期（2023/12/20）
     private static let shortDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
@@ -27,11 +20,6 @@ enum Format {
 
     static func bytes(_ value: Int64) -> String {
         byteFormatter.string(fromByteCount: max(0, value))
-    }
-
-    static func date(_ value: Date?) -> String {
-        guard let value else { return "—" }
-        return dateFormatter.string(from: value)
     }
 
     /// 网格里用的短日期（2023/12/20）
