@@ -16,10 +16,11 @@ struct BrowserView: View {
     @FocusState private var searchFocused: Bool
     /// 看图的缩放转场命名空间：缩略图（起点）与全屏页（终点）共用同一个命名空间才配得上
     @Namespace private var zoomNamespace
-    /// 当前正在看的那张图（换页时会由看图页回写）。
-    /// 缩放转场的终点不再读它——终点改由 `ImageViewerView` 内部按 `index` 算，
-    /// 这里只是留个记录，方便以后做「返回时高亮上次看的那格」之类的功能。
-    @State private var zoomedItemID: String?
+    /// 刚退出全屏看图的一小段时间里忽略格子点击。
+    ///
+    /// 退出动画还在收尾时手指其实已经落在格子上了，这时候进来的一下「触摸」很容易
+    /// 被当成点击（直接把图片又点开）。这段时间一律不认，`onDismiss` 里设。
+    @State private var tapGuardUntil: Date = .distantPast
 
     init(server: SMBServer, path: String) {
         self.server = server
@@ -76,7 +77,10 @@ struct BrowserView: View {
         .toolbar(.visible, for: .navigationBar)
         .toolbar { toolbarContent }
         .task { await load() }
-        .fullScreenCover(item: $overlay) { item in
+        .fullScreenCover(item: $overlay, onDismiss: {
+            // 退出动画收尾时手指已经回到格子上，这一下别让它变成「又点开一张图」
+            tapGuardUntil = Date().addingTimeInterval(0.45)
+        }) { item in
             switch item {
             case .images(let request):
                 ImageViewerView(
@@ -84,8 +88,7 @@ struct BrowserView: View {
                     startIndex: request.startIndex,
                     serverID: server.id,
                     connection: app.connection(for: server),
-                    zoomNamespace: zoomNamespace,
-                    zoomedItemID: $zoomedItemID
+                    zoomNamespace: zoomNamespace
                 )
                 // 缩放转场的终点（`.zoomDestination`）挪进了 `ImageViewerView` 自己身上：
                 // 那里的 id 由页内 `index` 直接算出，不受这里 `@State` 传播时序影响。
@@ -148,19 +151,18 @@ struct BrowserView: View {
             .buttonStyle(.plain)
 
         case .image, .video:
-            Button {
-                open(item)
-            } label: {
-                MediaTile(
-                    item: item,
-                    serverID: server.id,
-                    connection: app.connection(for: server),
-                    useGrid: useGrid,
-                    order: order,
-                    zoomNamespace: zoomNamespace
-                )
-            }
-            .buttonStyle(.plain)
+            // 不用 `Button`：它在滚动容器里会把「横向拖动但没滚动」也判成点击，
+            // 于是「右滑返回」很容易变成「把这张图点开」。`tileTap` 只认没移动过的触摸。
+            MediaTile(
+                item: item,
+                serverID: server.id,
+                connection: app.connection(for: server),
+                useGrid: useGrid,
+                order: order,
+                zoomNamespace: zoomNamespace
+            )
+            .tileTap { open(item) }
+            .accessibilityAddTraits(.isButton)
 
         case .other:
             OtherTile(item: item, useGrid: useGrid)
@@ -301,12 +303,12 @@ struct BrowserView: View {
     }
 
     private func open(_ item: FileItem) {
+        // 刚退出全屏看图的那几百毫秒内不认点击（见 `tapGuardUntil`）
+        guard Date() >= tapGuardUntil else { return }
         switch item.kind {
         case .image:
             let images = visibleItems.filter { $0.kind == .image }
             guard let index = images.firstIndex(where: { $0.id == item.id }) else { return }
-            // 先定好「起点是哪一格」，转场那一刻就要用到，不能等全屏页回来再同步
-            zoomedItemID = item.id
             overlay = .images(ImagePreviewRequest(items: images, startIndex: index))
         case .video:
             overlay = .video(VideoPlayRequest(item: item))

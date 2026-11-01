@@ -25,9 +25,6 @@ struct ImageViewerView: View {
     /// 目录页传进来的缩放转场命名空间。非 nil 且系统是 iOS 18+ 时，进出场交给系统的
     /// 「从缩略图长出来 / 缩回去」转场（照片 App 那套）；下滑手势仍由本页自绘。
     let zoomNamespace: Namespace.ID?
-    /// 当前这一页的文件路径，回写给目录页：退出时系统要按它找「缩回哪一格」，
-    /// 左右翻页之后就能缩回当前那张的格子，而不是最初点开的那一格。
-    @Binding var zoomedItemID: String?
 
     @Environment(\.dismiss) private var dismiss
     @State private var index: Int
@@ -56,14 +53,12 @@ struct ImageViewerView: View {
         startIndex: Int,
         serverID: UUID,
         connection: SMBConnection,
-        zoomNamespace: Namespace.ID? = nil,
-        zoomedItemID: Binding<String?> = .constant(nil)
+        zoomNamespace: Namespace.ID? = nil
     ) {
         self.items = items
         self.serverID = serverID
         self.connection = connection
         self.zoomNamespace = zoomNamespace
-        _zoomedItemID = zoomedItemID
         let safeIndex = items.isEmpty ? 0 : min(max(0, startIndex), items.count - 1)
         _index = State(initialValue: safeIndex)
         _chromeVisible = State(initialValue: !(Self.supportsZoom(zoomNamespace)))
@@ -103,9 +98,9 @@ struct ImageViewerView: View {
         return lower...max(lower, upper)
     }
 
-    /// 缩放转场的终点 id：**由本页的 `index` 直接算**，不经过外面的 `zoomedItemID`。
+    /// 缩放转场的终点 id：**由本页的 `index` 直接算**。
     ///
-    /// 为什么不用外面那个绑定：`zoomedItemID` 是 `BrowserView` 的 `@State`，
+    /// 为什么不由目录页传：那样它会是 `BrowserView` 的 `@State`，
     /// 点开时和 `overlay` 在同一个更新周期里改。系统在呈现那一刻去读 destination 的
     /// `sourceID`，偶尔读到的还是**上一张**（跨视图的状态传播慢半拍），
     /// 配不上当前格子的 `matchedTransitionSource` 就退回默认的「从下往上」——
@@ -167,11 +162,22 @@ struct ImageViewerView: View {
 
             // 浮层留在安全区内，不跟着画面全屏铺（否则按钮会压到状态栏）
             if chromeVisible && pullProgress < 0.1 {
-                chrome
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .opacity(1 - pullProgress * 6)
-                    .allowsHitTesting(pullProgress < 0.02)
-                    .transition(.opacity)
+                // 单独抽成 `Equatable` 子视图：拖动时外层 body 每帧重算，
+                // 但这里的入参（页码 / 文件名 / 大小）在翻页前都不变，
+                // SwiftUI 就会跳过它的 body —— 毛玻璃 `.ultraThinMaterial`
+                // 和两段文字不必每帧重建，滑动时省下一大块主线程开销。
+                ChromeLayer(
+                    index: index,
+                    count: items.count,
+                    name: items[safe: index]?.name ?? "",
+                    size: items[safe: index]?.size ?? 0,
+                    onClose: close
+                )
+                .equatable()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(1 - pullProgress * 6)
+                .allowsHitTesting(pullProgress < 0.02)
+                .transition(.opacity)
             }
         }
         .preferredColorScheme(.dark)
@@ -195,36 +201,38 @@ struct ImageViewerView: View {
             }
         }
         .onChange(of: index) { _ in
-            // 换页时把上一页的放大状态清掉，否则新一页的翻页手势会被误判成「正在放大」
+            // 换页时把上一页的放大状态清掉，否则新一页的翻页手势会被误判成「正在放大」。
+            //
+            // 这里曾经还会回写目录页的 `zoomedItemID`，但那会让**整个目录页**
+            // （`LazyVGrid` 里全部格子 + 缩略图）在每一页切换时重算一遍，
+            // 正好压翻页动画的时间段上，是「左右滑动很卡顿」的一部分。
+            // 缩放转场的终点 id 现在由看图页内部按 `index` 算，不再需要那次回写。
             isZoomed = false
-            // 退出时缩回的格子跟着当前页走
-            zoomedItemID = items[safe: index]?.id
         }
         .task(id: index) {
-            // 翻页动画落定后，把前后两张的原图读进磁盘缓存。
-            // 这样下一次左右滑是「本地直接出图」，不会先糊一片（缩略图占位）再慢慢变清晰。
+            // 翻页动画落定后，把前后两张解码好放进内存预览缓存。
+            // 这样下一次左右滑是「已经解码完毕」，滑过去第一帧就是清晰原图。
             try? await Task.sleep(nanoseconds: 450_000_000)
             guard !Task.isCancelled else { return }
             await prefetchNeighbors()
         }
     }
 
-    /// 预热前后两页：已经缓存过的直接跳过，没缓存过的按顺序读进磁盘缓存。
+    /// 预热前后两页：磁盘上没有的读回磁盘，然后把**解码好的屏幕级预览**放进内存缓存。
     /// 用户很快又划走时任务会被取消，`CancellationBox` 会把底层 SMB 传输一起掐掉，
     /// 不会在后台白读几十兆。
     ///
-    /// 走 `prefetch` 而不是 `image`：预热只需要磁盘上那份压缩图，
-    /// 用 `image` 会把解码后的整张大图也搬进内存（两张 ≈ 50 MB），纯属白占。
+    /// 为什么现在也把图留在内存里：1.3.1 那版只写盘不落地，结果每次翻页都要在主线程解一张 3000 边长的大图 ——
+    /// 「左右滑动切换图片很卡顿」就是这么来的。现在解码在后台完成、结果进 `NSCache`（最多 4 张、可被系统回收），
+    /// 滑过去第一帧就是清晰的。
     private func prefetchNeighbors() async {
         for offset in [index + 1, index - 1] {
             guard !Task.isCancelled, items.indices.contains(offset) else { continue }
             let item = items[offset]
-            let url = CacheManager.shared.mediaURL(serverID: serverID, item: item, suffix: "jpg")
-            if FileManager.default.fileExists(atPath: url.path) { continue }
 
             let box = CancellationBox()
             await withTaskCancellationHandler {
-                await MediaStore.shared.prefetch(
+                await MediaStore.shared.warm(
                     for: item,
                     serverID: serverID,
                     connection: connection,
@@ -340,14 +348,32 @@ struct ImageViewerView: View {
 
     /// 松手后的退出交给系统：不自己做第二段动画。
     /// （曾经试过「先甩出去 0.24s 再 dismiss」，看起来是图片和黑底分两次落下。）
+}
 
-    // MARK: - 顶部/底部浮层
+// MARK: - 浮层
 
-    private var chrome: some View {
+/// 顶部关闭按钮 + 页码、底部文件名 + 大小。
+///
+/// 单独抽成 `Equatable` 视图：外层拖动时 `ImageViewerView` 的 body 每帧重算，
+/// 但只要这几项入参没变，SwiftUI 就跳过这里的 body —— `ultraThinMaterial` 毛玻璃
+/// 和文字不必每帧重建。滑动时的卡顿有一截就来自这里（毛玻璃重合成的代价不小）。
+private struct ChromeLayer: View, Equatable {
+    let index: Int
+    let count: Int
+    let name: String
+    let size: Int64
+    /// 闭包不参与比较：`==` 为真时沿用上一次的闭包，捕获的 `@State` / `dismiss` 都是稳定的
+    let onClose: () -> Void
+
+    static func == (lhs: ChromeLayer, rhs: ChromeLayer) -> Bool {
+        lhs.index == rhs.index && lhs.count == rhs.count && lhs.name == rhs.name && lhs.size == rhs.size
+    }
+
+    var body: some View {
         VStack {
             HStack {
                 Button {
-                    close()
+                    onClose()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))
@@ -358,8 +384,8 @@ struct ImageViewerView: View {
 
                 Spacer()
 
-                if items.count > 1 {
-                    Text("\(index + 1) / \(items.count)")
+                if count > 1 {
+                    Text("\(index + 1) / \(count)")
                         .font(.footnote.monospacedDigit())
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
@@ -373,14 +399,14 @@ struct ImageViewerView: View {
             Spacer()
 
             VStack(spacing: 4) {
-                Text(items[safe: index]?.name ?? "")
+                Text(name)
                     .font(.footnote)
                     .foregroundStyle(.white)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
 
-                if let item = items[safe: index], item.size > 0 {
-                    Text(Format.bytes(item.size))
+                if size > 0 {
+                    Text(Format.bytes(size))
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.65))
                 }
@@ -475,6 +501,9 @@ struct ZoomableImageView: View {
     /// 缩略图在 `init` 里就取好：`.onAppear` 要等封面已经滑上来才开始跑，
     /// 那之前的一两帧只有黑底，缩略图随后「啪」地出现，同样是「点开闪一下」的来源。
     /// 放进 `State` 的初始值后，第一帧画出来就已经是缩略图。
+    ///
+    /// 原图同理：预热过的相邻页在内存里已经有**解码好的**预览，这里直接拿来当初值，
+    /// 翻页时第一帧就是清晰原图，不会「先糊着缩略图、再啪一下换掉」。
     init(
         item: FileItem,
         serverID: UUID,
@@ -487,10 +516,14 @@ struct ZoomableImageView: View {
         self.connection = connection
         self.isActive = isActive
         _isZoomed = isZoomed
-        let cached = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
+        let preview = MediaStore.shared.cachedPreview(for: item, serverID: serverID)
+        let cached = preview == nil
+            ? ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
+            : nil
+        _image = State(initialValue: preview)
         _placeholder = State(initialValue: cached)
-        // 没有缩略图铺底时才转圈；有图还在加载中就安静地显示这张图
-        _isLoading = State(initialValue: cached == nil)
+        // 有图（原图或缩略图）就不转圈；都没有才安静地显示加载指示器
+        _isLoading = State(initialValue: preview == nil && cached == nil)
     }
 
     var body: some View {
@@ -541,11 +574,12 @@ struct ZoomableImageView: View {
         }
         .task(id: isActive) {
             guard isActive else {
-                // 变成前后页之后，把解码好的整张图放掉（3000 边长 ≈ 27 MB）。
-                // 这段睡眠会在「用户又翻回来」时被取消——`task(id:)` 换 id 会取消旧任务，
-                // 所以快速来回滑不会出现「刚清完又重新读一遍」。
+                // 变成前后页之后，把解码好的图放掉，降低内存峰值。
+                // 但如果它正躺在解码缓存里（翻页预热留下的那张），放掉也省不到内存 ——
+                // 缓存拿着同一个对象 —— 反而会让翻回来时先看到糊的缩略图。那就留着。
                 try? await Task.sleep(nanoseconds: 900_000_000)
                 guard !Task.isCancelled else { return }
+                guard MediaStore.shared.cachedPreview(for: item, serverID: serverID) == nil else { return }
                 if image != nil {
                     placeholder = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
                     image = nil
@@ -619,6 +653,14 @@ struct ZoomableImageView: View {
 
     private func load() async {
         if image != nil { return }
+        // 这张图在本页创建之后才被预热好（后台解码刚完成）：直接用内存里那份，
+        // 不再读盘再解一遍。轻微淡入，避免和占位缩略图之间「啪」地换一张。
+        if let cached = MediaStore.shared.cachedPreview(for: item, serverID: serverID) {
+            withAnimation(.easeOut(duration: 0.12)) {
+                image = cached
+            }
+            return
+        }
         // 已经有缩略图铺底就不要再转圈，否则会在缩略图上盖一个加载指示器
         if placeholder == nil {
             placeholder = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
