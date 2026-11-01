@@ -4,18 +4,79 @@ import Combine
 import MediaPlayer
 import SwiftUI
 
+// MARK: - 播放进度
+
+/// 播放进度单独一个对象：每 0.25 秒刷新一次，只让进度条这个子视图重算，
+/// 不牵动整个播放页（页面里有 `AVPlayerLayer` 的 `UIViewRepresentable`，整页重算代价高）。
+///
+/// 三个状态的区别很关键：
+/// - `currentTime` 播放器真实位置；
+/// - `scrubTime` 手指拖动中的目标位置（非 nil 时界面只认它，绝不回读播放器）；
+/// - `isSeeking` seek 在途（此时周期回调不许覆盖界面）。
+@MainActor
+final class PlaybackProgress: ObservableObject {
+    @Published fileprivate(set) var currentTime: Double = 0
+    @Published fileprivate(set) var duration: Double = 0
+    @Published fileprivate(set) var scrubTime: Double?
+    @Published fileprivate(set) var isSeeking = false
+    /// 等待数据（seek 到未缓冲位置、或网络跟不上）：进度条上显示一个小转圈
+    @Published fileprivate(set) var isBuffering = false
+
+    var isScrubbing: Bool { scrubTime != nil }
+
+    /// 界面该显示的位置：拖动优先，其次播放器时间
+    var displayTime: Double {
+        if let scrubTime { return max(0, scrubTime) }
+        if duration > 0 { return min(max(currentTime, 0), duration) }
+        return max(currentTime, 0)
+    }
+
+    /// 只在真的变化时赋值：`@Published` 每次 set 都会发通知，
+    /// 每 0.25 秒无脑赋一次同样的值，等于每秒让进度条白重算 4 次。
+    fileprivate func setCurrentTime(_ value: Double) {
+        guard value.isFinite else { return }
+        let clamped = max(0, value)
+        if abs(clamped - currentTime) > 0.002 { currentTime = clamped }
+    }
+
+    fileprivate func setDuration(_ value: Double) {
+        guard value.isFinite, value > 0 else { return }
+        if abs(value - duration) > 0.2 { duration = value }
+    }
+
+    fileprivate func setScrubTime(_ value: Double?) {
+        if scrubTime != value { scrubTime = value }
+    }
+
+    fileprivate func setSeeking(_ value: Bool) {
+        if isSeeking != value { isSeeking = value }
+    }
+
+    fileprivate func setBuffering(_ value: Bool) {
+        if isBuffering != value { isBuffering = value }
+    }
+
+    /// 换片前清干净：否则上一部片的时长会短暂留在进度条上，滑块位置也是旧的
+    fileprivate func reset() {
+        currentTime = 0
+        duration = 0
+        scrubTime = nil
+        isSeeking = false
+        isBuffering = false
+    }
+}
+
+// MARK: - 播放模型
+
 @MainActor
 final class VideoPlaybackModel: ObservableObject {
     let player = AVPlayer()
+    let progress = PlaybackProgress()
 
     @Published var errorMessage: String?
     @Published var downloadProgress: Double?
     @Published var isDownloading = false
     @Published var isPlaying = false
-    @Published var currentTime: Double = 0
-    @Published var duration: Double = 0
-    /// 拖动进度条 / 手势拖进度时暂停刷新，避免手指被时间回调抢走
-    @Published var isSeeking = false
     /// 播放器音量（0…1），右上角音量面板与上下拖动手势共用同一份，退出重进也记得
     @Published fileprivate(set) var volume: Float = 1
 
@@ -27,6 +88,8 @@ final class VideoPlaybackModel: ObservableObject {
     private var timeObserver: Any?
     /// 长按加速前的播放状态，松开后要还原
     private var wasPlayingBeforeHold = false
+    /// seek 代号：只让最后一次 seek 的回调生效（连续 seek 会互相取消）
+    private var seekToken = 0
 
     init() {
         let stored = UserDefaults.standard.object(forKey: Self.volumeKey) as? Double
@@ -76,6 +139,7 @@ final class VideoPlaybackModel: ObservableObject {
         playerItem.preferredForwardBufferDuration = 5
         observe(playerItem)
 
+        resetPlaybackState()
         player.replaceCurrentItem(with: playerItem)
         player.play()
         isPlaying = true
@@ -99,6 +163,7 @@ final class VideoPlaybackModel: ObservableObject {
             }
             let localItem = AVPlayerItem(url: url)
             observe(localItem)
+            resetPlaybackState()
             player.replaceCurrentItem(with: localItem)
             player.play()
             isPlaying = true
@@ -117,19 +182,81 @@ final class VideoPlaybackModel: ObservableObject {
             isPlaying = false
         } else {
             // 播到最后再点播放就从头来
-            if duration > 0, currentTime >= duration - 0.3 {
-                player.seek(to: .zero)
-                currentTime = 0
+            if progress.duration > 0, progress.currentTime >= progress.duration - 0.3 {
+                seek(to: 0, tolerance: 0.1)
             }
             player.play()
             isPlaying = true
         }
     }
 
-    func seek(to seconds: Double) {
-        guard seconds.isFinite, seconds >= 0 else { return }
-        currentTime = seconds
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    // MARK: - 拖动 / 跳转
+
+    /// 换 `AVPlayerItem` 前清一遍：在途 seek 作废、进度归零、拖动状态复位。
+    private func resetPlaybackState() {
+        seekToken &+= 1
+        progress.reset()
+    }
+
+    /// 手指按下进度条（或开始横向拖画面）：记下起点，之后界面只认 `scrubTime`。
+    func beginScrub() {
+        // Slider 有时先 set 再回调 onEditingChanged(true)，别把已有的值冲掉
+        guard progress.scrubTime == nil else { return }
+        progress.setScrubTime(progress.currentTime)
+    }
+
+    /// 拖动中：只更新本地显示值，**一次都不碰播放器**。
+    ///
+    /// 这是 1.3.30 之前「进度跳转很卡、滑块来回跳」的根因之一：
+    /// 旧实现每一帧都 `player.seek(tolerance: .zero)`，SMB 远端流为了精确到帧
+    /// 要回退到上一个关键帧重新读，请求在链路上排队，越拖越卡。
+    func scrub(to seconds: Double) {
+        guard seconds.isFinite else { return }
+        let upper = progress.duration > 0 ? progress.duration : Double.greatestFiniteMagnitude
+        progress.setScrubTime(min(max(seconds, 0), upper))
+    }
+
+    /// 松手：只发这一次真正的 seek。
+    func commitScrub() {
+        guard let target = progress.scrubTime else { return }
+        seek(to: target, tolerance: 0.2)
+    }
+
+    func cancelScrub() {
+        progress.setScrubTime(nil)
+    }
+
+    /// 跳转。`tolerance` 是允许的落点偏差（秒）——
+    /// 远端流必须给容差：精确到帧的 seek 要从前一个关键帧重新解码，
+    /// 大文件上会卡好几秒（用户反馈的「跳转很卡」就是这么来的）。
+    func seek(to seconds: Double, tolerance: Double = 0.25) {
+        guard seconds.isFinite, seconds >= 0, player.currentItem != nil else { return }
+        let target = progress.duration > 0 ? min(seconds, progress.duration) : seconds
+
+        seekToken &+= 1
+        let token = seekToken
+
+        progress.setScrubTime(nil)
+        progress.setSeeking(true)
+        // 先把显示推到位：否则松手瞬间界面会回到旧位置，等 seek 完成才跳过来
+        progress.setCurrentTime(target)
+
+        let time = CMTime(seconds: target, preferredTimescale: 600)
+        let tol = CMTime(seconds: max(0, tolerance), preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: tol, toleranceAfter: tol) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                // 连续 seek 时只有最后一次算数，中间被取消的回调一律忽略
+                guard let self, token == self.seekToken else { return }
+                if finished,
+                   let actual = self.player.currentItem?.currentTime().seconds,
+                   actual.isFinite {
+                    // 以播放器实际落点为准（容差内会有几十毫秒偏差），
+                    // 下一次周期回调才不会把进度往回拽
+                    self.progress.setCurrentTime(actual)
+                }
+                self.progress.setSeeking(false)
+            }
+        }
     }
 
     /// 音量状态统一走这里（HUD 的百分比、持久化）。
@@ -169,6 +296,11 @@ final class VideoPlaybackModel: ObservableObject {
         player.replaceCurrentItem(with: nil)
         statusCancellable = nil
         isPlaying = false
+        progress.setScrubTime(nil)
+        progress.setSeeking(false)
+        progress.setBuffering(false)
+        // 作废所有在途 seek 的回调：页面已经关了，不能再回来改状态
+        seekToken &+= 1
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
@@ -190,13 +322,24 @@ final class VideoPlaybackModel: ObservableObject {
     private func installTimeObserver() {
         let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            Task { @MainActor [weak self] in
-                guard let self, !self.isSeeking else { return }
-                self.currentTime = time.seconds
-                self.isPlaying = self.player.timeControlStatus == .playing
+            // 回调本来就在主队列上，直接同步处理。
+            // 旧实现又套了一层 `Task { @MainActor }`，多一次调度，正好叠在拖动的那一帧上。
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let status = self.player.timeControlStatus
+                // 缓冲状态先更新：seek 到未缓冲位置时这段时间界面是被锁住的，
+                // 但用户更需要看到「在转圈」而不是一片死寂
+                self.progress.setBuffering(status == .waitingToPlayAtSpecifiedRate)
+                // 拖动中 / seek 在途：绝不覆盖界面，否则滑块会被播放器时间拽回旧位置
+                guard !self.progress.isScrubbing, !self.progress.isSeeking else { return }
+                self.progress.setCurrentTime(time.seconds)
                 if let seconds = self.player.currentItem?.duration.seconds, seconds.isFinite, seconds > 0 {
-                    self.duration = seconds
+                    self.progress.setDuration(seconds)
                 }
+                // 只在真的变化时赋值：`@Published` 每次 set 都会让整个播放页重算。
+                // 缓冲中也算「在播」，否则 seek 到未缓冲位置时按钮会闪成播放图标。
+                let playing = status == .playing || status == .waitingToPlayAtSpecifiedRate
+                if playing != self.isPlaying { self.isPlaying = playing }
             }
         }
     }
@@ -207,6 +350,8 @@ final class VideoPlaybackModel: ObservableObject {
             .sink { [weak self, weak item] status in
                 guard status == .failed else { return }
                 let reason = item?.error?.localizedDescription ?? "编码格式不受支持或网络中断"
+                // 失败时把播放键还原成「播放」，否则它会一直停在暂停图标上
+                self?.isPlaying = false
                 self?.errorMessage = "无法播放：\(reason)"
             }
     }
@@ -284,6 +429,15 @@ private enum DragMode: Equatable {
     case vertical
 }
 
+/// HUD 独立成一个可观察对象：拖动进度时它每帧都在变，
+/// 挂在播放页的 `@State` 上会把整页（含 AVPlayerLayer）也带着一起重算。
+@MainActor
+private final class HUDState: ObservableObject {
+    @Published var value: GestureHUD?
+}
+
+// MARK: - 播放页
+
 @MainActor
 struct VideoPlayerView: View {
     let item: FileItem
@@ -298,7 +452,7 @@ struct VideoPlayerView: View {
     @State private var hideTask: Task<Void, Never>?
 
     // 手势反馈
-    @State private var hud: GestureHUD?
+    @StateObject private var hud = HUDState()
     @State private var hudTask: Task<Void, Never>?
     /// 亮度用一层黑色遮罩表达：0 = 原始亮度，0.85 = 最暗
     @State private var dimLevel: Double = 0
@@ -351,13 +505,8 @@ struct VideoPlayerView: View {
                 // 手势层放在控件下面：播放键、进度条仍然点得动，其余区域的触摸都归它
                 gestureSurface
 
-                if let hud {
-                    // 抬到播放键上方：两者都在正中会重叠（音量胶囊正好压在暂停键上）
-                    hudView(hud)
-                        .offset(y: hudOffset(for: hud))
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
-                }
+                // HUD 自己观察自己：拖动时只有它重算，播放页不跟着重算
+                PlayerHUDOverlay(state: hud, duration: model.progress.duration)
 
                 if chromeVisible {
                     // 顶部栏（关闭 / 标题 / ⋯）和底部控件一起显隐，播放 4 秒后一起收起
@@ -567,7 +716,7 @@ struct VideoPlayerView: View {
                     holdStartTask?.cancel()
                     // 捏合优先：把可能已经开始的方向拖动收掉，免得一边缩放一边改进度
                     if dragMode != .undecided {
-                        model.isSeeking = false
+                        model.cancelScrub()
                         dragMode = .undecided
                     }
                     didBeginPan = false
@@ -646,17 +795,19 @@ struct VideoPlayerView: View {
     }
 
     private func jump(by delta: Double) {
-        guard model.duration > 0 else { return }
-        let target = min(max(model.currentTime + delta, 0), model.duration)
-        let real = target - model.currentTime
-        model.seek(to: target)
-        showHUD(.seek(delta: real, target: target))
+        let duration = model.progress.duration
+        guard duration > 0 else { return }
+        let from = model.progress.currentTime
+        let target = min(max(from + delta, 0), duration)
+        // 双击跳转给 0.3 秒容差：精确到帧在远端流上要多读一个 GOP，明显卡顿
+        model.seek(to: target, tolerance: 0.3)
+        showHUD(.seek(delta: target - from, target: target))
     }
 
     private func beginPan(at point: CGPoint, in size: CGSize) {
         dragMode = .undecided
         dragStartPoint = point
-        dragStartTime = model.currentTime
+        dragStartTime = model.progress.currentTime
 
         switch verticalAction(at: point, in: size) {
         case .brightness:
@@ -674,15 +825,20 @@ struct VideoPlayerView: View {
             guard abs(translation.width) > 12 || abs(translation.height) > 12 else { return }
             dragMode = abs(translation.width) >= abs(translation.height) ? .seek : .vertical
             if dragMode == .seek {
-                model.isSeeking = true
+                model.beginScrub()
+                // 拖进度期间别让控件自己淡出（4 秒定时器可能正好在这一刻到点）
+                hideTask?.cancel()
             }
         }
 
         switch dragMode {
         case .seek:
-            guard gestures.horizontal == .seek, model.duration > 0 else { return }
-            let perPoint = model.duration / Double(max(size.width, 1))
-            let target = min(max(dragStartTime + Double(translation.width) * perPoint, 0), model.duration)
+            guard gestures.horizontal == .seek else { return }
+            let duration = model.progress.duration
+            guard duration > 0 else { return }
+            let perPoint = duration / Double(max(size.width, 1))
+            let target = min(max(dragStartTime + Double(translation.width) * perPoint, 0), duration)
+            model.scrub(to: target)
             showHUD(.seek(delta: target - dragStartTime, target: target), autoHide: false)
 
         case .vertical:
@@ -708,13 +864,13 @@ struct VideoPlayerView: View {
     private func endPan(_ translation: CGSize, in size: CGSize) {
         switch dragMode {
         case .seek:
-            model.isSeeking = false
-            if gestures.horizontal == .seek, model.duration > 0 {
-                // 远端流只在松手时真正 seek 一次：拖动过程中每帧都 seek 会把 SMB 读打爆
-                let perPoint = model.duration / Double(max(size.width, 1))
-                let target = min(max(dragStartTime + Double(translation.width) * perPoint, 0), model.duration)
-                model.seek(to: target)
+            // 拖动过程中一次都没 seek，这里才真正跳一次
+            if gestures.horizontal == .seek {
+                model.commitScrub()
+            } else {
+                model.cancelScrub()
             }
+            scheduleHide()
             hideHUD(after: 0.6)
 
         case .vertical:
@@ -773,7 +929,7 @@ struct VideoPlayerView: View {
     private func showHUD(_ value: GestureHUD, autoHide: Bool = true) {
         hudTask?.cancel()
         withAnimation(.easeOut(duration: 0.12)) {
-            hud = value
+            hud.value = value
         }
         guard autoHide else { return }
         hideHUD(after: 0.75)
@@ -785,72 +941,9 @@ struct VideoPlayerView: View {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             if Task.isCancelled { return }
             withAnimation(.easeOut(duration: 0.18)) {
-                hud = nil
+                hud.value = nil
             }
         }
-    }
-
-    @ViewBuilder
-    private func hudView(_ value: GestureHUD) -> some View {
-        switch value {
-        case let .seek(delta, target):
-            VStack(spacing: 4) {
-                Text(seekDeltaText(delta))
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
-                Text("\(Format.duration(target)) / \(Format.duration(model.duration))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 22)
-            .padding(.vertical, 14)
-            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-        case let .volume(level):
-            pill(icon: level <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                 text: "\(Int((level * 100).rounded()))%")
-
-        case let .brightness(level):
-            pill(icon: "sun.max.fill", text: "\(Int((level * 100).rounded()))%")
-
-        case let .speed(rate):
-            pill(icon: "forward.fill", text: rateText(rate) + " 倍速播放中")
-
-        case let .zoom(scale):
-            pill(icon: "arrow.up.left.and.arrow.down.right", text: rateText(Float(scale)) + "×")
-
-        case let .playPause(showingPlay):
-            Image(systemName: showingPlay ? "play.fill" : "pause.fill")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 64, height: 64)
-                .background(.black.opacity(0.45), in: Circle())
-        }
-    }
-
-    private func pill(icon: String, text: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 17, weight: .medium))
-            Text(text)
-                .font(.footnote.monospacedDigit())
-                .lineLimit(1)
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    private func seekDeltaText(_ delta: Double) -> String {
-        let magnitude = Format.duration(abs(delta))
-        if delta > 0.3 { return "+" + magnitude }
-        if delta < -0.3 { return "-" + magnitude }
-        return magnitude
-    }
-
-    private func rateText(_ rate: Float) -> String {
-        rate == rate.rounded() ? "\(Int(rate))" : String(format: "%.1f", rate)
     }
 
     private func setZoom(_ value: CGFloat) {
@@ -921,16 +1014,6 @@ struct VideoPlayerView: View {
         )
     }
 
-    /// 手势 HUD 的纵向偏移：除「播放/暂停」气泡外都抬到播放键上方，避免压住中间的暂停按钮
-    private func hudOffset(for value: GestureHUD) -> CGFloat {
-        switch value {
-        case .playPause:
-            return 0
-        default:
-            return -110
-        }
-    }
-
     private var controls: some View {
         ZStack {
             Button {
@@ -947,54 +1030,33 @@ struct VideoPlayerView: View {
 
             VStack {
                 Spacer()
-                progressBar
+                // 进度条自己观察 `progress`：每 0.25 秒的时间刷新只重绘它，
+                // 不会把整页（含 AVPlayerLayer）一起重算
+                PlayerProgressBar(
+                    progress: model.progress,
+                    onScrub: { model.scrub(to: $0) },
+                    onBegin: {
+                        hideTask?.cancel()
+                        model.beginScrub()
+                    },
+                    onCommit: {
+                        model.commitScrub()
+                        scheduleHide()
+                    }
+                )
             }
         }
-    }
-
-    private var progressBar: some View {
-        VStack(spacing: 6) {
-            Slider(
-                value: Binding(
-                    get: { model.duration > 0 ? min(model.currentTime, model.duration) : 0 },
-                    set: { model.seek(to: $0) }
-                ),
-                in: 0...max(model.duration, 0.1),
-                onEditingChanged: { editing in
-                    model.isSeeking = editing
-                }
-            )
-            .tint(.white)
-
-            HStack(spacing: 6) {
-                Text(Format.duration(model.currentTime))
-                Text("/")
-                    .foregroundStyle(.white.opacity(0.5))
-                Text(Format.duration(model.duration))
-                Spacer()
-            }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 28)
-        .padding(.top, 10)
-        .background(
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.65)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea(edges: .bottom)
-        )
     }
 
     private func scheduleHide() {
         hideTask?.cancel()
+        // 暂停时不自动收控件：用户正停在某一帧看，控件得留着
         guard model.isPlaying else { return }
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if Task.isCancelled { return }
+            // 正在拖进度 / seek 在途时别收控件，否则拖到一半底部整块消失
+            guard !model.progress.isScrubbing, !model.progress.isSeeking else { return }
             withAnimation(.easeInOut(duration: 0.2)) {
                 chromeVisible = false
             }
@@ -1021,5 +1083,157 @@ struct VideoPlayerView: View {
         .padding(24)
         .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .padding(24)
+    }
+}
+
+// MARK: - 进度条
+
+/// 只观察 `PlaybackProgress`，拖动时每帧重算的代价被限制在这一小块里。
+@MainActor
+private struct PlayerProgressBar: View {
+    @ObservedObject var progress: PlaybackProgress
+    var onScrub: (Double) -> Void
+    var onBegin: () -> Void
+    var onCommit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Slider(
+                // get 读的是 `displayTime`（拖动中＝scrubTime），set 只写本地值，
+                // 不触发任何播放器操作，所以滑块严格跟手、不会被时间回调拽回去
+                value: Binding(
+                    get: { progress.displayTime },
+                    set: { onScrub($0) }
+                ),
+                in: 0...max(progress.duration, 1),
+                onEditingChanged: { editing in
+                    if editing {
+                        onBegin()
+                    } else {
+                        onCommit()
+                    }
+                }
+            )
+            .tint(.white)
+            .disabled(progress.duration <= 0)
+
+            HStack(spacing: 6) {
+                Text(Format.duration(progress.displayTime))
+                Text("/")
+                    .foregroundStyle(.white.opacity(0.5))
+                Text(Format.duration(progress.duration))
+                if progress.isBuffering {
+                    // 跳转到未缓冲位置时这里转圈：远端流要重新读一段数据，
+                    // 不给反馈的话用户只会觉得「点了没反应」
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(.white)
+                }
+                Spacer()
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 28)
+        .padding(.top, 10)
+        .background(
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.65)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .bottom)
+        )
+    }
+}
+
+// MARK: - 手势 HUD 浮层
+
+@MainActor
+private struct PlayerHUDOverlay: View {
+    @ObservedObject var state: HUDState
+    let duration: Double
+
+    var body: some View {
+        if let value = state.value {
+            content(value)
+                .offset(y: offset(for: value))
+                .transition(.opacity)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// 除「播放/暂停」气泡外都抬到播放键上方，避免压住中间的暂停按钮
+    private func offset(for value: GestureHUD) -> CGFloat {
+        switch value {
+        case .playPause:
+            return 0
+        default:
+            return -110
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ value: GestureHUD) -> some View {
+        switch value {
+        case let .seek(delta, target):
+            VStack(spacing: 4) {
+                Text(seekDeltaText(delta))
+                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                Text("\(Format.duration(target)) / \(Format.duration(duration))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 14)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+        case let .volume(level):
+            pill(icon: level <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                 text: "\(Int((level * 100).rounded()))%")
+
+        case let .brightness(level):
+            pill(icon: "sun.max.fill", text: "\(Int((level * 100).rounded()))%")
+
+        case let .speed(rate):
+            pill(icon: "forward.fill", text: rateText(rate) + " 倍速播放中")
+
+        case let .zoom(scale):
+            pill(icon: "arrow.up.left.and.arrow.down.right", text: rateText(Float(scale)) + "×")
+
+        case let .playPause(showingPlay):
+            Image(systemName: showingPlay ? "play.fill" : "pause.fill")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 64, height: 64)
+                .background(.black.opacity(0.45), in: Circle())
+        }
+    }
+
+    private func pill(icon: String, text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .medium))
+            Text(text)
+                .font(.footnote.monospacedDigit())
+                .lineLimit(1)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func seekDeltaText(_ delta: Double) -> String {
+        let magnitude = Format.duration(abs(delta))
+        if delta > 0.3 { return "+" + magnitude }
+        if delta < -0.3 { return "-" + magnitude }
+        return magnitude
+    }
+
+    private func rateText(_ rate: Float) -> String {
+        rate == rate.rounded() ? "\(Int(rate))" : String(format: "%.1f", rate)
     }
 }
