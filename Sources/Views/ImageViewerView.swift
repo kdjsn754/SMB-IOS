@@ -106,7 +106,9 @@ struct ImageViewerView: View {
                 }
                 .frame(width: width, height: height)
             }
-            .ignoresSafeArea()
+            // 注意：这里**不要** ignoresSafeArea。width/height 就是页面的尺寸，
+            // 必须和 ScrollView 的安全区视口一致（页面遵守安全区，见 NativePageStack）；
+            // 曾经全屏扩展过，932 高的页面塞进 840 高的视口里垂直溢出，图片能顶到状态栏。
 
             // 浮层留在安全区内，不跟着画面全屏铺（否则按钮会压到状态栏）
             if chromeVisible {
@@ -323,11 +325,10 @@ private struct NativePageStack: View {
         ))
         .scrollDisabled(isZoomed)
         .scrollIndicators(.hidden)
-        // 页面必须真正全出血：ScrollView 的内容默认遵守安全区，932 高的页会被
-        // 垫到状态栏下面才开始（页顶 = 状态栏线）。放大平移的钳制按页面算，
-        // 页顶不在物理屏幕顶，图片边缘就永远只能顶到状态栏、上面留一条黑 ——
-        // 苹果照片是全出血：放大的图边缘直达物理屏幕边。
-        .ignoresSafeArea()
+        // 页面遵守安全区（不要 ignoresSafeArea）：用户明确要求图片**不要贴到物理屏幕边** ——
+        // 页面顶到底都停在安全区内，状态栏/Home 指示条区域保持黑底；放大平移的钳制按页面算，
+        // 图片边缘最多到安全区边界，永远不会顶进状态栏或 Home 条底下。
+        // （1.3.22 曾为了对齐照片 App 改成全出血，用户实测否掉 —— 需求本体是「别顶到状态栏」。）
     }
 }
 
