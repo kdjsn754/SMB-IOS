@@ -3,10 +3,14 @@ import UIKit
 
 /// 全屏看图。
 ///
-/// 分页不用 `TabView(.page)`：它的翻页手势是 UIKit 内部 pan，
-/// 会和外层「下拉退出」的 `DragGesture` 互相抢（要么翻不了页，要么拖不动退）。
-/// 这里自己用 `ZStack + 每页绝对 offset` 算位置，一个手势同时处理「横向翻页 / 纵向下拉退出」。
-///
+/// 分页（iOS 17+）：交给**系统原生滚动** `ScrollView(.horizontal) + .scrollTargetBehavior(.paging)`，
+/// 对齐安卓版的 `HorizontalPager` —— 手指拖动由底层 UIScrollView 完成，
+/// 位移 1:1、自带速度追踪/惯性/换页吸附，拖动全程不经过任何 SwiftUI 状态。
+/// 之前手搓 `ZStack + 每页 offset`（哪怕拖动时只改一个数值）每帧都要走一遍
+/// SwiftUI 更新管线，快速拖动时永远差一口气 —— 「不实时跟手」的根子在这。
+/// 纵向下拉退出仍是自己的手势，`simultaneousGesture` 并挂：横向归滚动、纵向归下拉
+/// （和安卓版「horizontalDrag：不消费，交给 pager」同一个分工）。
+/// iOS 16 兜底保留手搓的 `PageStack + offset`（`scrollTargetBehavior` 要 iOS 17）。
 /// 为什么不是 `HStack`：只渲染三页时，换页那一刻 `range` 会整体平移一格，
 /// 每页在 `HStack` 里的**布局位置**会一次性跳一个屏宽，而 `.offset` 只负责补上手指拖出去的那一小段。
 /// 布局跳变不可动画（兄弟页被 insert/remove），于是松手瞬间整排内容瞬移一屏——看起来就是「图片直接闪出来」。
@@ -128,35 +132,56 @@ struct ImageViewerView: View {
                     if items.isEmpty {
                         Color.clear
                     } else {
-                        paged(
-                            PageStack(
+                        if #available(iOS 17.0, *) {
+                            // iOS 17+：横向翻页交给**系统原生滚动**（对齐安卓版的 `HorizontalPager`）：
+                            // 手指拖动由底层 UIScrollView 原生完成 —— 位移 1:1、自带速度追踪和惯性，
+                            // 拖动全程不经过任何 SwiftUI 状态，「实时跟手」由系统保证。
+                            // 此前手搓 offset（哪怕只改一个数值）也要每帧走一遍 SwiftUI 更新管线，
+                            // 快速拖动时永远差着一口气。安卓版就是这么做的：
+                            // 自写手势明确「horizontalDrag：不消费，交给 pager 翻页」。
+                            // 这里只保留纵向下拉退出，用 simultaneous 挂上，不拦横向。
+                            NativePageStack(
                                 items: items,
-                                range: pageRange,
-                                index: index,
                                 serverID: serverID,
                                 connection: connection,
+                                index: $index,
                                 width: width,
                                 height: height,
-                                // 相邻页被推开的距离：随拖动线性增长（拖满一页时约 0.16 屏宽），
-                                // 松手随 drag 弹回合拢。当前图本身始终 1:1 跟手、不变形。
-                                // 它只落在每页最外层的 `.offset` 上，拖动全程不重建任何图片视图。
-                                spread: min(width * 0.4, abs(drag.width) * 0.16),
                                 isZoomed: $isZoomed
                             )
-                            // 横向位移必须落在裁剪框「里面」：翻页时下一张从屏幕边缘滑进来，
-                            // 超出屏幕的部分被裁掉；否则下拉缩小（0.86 倍）时会在屏幕右边
-                            // 露出一条别页的边。位移是严格 1:1 跟手（见 pagingGesture）。
-                            .offset(x: drag.width)
-                            .clipped()
+                            .simultaneousGesture(verticalPullGesture(height: height))
                             // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
-                            // 露出下面被遮住的目录页。
+                            // 露出下面被遮住的目录页。（横向不再有自定义位移 —— 滚动自己管。）
                             .offset(y: drag.height)
                             .scaleEffect(1 - pullProgress * 0.14)
-                            .contentShape(Rectangle()),
-                            width: width,
-                            height: height
-                        )
-                        .onTapGesture { toggleChrome() }
+                            .contentShape(Rectangle())
+                            .onTapGesture { toggleChrome() }
+                        } else {
+                            // iOS 16 兜底：手搓 `PageStack + offset`（scrollTargetBehavior 要 iOS 17）。
+                            // 相邻页被推开的距离随拖动增长、松手弹回合拢；
+                            // 横向位移必须落在裁剪框里面（下拉缩小时别露出别页的边）。
+                            paged(
+                                PageStack(
+                                    items: items,
+                                    range: pageRange,
+                                    index: index,
+                                    serverID: serverID,
+                                    connection: connection,
+                                    width: width,
+                                    height: height,
+                                    spread: min(width * 0.4, abs(drag.width) * 0.16),
+                                    isZoomed: $isZoomed
+                                )
+                                .offset(x: drag.width)
+                                .clipped()
+                                .offset(y: drag.height)
+                                .scaleEffect(1 - pullProgress * 0.14)
+                                .contentShape(Rectangle()),
+                                width: width,
+                                height: height
+                            )
+                            .onTapGesture { toggleChrome() }
+                        }
                     }
                 }
                 .frame(width: width, height: height)
@@ -273,6 +298,55 @@ struct ImageViewerView: View {
     /// 只保留 `dismiss()` 时那一下缩回格子的转场。
     private func paged<Content: View>(_ content: Content, width: CGFloat, height: CGFloat) -> some View {
         content.gesture(pagingGesture(width: width, height: height))
+    }
+
+    /// iOS 17+ 原生翻页路径专用的**纵向下拉退出**手势。
+    ///
+    /// 横向完全不管：滚动视图自己处理（方向判给谁就归谁，和安卓版
+    /// 「horizontalDrag：不消费，交给 pager」同一个思路）。用 `simultaneousGesture`
+    /// 并挂而不是 `.gesture`：`.gesture` 会和滚动的 pan 抢识别，抢赢了横向就翻不动页。
+    /// 并挂模式下横向位移归滚动、纵向位移归这里，各走各的。
+    private func verticalPullGesture(height: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                guard !isZoomed, !isDismissing else { return }
+                let dx = value.translation.width
+                let dy = value.translation.height
+
+                // 方向只判一次（同 legacy 路径）：判完锁住，避免斜着拖来回跳。
+                // 判成横向就什么都不做 —— 那次拖动整个归滚动视图。
+                if dragAxis == nil {
+                    guard max(abs(dx), abs(dy)) > 6 else { return }
+                    dragAxis = abs(dy) > abs(dx) ? .vertical : .horizontal
+                }
+
+                if dragAxis == .vertical {
+                    // 只往下跟手：往上没有退出语义。横向分量不再叠加
+                    // （安卓版下拉也只动 offsetY）。
+                    drag = CGSize(width: 0, height: max(0, dy))
+                }
+            }
+            .onEnded { value in
+                let axis = dragAxis
+                dragAxis = nil
+                guard !isZoomed, !isDismissing, axis == .vertical else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        drag = .zero
+                    }
+                    return
+                }
+                let dy = value.translation.height
+                // 拖过屏高约 1/7，或者甩得够快，就退出（阈值与 legacy 一致）。
+                let distance = max(84, height * 0.14)
+                if dy > distance || value.predictedEndTranslation.height > height * 0.3 {
+                    isDismissing = true
+                    dismiss()
+                } else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        drag = .zero
+                    }
+                }
+            }
     }
 
     private func pagingGesture(width: CGFloat, height: CGFloat) -> some Gesture {
@@ -432,7 +506,56 @@ private struct ChromeLayer: View, Equatable {
 
 // MARK: - 页面容器
 
-/// 三张页面的横向堆叠，但**位置不靠布局，靠 offset**。
+/// iOS 17+ 的翻页容器：**SwiftUI 版的 `HorizontalPager`**（对齐安卓实现）。
+///
+/// `ScrollView(.horizontal) + LazyHStack + .scrollTargetBehavior(.paging)`：
+/// - 页与页**紧贴连排**（安卓版没有任何缝隙逻辑），滚动位移由系统 1:1 跟手，
+///   带速度追踪、惯性、换页吸附 —— 全是 UIScrollView 原生行为；
+/// - 拖动全程**没有任何 SwiftUI 状态变化**（`index` 只在换页落定时更新一次），
+///   也就是说不存在「每帧走一遍 SwiftUI 更新管线」这回事，跟手性由系统保证；
+/// - `LazyHStack` 只物化可视页和相邻页，几百张的目录不亏内存；
+/// - `scrollDisabled(isZoomed)`：放大后关掉翻页滚动，拖动归页内 pan（同安卓 `userScrollEnabled`）。
+@available(iOS 17.0, *)
+private struct NativePageStack: View {
+    let items: [FileItem]
+    let serverID: UUID
+    let connection: SMBConnection
+    /// 当前页。由滚动落定回写（换页只发生一次状态更新），不反向驱动布局。
+    @Binding var index: Int
+    let width: CGFloat
+    let height: CGFloat
+    @Binding var isZoomed: Bool
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(items.indices, id: \.self) { page in
+                    ZoomableImageView(
+                        item: items[page],
+                        serverID: serverID,
+                        connection: connection,
+                        isActive: page == index,
+                        isZoomed: $isZoomed
+                    )
+                    .equatable()
+                    .frame(width: width, height: height)
+                }
+            }
+            // 换页吸附以「整页宽」为单位，靠它把每个格子标成滚动目标
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        // 滚动落定回写 index；程序侧不改 index，所以 set 只处理非 nil
+        .scrollPosition(id: Binding<Int?>(
+            get: { index },
+            set: { if let page = $0 { index = page } }
+        ))
+        .scrollDisabled(isZoomed)
+        .scrollIndicators(.hidden)
+    }
+}
+
+/// 三张页面的横向堆叠，但**位置不靠布局，靠 offset**（iOS 16 兜底路径）。
 ///
 /// 等值比较的边界在**每一页**上（`ZoomableImageView` 自己 `Equatable`），
 /// 不在整条堆叠上：拖动时每帧都在变的只有「相邻页被推开的 `spread`」，
