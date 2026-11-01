@@ -165,6 +165,10 @@ struct ImageViewerView: View {
             // 正好压翻页动画的时间段上，是「左右滑动很卡顿」的一部分。
             // 缩放转场的终点 id 现在由看图页内部按 `index` 算，不再需要那次回写。
             isZoomed = false
+            // 翻页会让系统把「捏合退出」识别器重新挂上（1.3.33 的必现 bug：
+            // 刚切到新图就捏合必定退出）。滚动落定这一拍立刻清一遍，
+            // 不等 100 ms 轮询的下一拍。
+            PinchDismissGuard.shared.enforce()
         }
         .task(id: index) {
             // 翻页动画落定后，把前后两张解码好放进内存预览缓存。

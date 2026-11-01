@@ -18,12 +18,23 @@ import UIKit
 /// 1.3.32 修「还是有概率捏合退出」——旧实现只在 `updateUIViewController` 里扫
 /// **12 次 × 200 ms**（转场期间识别器才挂上），扫不到就永久放弃；而且只扫
 /// `UIViewController.view` 这一层，识别器如果挂在某个子视图上就永远看不见。
-/// 现在改为 `PinchDismissGuard` 常驻守护：
-/// 1. **整个视图树**递归扫（不再只扫 VC 的根视图）；
-/// 2. 页面存活期间**持续**扫（前 3 秒 150 ms 一次兜住转场，之后 0.8 s 一次兜住系统重建），
-///    遍历成本是微秒级，比一次缩略图解码便宜得多；
-/// 3. 页内 `MagnifyGesture` 一发力就 `enforce()` 立刻清一次 —— 就算识别器是在
-///    捏合开始前一瞬才挂上的，也会在它够到退出阈值之前被移除。
+/// 改为 `PinchDismissGuard` 常驻守护：递归扫整棵视图树，页面存活期间持续扫。
+///
+/// 1.3.33 修「左右翻页后、刚切到新图时捏合**必定**退出」。两个洞：
+/// 1. **翻页会触发系统重建识别器**。`isActive` 翻转 → `ZoomableImageView` 的 body 重算 →
+///    `.simultaneousGesture` 重新安装，同时系统在滚动落定后把 `_UITransformGestureRecognizer`
+///    又挂回来；而 1.3.32 的轮询在开页 3 秒之后降到了 **0.8 秒一次**，切页后正好落在这段
+///    空档里 —— 手指捏下去的那 100~200 ms 内没人清理，系统直接判定退出。
+/// 2. **页内 `MagnifyGesture` 在这一刻收不到手指**：切页时手势刚被重装，新识别器从
+///    `.possible` 起步，接不住已经在屏上的两指 → `onChanged` 不触发 → 起手那一次
+///    `enforce()` 也一起失效，等于唯一的「即时清理」正好在最需要的时刻缺席。
+///
+/// 现在改成「触摸落下即清 + 恒定短周期兜底」：
+/// - **触摸探针**（`TouchProbeRecognizer`）：挂在窗口上的一个从不接收触摸的空识别器，
+///   唯一作用是在手指**刚碰到屏幕**时（`shouldReceive`）立刻 `sweep()` 一遍，
+///   再在下一拍 runloop 补一次 —— 早于系统判定「缩到阈值」，且完全不改变任何手势语义；
+/// - 轮询改为**恒定 100 ms**（不再 3 秒后降频），兜住系统在任何时刻的重挂；
+/// - 看图页 `index` 变化（翻页）时立刻 `enforce()` 一次。
 struct PinchDismissDisabler: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIViewController {
         PinchGuardHost()
@@ -45,16 +56,26 @@ private final class PinchGuardHost: UIViewController {
 
 /// 常驻守护：页面在，就一直盯着那条私有捏合识别器。
 @MainActor
-final class PinchDismissGuard {
+final class PinchDismissGuard: NSObject, UIGestureRecognizerDelegate {
     static let shared = PinchDismissGuard()
 
     /// 系统捏合退出识别器的私有类名（iOS 26/27，社区验证）。
     private static let targetClassNames: Set<String> = ["_UITransformGestureRecognizer"]
 
-    private weak var host: UIViewController?
-    private var pollTask: Task<Void, Never>?
+    /// 常驻轮询间隔。整树遍历是微秒级（页面树几十个节点），
+    /// 100 ms 一次的代价远低于一次缩略图解码，换来的是任何时刻重挂都能在一拍内被清掉。
+    private static let pollInterval: UInt64 = 100_000_000
 
-    private init() {}
+    private weak var host: UIViewController?
+    /// 触摸探针：挂在窗口上、从不接收触摸，只在手指落下时触发清理。
+    private var probe: UIGestureRecognizer?
+    private var pollTask: Task<Void, Never>?
+    /// 一笔触摸只排一次「下一拍再清」，避免一根手指排一个
+    private var sweepQueued = false
+
+    private override init() {
+        super.init()
+    }
 
     func attach(_ controller: UIViewController) {
         host = controller
@@ -64,41 +85,92 @@ final class PinchDismissGuard {
         enforce()
     }
 
-    /// 立刻扫一遍。捏合手势一起手就调，避免「识别器比轮询晚一步挂上」。
+    /// 立刻扫一遍。捏合手势一起手 / 触摸落下 / 翻页时调。
     func enforce() {
         _ = sweep()
     }
 
     private func startPolling() {
         pollTask = Task { [weak self] in
-            var tick = 0
-            while !Task.isCancelled {
+            while true {
                 guard let self else { return }
-                // 页面被关掉之后宿主 VC 会被释放（weak），这里顺手停掉轮询
+                // 页面被关掉之后宿主 VC 会被释放（weak），顺手停表并摘掉探针
                 guard self.host != nil else {
                     self.pollTask = nil
+                    self.teardownProbe()
                     return
                 }
                 _ = self.sweep()
-                // 前 3 秒密集（转场 / 首帧期间识别器才挂上），之后降频但仍持续，
-                // 兜住「系统在翻页或某些滑动之后重建识别器」
-                let interval: UInt64 = tick < 20 ? 150_000_000 : 800_000_000
-                tick += 1
-                try? await Task.sleep(nanoseconds: interval)
+                do {
+                    try await Task.sleep(nanoseconds: Self.pollInterval)
+                } catch {
+                    return
+                }
             }
         }
     }
+
+    // MARK: - 触摸探针
+
+    /// 手指刚落屏就清一次：这是离系统判定退出最近的一个时机，
+    /// 而且不依赖页内 SwiftUI 手势是否已经重新装好（1.3.33 的根因之一）。
+    nonisolated func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // 返回 false：探针不接收任何触摸，永远停在 .possible，不参与任何手势竞争
+        MainActor.assumeIsolated {
+            self.sweep()
+            // 系统有可能在本次事件处理中把识别器重新挂上（翻页落定就在同一拍附近），
+            // 下一拍 runloop 再清一次兜底
+            guard !self.sweepQueued else { return }
+            self.sweepQueued = true
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.sweepQueued = false
+                    _ = self.sweep()
+                }
+            }
+        }
+        return false
+    }
+
+    private func installProbe(on window: UIWindow) {
+        if let probe, probe.view?.window === window { return }
+        teardownProbe()
+        // 无 target / 无 action 的空识别器：不会做任何事，只用来接 `shouldReceive` 回调
+        let recognizer = UIGestureRecognizer(target: nil, action: nil)
+        recognizer.delegate = self
+        recognizer.cancelsTouchesInView = false
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        window.addGestureRecognizer(recognizer)
+        probe = recognizer
+    }
+
+    private func teardownProbe() {
+        if let probe {
+            probe.view?.removeGestureRecognizer(probe)
+        }
+        probe = nil
+        sweepQueued = false
+    }
+
+    // MARK: - 扫描
 
     /// 从当前页面所在窗口的最外层往下扫整棵视图树。
     /// 走窗口而不是走 `parent` 链：识别器可能挂在呈现容器的子视图上，
     /// 那些视图不在任何 VC 的 `view` 属性上，靠 VC 链扫不到。
     @discardableResult
     private func sweep() -> Bool {
-        guard let host, let window = host.view.window ?? UIApplication.shared.connectedScenes
-            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
-            .first
-        else { return false }
+        guard let window = resolveWindow() else { return false }
+        installProbe(on: window)
         return Self.remove(from: window)
+    }
+
+    private func resolveWindow() -> UIWindow? {
+        if let window = host?.view.window { return window }
+        return UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first
     }
 
     @discardableResult
