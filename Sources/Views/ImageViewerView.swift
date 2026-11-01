@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// 全屏看图。（最低系统 iOS 18，不做向下兼容 —— 2026-11-01 用户拍板）
+/// 全屏看图。（最低系统 iOS 27，不做向下兼容 —— 2026-11-01 用户拍板：能用原生就用原生）
 ///
 /// 分页：交给**系统原生滚动** `ScrollView(.horizontal) + .scrollTargetBehavior(.paging)`，
 /// 对齐安卓版的 `HorizontalPager` —— 手指拖动由底层 UIScrollView 完成，
@@ -301,15 +301,10 @@ private struct ChromeLayer: View, Equatable {
     var body: some View {
         VStack {
             HStack {
-                Button {
-                    onClose()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
+                // iOS 26+ 的系统标准关闭钮（Liquid Glass 圆钮 + xmark），
+                // 替代自绘的 xmark + 毛玻璃圆底 —— 原生控件自带正确的高亮/按压反馈
+                Button(role: .close, action: onClose)
+                    .padding(.leading, 8)
 
                 Spacer()
 
@@ -538,9 +533,11 @@ struct ZoomableImageView: View, Equatable {
     }
 
     private var magnificationGesture: some Gesture {
-        MagnificationGesture()
+        // MagnifyGesture（iOS 17+）替代旧的 MagnificationGesture：同一套语义，
+        // 值从 magnification 里取，系统未来只维护这一条 API
+        MagnifyGesture()
             .onChanged { value in
-                let next = min(max(1, baseScale * value), 6)
+                let next = min(max(1, baseScale * value.magnification), 6)
                 scale = next
                 isZoomed = next > 1.01
             }
