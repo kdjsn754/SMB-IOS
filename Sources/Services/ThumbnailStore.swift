@@ -8,6 +8,8 @@ import AVFoundation
 /// 2. 图片和视频共用一道有序闸门（一次一个，先比优先级层再比格子序号放行）：
 ///    前台（屏幕上的格子）严格按「左上 → 右下」依次出现；目录级后台预载（`isPrefetch`）
 ///    排在所有前台之后，负责把整个文件夹的缩略图都加载完。
+///    优先级是**活值**（`PriorityBox`）：预载抢先建的任务一旦被前台格子 join，
+///    闸门立刻按前台对待，不会出现「第一个文件反而最后出来」。
 /// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输。
 /// 4. 失败的文件进负缓存冷却几分钟，避免「划回去就重试」把 NAS 打满。
 final class ThumbnailStore: @unchecked Sendable {
@@ -34,11 +36,16 @@ final class ThumbnailStore: @unchecked Sendable {
     private final class Job: @unchecked Sendable {
         let task: Task<UIImage?, Never>
         let box: CancellationBox
+        /// 闸门优先级（0 前台 / 1 后台）的共享盒：任务被谁创建就先按谁的层级起步，
+        /// 但**排队期间可被实时提级** —— 后台预载抢先创建的任务，一旦有前台格子
+        /// join 进来，闸门选拔时就会按前台处理（修「第一个文件总是最后加载出来」）。
+        let priority: PriorityBox
         var waiters: Int = 0
 
-        init(task: Task<UIImage?, Never>, box: CancellationBox) {
+        init(task: Task<UIImage?, Never>, box: CancellationBox, priority: PriorityBox) {
             self.task = task
             self.box = box
+            self.priority = priority
         }
     }
 
@@ -122,6 +129,12 @@ final class ThumbnailStore: @unchecked Sendable {
         if isCoolingDown(key: key) { return nil }
 
         let job = makeJob(key: key, item: item, serverID: serverID, connection: connection, order: order, isPrefetch: isPrefetch)
+        // 前台格子 join 了预载抢先创建的任务：把闸门优先级实时提回前台，
+        // 否则这个文件会排在整屏前台格子后面（预载循环从第 0 个开始，
+        // 总是抢在格子的 .task 之前建任务 —— 第一个文件必然中招）
+        if !isPrefetch {
+            job.priority.promote(to: 0)
+        }
         let waiter = Waiter()
         let result = await withTaskCancellationHandler {
             await job.task.value
@@ -158,14 +171,15 @@ final class ThumbnailStore: @unchecked Sendable {
         }
 
         let box = CancellationBox()
+        let priority = PriorityBox(isPrefetch ? 1 : 0)
         let task = Task<UIImage?, Never> { [weak self] in
             guard let self else { return nil }
             return await self.produce(
                 key: key, item: item, serverID: serverID, connection: connection,
-                order: order, isPrefetch: isPrefetch, cancel: box
+                order: order, priority: priority, cancel: box
             )
         }
-        let job = Job(task: task, box: box)
+        let job = Job(task: task, box: box, priority: priority)
         job.waiters = 1
         jobs[key] = job
         lock.unlock()
@@ -208,7 +222,7 @@ final class ThumbnailStore: @unchecked Sendable {
         serverID: UUID,
         connection: SMBConnection,
         order: Int,
-        isPrefetch: Bool = false,
+        priority: PriorityBox,
         cancel: CancellationBox
     ) async -> UIImage? {
         let cache = CacheManager.shared
@@ -226,8 +240,9 @@ final class ThumbnailStore: @unchecked Sendable {
         switch item.kind {
         case .image, .video:
             // 图片和视频共用一道闸门：一次只跑一个、按「优先级层 + 格子序号」放行 ——
-            // 前台（屏幕上的格子）永远排在后台（整目录预载）前面，层内按左上 → 右下
-            await displayLimiter.acquire(order: order, priority: isPrefetch ? 1 : 0)
+            // 优先级是共享盒的活值：预载任务排队期间被前台格子 join，
+            // 这里读到的就是前台层，随时插到整屏前台队列的正确位置
+            await displayLimiter.acquire(order: order, priority: priority)
             if cancel.isCancelled {
                 await displayLimiter.release()
                 return nil

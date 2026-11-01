@@ -31,6 +31,34 @@ actor AsyncLimiter {
     }
 }
 
+/// 可实时改写的优先级（线程安全）。
+///
+/// 排队等放行期间优先级可能变化：一个缩略图任务先被后台预载创建（优先级 1），
+/// 随后前台格子 join 进来 —— 这时优先级必须立刻变回 0，否则这个文件会排在
+/// 整屏前台格子后面（实测现象：「第一个文件总是最后加载出来」）。
+/// 所以闸门里的等待者只持有这个盒子的引用，选拔时实时读值，而不是在入队时拍快照。
+final class PriorityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int
+
+    init(_ value: Int) {
+        self.value = value
+    }
+
+    var current: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    /// 只允许往高优先级调（数值变小），不允许把前台任务降级成后台
+    func promote(to newValue: Int) {
+        lock.lock()
+        if newValue < value { value = newValue }
+        lock.unlock()
+    }
+}
+
 /// 按「格子序号」放行的并发闸门：最多同时跑 `limit` 个，放行顺序严格按格子序号。
 ///
 /// 关键点是**空闲后先聚集、再选拔**：
@@ -50,8 +78,9 @@ actor OrderedLimiter {
     private struct Waiter {
         let order: Int
         /// 优先级层：0 = 前台（屏幕上的格子），1 = 后台（整目录预载）。
-        /// 排序先比 priority 再比 order —— 屏幕上的格子永远排在没显示的预载前面。
-        let priority: Int
+        /// 持有共享盒子的引用，排队期间被前台 join 时值会实时变回 0；
+        /// 选拔时读 `current`，先比优先级再比格子序号。
+        let priority: PriorityBox
         let seq: Int
         let continuation: CheckedContinuation<Void, Never>
     }
@@ -72,7 +101,7 @@ actor OrderedLimiter {
         self.burstGapNanos = UInt64(max(0, burstGapMilliseconds)) * 1_000_000
     }
 
-    func acquire(order: Int, priority: Int = 0) async {
+    func acquire(order: Int, priority: PriorityBox) async {
         if running == 0, waiters.isEmpty {
             // 从空闲转忙：只有「隔了一段时间」才当成新一批，需要聚集；
             // 连续滚动时一张接一张地来，不额外等待
@@ -116,10 +145,13 @@ actor OrderedLimiter {
             for index in 1..<waiters.count {
                 let candidate = waiters[index]
                 let current = waiters[best]
-                // 先比优先级层（前台格子 > 后台预载），再比格子序号，最后比先来后到
-                if candidate.priority < current.priority
-                    || (candidate.priority == current.priority && candidate.order < current.order)
-                    || (candidate.priority == current.priority && candidate.order == current.order && candidate.seq < current.seq) {
+                // 实时读优先级（排队期间可能被前台 join 提上去），
+                // 先比优先级层，再比格子序号，最后比先来后到
+                let candidatePriority = candidate.priority.current
+                let currentPriority = current.priority.current
+                if candidatePriority < currentPriority
+                    || (candidatePriority == currentPriority && candidate.order < current.order)
+                    || (candidatePriority == currentPriority && candidate.order == current.order && candidate.seq < current.seq) {
                     best = index
                 }
             }
