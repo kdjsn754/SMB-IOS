@@ -1,32 +1,28 @@
 import SwiftUI
 import UIKit
 
-/// 全屏看图。
+/// 全屏看图。（最低系统 iOS 18，不做向下兼容 —— 2026-11-01 用户拍板）
 ///
-/// 分页（iOS 17+）：交给**系统原生滚动** `ScrollView(.horizontal) + .scrollTargetBehavior(.paging)`，
+/// 分页：交给**系统原生滚动** `ScrollView(.horizontal) + .scrollTargetBehavior(.paging)`，
 /// 对齐安卓版的 `HorizontalPager` —— 手指拖动由底层 UIScrollView 完成，
 /// 位移 1:1、自带速度追踪/惯性/换页吸附，拖动全程不经过任何 SwiftUI 状态。
 /// 之前手搓 `ZStack + 每页 offset`（哪怕拖动时只改一个数值）每帧都要走一遍
 /// SwiftUI 更新管线，快速拖动时永远差一口气 —— 「不实时跟手」的根子在这。
-/// 纵向下拉退出仍是自己的手势，`simultaneousGesture` 并挂：横向归滚动、纵向归下拉
-/// （和安卓版「horizontalDrag：不消费，交给 pager」同一个分工）。
-/// iOS 16 兜底保留手搓的 `PageStack + offset`（`scrollTargetBehavior` 要 iOS 17）。
-/// 为什么不是 `HStack`：只渲染三页时，换页那一刻 `range` 会整体平移一格，
-/// 每页在 `HStack` 里的**布局位置**会一次性跳一个屏宽，而 `.offset` 只负责补上手指拖出去的那一小段。
-/// 布局跳变不可动画（兄弟页被 insert/remove），于是松手瞬间整排内容瞬移一屏——看起来就是「图片直接闪出来」。
-/// 改成每页位置只由 `(i - index) * width` 这个 offset 决定，位移全部走图层变换，`withAnimation` 一定能动画。
 ///
-/// 为什么不用系统自带的下滑退出：`fullScreenCover` 的呈现方式是 `fullScreen`，
-/// 系统交互式下滑在它上面并不可靠（iOS 18+ 配 zoom 转场之后更明显：手指落下能跟，
-/// 但拖快一点、或内容层还并挂着别的拖动识别器，它就退回不认）。所以手势自己做，
-/// 但**位移只走图层**（offset / scaleEffect），并且用 `PageStack` 把图片内容按「不可变」隔离掉，
-/// 拖动时不会重建页面树，手感和系统一样跟手。
+/// 下拉退出**没有** UIScrollView 原生的东西可用：
+/// - UIScrollView 只有「内容滚动」，没有任何「把页面关掉」的语义；
+/// - `fullScreenCover` 的系统交互式关闭实测不可靠（内容层并挂着别的拖动识别器时，
+///   只在部分时机认手、拖快一点就退回不认），而且它和我们页内的手势互相抢。
+///   这不是 iOS 偷懒 —— 安卓版同样是自己写的下拉手势（`pointerInput` 里的
+///   `verticalPull`），`HorizontalPager` 也不提供下拉关闭。
+/// 所以纵向由本页自绘手势负责，`simultaneousGesture` 并挂：
+/// 横向归滚动、纵向归下拉，各走各的（和安卓版同一个分工）。
 @MainActor
 struct ImageViewerView: View {
     let items: [FileItem]
     let serverID: UUID
     let connection: SMBConnection
-    /// 目录页传进来的缩放转场命名空间。非 nil 且系统是 iOS 18+ 时，进出场交给系统的
+    /// 目录页传进来的缩放转场命名空间。非 nil 时进出场交给系统的
     /// 「从缩略图长出来 / 缩回去」转场（照片 App 那套）；下滑手势仍由本页自绘。
     let zoomNamespace: Namespace.ID?
 
@@ -44,7 +40,7 @@ struct ImageViewerView: View {
     @State private var isZoomed = false
     /// 手势过程中的实时位移（只影响图层，不触发图片内容重建）
     @State private var drag: CGSize = .zero
-    /// 本次拖动锁定的方向：判一次就锁住，避免斜着拖时在翻页/下拉之间来回跳
+    /// 本次拖动锁定的方向：判一次就锁住，避免斜着拖时在下拉和「放给滚动」之间来回跳
     @State private var dragAxis: DragAxis?
     /// 松手后正在收尾退出，期间忽略新手势
     @State private var isDismissing = false
@@ -65,41 +61,12 @@ struct ImageViewerView: View {
         self.zoomNamespace = zoomNamespace
         let safeIndex = items.isEmpty ? 0 : min(max(0, startIndex), items.count - 1)
         _index = State(initialValue: safeIndex)
-        _chromeVisible = State(initialValue: !(Self.supportsZoom(zoomNamespace)))
-    }
-
-    private static func supportsZoom(_ namespace: Namespace.ID?) -> Bool {
-        if #available(iOS 18.0, *) { return namespace != nil }
-        return false
-    }
-
-    /// 走系统缩放转场吗？
-    ///
-    /// 走了之后：**进出场**由系统负责（从缩略图长大 / 缩回缩略图），点关闭或下滑退出都是这一套。
-    /// 但**下滑手势本身**仍是我们自己的：`fullScreenCover` 没有可靠的系统交互式下滑，
-    /// 所以 `interactiveDismissDisabled` 把系统那条关掉，纵向位移照旧写进 `drag`。
-    private var usesSystemZoom: Bool {
-        Self.supportsZoom(zoomNamespace)
+        _chromeVisible = State(initialValue: zoomNamespace == nil)
     }
 
     /// 下拉退出的进度 0…1：背景变透明、画面缩小、顶部栏淡出都跟着它
-    ///
-    /// 系统缩放转场模式下也照常计算。原先这里把纵向整段交给系统的「下滑退出」，
-    /// 但它挂在 `fullScreenCover` 上时只在部分时机认手（内容层有并挂的拖动、
-    /// 或松手速度稍慢就退回），表现就是「很多时候下滑退不出去」。
-    /// 现在纵向一律由下面这支手势自己跟手，超过阈值再 `dismiss()`，
-    /// 由系统接着把画面缩回格子 —— 手感不依赖系统认不认手。
     private var pullProgress: CGFloat {
         min(1, max(0, drag.height) / 380)
-    }
-
-    /// 只保留「上一页 / 当前页 / 下一页」三张：目录可能有几百张图，
-    /// 全建出来的话不但白占内存，换页时也要重算几百个视图。
-    private var pageRange: ClosedRange<Int> {
-        guard !items.isEmpty else { return 0...0 }
-        let lower = max(0, index - 1)
-        let upper = min(items.count - 1, index + 1)
-        return lower...max(lower, upper)
     }
 
     /// 缩放转场的终点 id：**由本页的 `index` 直接算**。
@@ -132,56 +99,26 @@ struct ImageViewerView: View {
                     if items.isEmpty {
                         Color.clear
                     } else {
-                        if #available(iOS 17.0, *) {
-                            // iOS 17+：横向翻页交给**系统原生滚动**（对齐安卓版的 `HorizontalPager`）：
-                            // 手指拖动由底层 UIScrollView 原生完成 —— 位移 1:1、自带速度追踪和惯性，
-                            // 拖动全程不经过任何 SwiftUI 状态，「实时跟手」由系统保证。
-                            // 此前手搓 offset（哪怕只改一个数值）也要每帧走一遍 SwiftUI 更新管线，
-                            // 快速拖动时永远差着一口气。安卓版就是这么做的：
-                            // 自写手势明确「horizontalDrag：不消费，交给 pager 翻页」。
-                            // 这里只保留纵向下拉退出，用 simultaneous 挂上，不拦横向。
-                            NativePageStack(
-                                items: items,
-                                serverID: serverID,
-                                connection: connection,
-                                index: $index,
-                                width: width,
-                                height: height,
-                                isZoomed: $isZoomed
-                            )
-                            .simultaneousGesture(verticalPullGesture(height: height))
-                            // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
-                            // 露出下面被遮住的目录页。（横向不再有自定义位移 —— 滚动自己管。）
-                            .offset(y: drag.height)
-                            .scaleEffect(1 - pullProgress * 0.14)
-                            .contentShape(Rectangle())
-                            .onTapGesture { toggleChrome() }
-                        } else {
-                            // iOS 16 兜底：手搓 `PageStack + offset`（scrollTargetBehavior 要 iOS 17）。
-                            // 相邻页被推开的距离随拖动增长、松手弹回合拢；
-                            // 横向位移必须落在裁剪框里面（下拉缩小时别露出别页的边）。
-                            paged(
-                                PageStack(
-                                    items: items,
-                                    range: pageRange,
-                                    index: index,
-                                    serverID: serverID,
-                                    connection: connection,
-                                    width: width,
-                                    height: height,
-                                    spread: min(width * 0.4, abs(drag.width) * 0.16),
-                                    isZoomed: $isZoomed
-                                )
-                                .offset(x: drag.width)
-                                .clipped()
-                                .offset(y: drag.height)
-                                .scaleEffect(1 - pullProgress * 0.14)
-                                .contentShape(Rectangle()),
-                                width: width,
-                                height: height
-                            )
-                            .onTapGesture { toggleChrome() }
-                        }
+                        // 横向翻页交给**系统原生滚动**（对齐安卓版的 `HorizontalPager`）：
+                        // 手指拖动由底层 UIScrollView 原生完成 —— 位移 1:1、自带速度追踪和惯性，
+                        // 拖动全程不经过任何 SwiftUI 状态，「实时跟手」由系统保证。
+                        // 这里只保留纵向下拉退出，用 simultaneous 挂上，不拦横向。
+                        NativePageStack(
+                            items: items,
+                            serverID: serverID,
+                            connection: connection,
+                            index: $index,
+                            width: width,
+                            height: height,
+                            isZoomed: $isZoomed
+                        )
+                        .simultaneousGesture(verticalPullGesture(height: height))
+                        // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
+                        // 露出下面被遮住的目录页。（横向不再有自定义位移 —— 滚动自己管。）
+                        .offset(y: drag.height)
+                        .scaleEffect(1 - pullProgress * 0.14)
+                        .contentShape(Rectangle())
+                        .onTapGesture { toggleChrome() }
                     }
                 }
                 .frame(width: width, height: height)
@@ -211,17 +148,17 @@ struct ImageViewerView: View {
         .preferredColorScheme(.dark)
         // 下滑退出只留一条通路：自己那条手势。系统的交互式关闭在 `fullScreenCover` 上
         // 时灵时不灵，放开的话会出现「手指拖到一半被系统接管、然后弹回去」的抖动。
-        .interactiveDismissDisabled(usesSystemZoom)
+        .interactiveDismissDisabled(true)
         .statusBarHidden(!chromeVisible || pullProgress > 0.05)
         // 系统那层不透明黑底会让「下拉渐隐」白做，退出时还会跟着滑一次
-        .clearPresentationBackground()
+        .presentationBackground(Color.clear)
         // 声明「用缩放转场进来」，终点取本页当前这张的 id（见 `currentItemID`）。
         // 必须是这条链的最外层，系统才认得出它和缩略图的配对。
         .zoomDestination(id: currentItemID, in: zoomNamespace)
         .task {
             // 画面从缩略图长到位之后，浮层再淡入（照片 App 的节奏）。
-            // 旧系统的上滑盖屏不用这一步，`chromeVisible` 初值就是 true，这里直接返回。
-            guard usesSystemZoom, !chromeVisible else { return }
+            // 不走缩放转场时浮层初值就是 true，这里直接返回。
+            guard !chromeVisible else { return }
             try? await Task.sleep(nanoseconds: 480_000_000)
             guard !Task.isCancelled, !chromeTouched, !chromeVisible else { return }
             withAnimation(.easeOut(duration: 0.22)) {
@@ -288,24 +225,11 @@ struct ImageViewerView: View {
 
     // MARK: - 手势
 
-    /// 翻页 + 下拉退出的手势挂法。
+    /// **纵向下拉退出**手势（横向翻页归原生滚动，这里完全不管横向）。
     ///
-    /// 一律用 `.gesture`（独占）：纵向位移要在 `onChanged` 里逐帧写进 `drag` 让画面跟手，
-    /// 这必须是同一条手势的连续事件。之前走系统缩放转场时改成 `.simultaneousGesture`
-    /// 想把纵向让给系统，结果两边都不干脆：系统的下滑关闭时好时坏，我们这边又因为
-    /// 收到纵向事件后直接 return，出现了「拖了半屏、松手什么都不发生」的空窗。
-    /// 现在纵向也归自己，系统的交互式关闭在 `body` 里用 `interactiveDismissDisabled` 关掉，
-    /// 只保留 `dismiss()` 时那一下缩回格子的转场。
-    private func paged<Content: View>(_ content: Content, width: CGFloat, height: CGFloat) -> some View {
-        content.gesture(pagingGesture(width: width, height: height))
-    }
-
-    /// iOS 17+ 原生翻页路径专用的**纵向下拉退出**手势。
-    ///
-    /// 横向完全不管：滚动视图自己处理（方向判给谁就归谁，和安卓版
-    /// 「horizontalDrag：不消费，交给 pager」同一个思路）。用 `simultaneousGesture`
-    /// 并挂而不是 `.gesture`：`.gesture` 会和滚动的 pan 抢识别，抢赢了横向就翻不动页。
-    /// 并挂模式下横向位移归滚动、纵向位移归这里，各走各的。
+    /// 用 `simultaneousGesture` 并挂而不是 `.gesture`：`.gesture` 会和滚动的 pan
+    /// 抢识别，抢赢了横向就翻不动页。并挂模式下横向位移归滚动、纵向位移归这里，
+    /// 各走各的 —— 和安卓版「horizontalDrag：不消费，交给 pager」同一个分工。
     private func verticalPullGesture(height: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
@@ -313,7 +237,7 @@ struct ImageViewerView: View {
                 let dx = value.translation.width
                 let dy = value.translation.height
 
-                // 方向只判一次（同 legacy 路径）：判完锁住，避免斜着拖来回跳。
+                // 方向只判一次：判完锁住，避免斜着拖在下拉和「放给滚动」之间来回跳。
                 // 判成横向就什么都不做 —— 那次拖动整个归滚动视图。
                 if dragAxis == nil {
                     guard max(abs(dx), abs(dy)) > 6 else { return }
@@ -321,7 +245,7 @@ struct ImageViewerView: View {
                 }
 
                 if dragAxis == .vertical {
-                    // 只往下跟手：往上没有退出语义。横向分量不再叠加
+                    // 只往下跟手：往上没有退出语义。横向分量不叠加
                     // （安卓版下拉也只动 offsetY）。
                     drag = CGSize(width: 0, height: max(0, dy))
                 }
@@ -336,99 +260,17 @@ struct ImageViewerView: View {
                     return
                 }
                 let dy = value.translation.height
-                // 拖过屏高约 1/7，或者甩得够快，就退出（阈值与 legacy 一致）。
+                // 拖过屏高约 1/7，或者甩得够快，就退出。
+                // 阈值别定太高：手指从图片中部往下拖到下巴附近也就 200pt 出头。
                 let distance = max(84, height * 0.14)
                 if dy > distance || value.predictedEndTranslation.height > height * 0.3 {
+                    // 退出只动一次：画面现在停在哪就留在哪，交给系统转场缩回格子。
                     isDismissing = true
                     dismiss()
                 } else {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                         drag = .zero
                     }
-                }
-            }
-    }
-
-    private func pagingGesture(width: CGFloat, height: CGFloat) -> some Gesture {
-        // minimumDistance 给到 1：手指一动（约 1pt）画面就开始跟。
-        // 之前是 10：手指要先空走约 10pt 画面才动、再一下子追上来，
-        // 用户感受就是「没有实时跟着手指」。1pt 不会和单击切换浮层打架
-        //（单击几乎不带位移，drag 不会启动，tap 照常识别）。
-        DragGesture(minimumDistance: 1)
-            .onChanged { value in
-                guard !isZoomed, !isDismissing else { return }
-                let dx = value.translation.width
-                let dy = value.translation.height
-
-                // 方向只判一次，判完就锁住。
-                //
-                // 逐帧比较 `abs(dy) > abs(dx)` 的话，手指稍微斜一点就会在
-                // 「横向翻页」和「纵向下拉」之间反复跳：这一帧按纵向把画面拉下来，
-                // 下一帧又按横向把 `drag.height` 清成 0，画面原地抖一下再回来。
-                // 用户看到的正是「拖了没反应 / 拖到一半弹回去」，也就是
-                // 「下滑退出很多时候触发不了」。锁定之后，一次拖动只会走一条路径。
-                if dragAxis == nil {
-                    guard max(abs(dx), abs(dy)) > 6 else { return }
-                    dragAxis = abs(dy) > abs(dx) ? .vertical : .horizontal
-                }
-
-                switch dragAxis {
-                case .vertical?:
-                    // 往下才跟手：往上没有退出语义，别让画面乱飘
-                    drag = CGSize(width: dx * 0.18, height: max(0, dy))
-                case .horizontal?:
-                    // 严格 1:1 跟手：手指动多少，图片就平移多少。
-                    // （1.3.9/1.3.10 在这里叠了「横向压缩」，图片内容动得比手指慢，
-                    // 用户明确否掉 —— 要的就是平平地跟手。）
-                    // 只有拖到第一张/最后一张、已经拖不过去时才给一点橡皮筋阻尼，
-                    // 提示「到头了」；中间任何位置都不打折扣。
-                    var x = dx
-                    if (index == 0 && dx > 0) || (index == items.count - 1 && dx < 0) {
-                        x *= 0.32
-                    }
-                    drag = CGSize(width: x, height: 0)
-                case .none:
-                    break
-                }
-            }
-            .onEnded { value in
-                let axis = dragAxis
-                dragAxis = nil
-                guard !isZoomed, !isDismissing, let axis else {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                        drag = .zero
-                    }
-                    return
-                }
-                let dx = value.translation.width
-                let dy = value.translation.height
-
-                if axis == .vertical {
-                    // 拖过屏高约 1/7，或者甩得够快，就退出。
-                    // 阈值别定太高：手指从图片中部往下拖到下巴附近也就 200pt 出头。
-                    let distance = max(84, height * 0.14)
-                    if dy > distance || value.predictedEndTranslation.height > height * 0.3 {
-                        // 退出只动一次：画面现在停在哪就留在哪，交给系统转场缩回格子。
-                        isDismissing = true
-                        dismiss()
-                    } else {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                            drag = .zero
-                        }
-                    }
-                    return
-                }
-
-                let threshold = max(60, width * 0.22)
-                var target = index
-                if dx < -threshold || value.predictedEndTranslation.width < -width * 0.45 {
-                    target = min(items.count - 1, index + 1)
-                } else if dx > threshold || value.predictedEndTranslation.width > width * 0.45 {
-                    target = max(0, index - 1)
-                }
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
-                    drag = .zero
-                    index = target
                 }
             }
     }
@@ -506,7 +348,7 @@ private struct ChromeLayer: View, Equatable {
 
 // MARK: - 页面容器
 
-/// iOS 17+ 的翻页容器：**SwiftUI 版的 `HorizontalPager`**（对齐安卓实现）。
+/// 翻页容器：**SwiftUI 版的 `HorizontalPager`**（对齐安卓实现）。
 ///
 /// `ScrollView(.horizontal) + LazyHStack + .scrollTargetBehavior(.paging)`：
 /// - 页与页**紧贴连排**（安卓版没有任何缝隙逻辑），滚动位移由系统 1:1 跟手，
@@ -515,7 +357,6 @@ private struct ChromeLayer: View, Equatable {
 ///   也就是说不存在「每帧走一遍 SwiftUI 更新管线」这回事，跟手性由系统保证；
 /// - `LazyHStack` 只物化可视页和相邻页，几百张的目录不亏内存；
 /// - `scrollDisabled(isZoomed)`：放大后关掉翻页滚动，拖动归页内 pan（同安卓 `userScrollEnabled`）。
-@available(iOS 17.0, *)
 private struct NativePageStack: View {
     let items: [FileItem]
     let serverID: UUID
@@ -552,66 +393,6 @@ private struct NativePageStack: View {
         ))
         .scrollDisabled(isZoomed)
         .scrollIndicators(.hidden)
-    }
-}
-
-/// 三张页面的横向堆叠，但**位置不靠布局，靠 offset**（iOS 16 兜底路径）。
-///
-/// 等值比较的边界在**每一页**上（`ZoomableImageView` 自己 `Equatable`），
-/// 不在整条堆叠上：拖动时每帧都在变的只有「相邻页被推开的 `spread`」，
-/// 它只作用在最外层的 `.offset` 上 —— 于是拖动全程里三张图片的 `body`
-/// 一帧都不重建，`GeometryReader`、两层 `Image`、手势修饰符全部原样复用，
-/// 位移就是纯图层变换，主线程每一帧只剩「改一个数」的成本。
-///
-/// （曾经把 `Equatable` 放在整条 `PageStack` 上、`spread` 参与 `==`：
-/// 拖动时 spread 每帧都变 → 等值必失败 → 三页视图每帧全量重算。
-/// 高刷设备上这就是拖动掉帧、「画面跟不上手指」的另一来源。）
-///
-/// 每页的 x 位移是 `(页号 - 当前页号) * 屏宽`：换页时这个值从 `±1 屏宽` 平滑过渡到 `0`，
-/// 是一条纯图层变换，`withAnimation` 一定动画得出来。
-/// 如果改成 `HStack` 布局 + 外层 offset 补偿，换页那一刻 `range` 会平移一格，
-/// 兄弟页被增删会让布局位置**瞬间**跳一个屏宽（布局跳变无法动画），
-/// 画面表现就是「图片直接闪出来」。
-private struct PageStack: View {
-    let items: [FileItem]
-    let range: ClosedRange<Int>
-    let index: Int
-    let serverID: UUID
-    let connection: SMBConnection
-    let width: CGFloat
-    let height: CGFloat
-    /// 拖动时相邻页被「推开」的额外距离：随拖动线性增长，松手随 drag 一起弹回 0。
-    ///
-    /// 参考对比（用户提供的别的软件录屏）：拖动中当前图**严格 1:1 跟手、不变形**，
-    /// 同时两图之间的缝隙越拖越大 —— 页与页在拖动中是被「拉开」的。
-    /// 所以相邻页的位置 = 1:1 连排位置 + 往外推 spread；当前页不动这个额外量。
-    /// 静止时 spread = 0，相邻页紧贴屏幕边缘外，和普通连排一样。
-    let spread: CGFloat
-    @Binding var isZoomed: Bool
-
-    var body: some View {
-        ZStack {
-            ForEach(range, id: \.self) { offset in
-                ZoomableImageView(
-                    item: items[offset],
-                    serverID: serverID,
-                    connection: connection,
-                    // 只加载当前这一页，相邻页等翻过去再读，避免一次把整个目录的原图全下一遍。
-                    isActive: offset == index,
-                    isZoomed: $isZoomed
-                )
-                .equatable()
-                .frame(width: width, height: height)
-                .offset(x: {
-                    let rel = CGFloat(offset - index)
-                    guard rel != 0 else { return 0 }
-                    // 相邻页：1:1 连排位置 + 往外推 spread（缝随拖动张开）
-                    return rel * width + (rel > 0 ? spread : -spread)
-                }())
-                .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
-            }
-        }
-        .frame(width: width, height: height)
     }
 }
 
@@ -854,22 +635,6 @@ struct ZoomableImageView: View, Equatable {
             }
         } else if placeholder == nil {
             failed = true
-        }
-    }
-}
-
-extension View {
-    /// 让 `fullScreenCover` 自带的背景透明。
-    ///
-    /// 系统那层底默认是不透明的黑：下拉时我们把画面缩小、背景渐隐，下面其实一直是黑的，
-    /// 退出时它还会跟着一起滑下去（就是「图片下去了，黑屏又跟了一次」的来源）。
-    /// 设成透明之后，下拉过程能真的看见下面的目录页，退出也只剩画面这一段运动。
-    @ViewBuilder
-    func clearPresentationBackground() -> some View {
-        if #available(iOS 16.4, *) {
-            presentationBackground(Color.clear)
-        } else {
-            self
         }
     }
 }
