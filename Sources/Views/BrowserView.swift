@@ -14,6 +14,10 @@ struct BrowserView: View {
     @State private var showSearch = false
     @State private var query = ""
     @FocusState private var searchFocused: Bool
+    /// 看图的缩放转场命名空间：缩略图（起点）与全屏页（终点）共用同一个命名空间才配得上
+    @Namespace private var zoomNamespace
+    /// 当前正在看的那张图（换页时会更新），决定退出时缩回哪一格
+    @State private var zoomedItemID: String?
 
     init(server: SMBServer, path: String) {
         self.server = server
@@ -77,10 +81,14 @@ struct BrowserView: View {
                     items: request.items,
                     startIndex: request.startIndex,
                     serverID: server.id,
-                    connection: app.connection(for: server)
+                    connection: app.connection(for: server),
+                    zoomNamespace: zoomNamespace,
+                    zoomedItemID: $zoomedItemID
                 )
                 // 系统那层不透明黑底会让「下拉渐隐」白做，退出时还会跟着滑一次
                 .clearPresentationBackground()
+                // iOS 18+：进出场走系统缩放转场（从缩略图长出来 / 缩回去），旧系统原样返回
+                .zoomDestination(id: zoomedItemID, in: zoomNamespace)
             case .video(let request):
                 VideoPlayerView(
                     item: request.item,
@@ -147,7 +155,8 @@ struct BrowserView: View {
                     serverID: server.id,
                     connection: app.connection(for: server),
                     useGrid: useGrid,
-                    order: order
+                    order: order,
+                    zoomNamespace: zoomNamespace
                 )
             }
             .buttonStyle(.plain)
@@ -295,6 +304,8 @@ struct BrowserView: View {
         case .image:
             let images = visibleItems.filter { $0.kind == .image }
             guard let index = images.firstIndex(where: { $0.id == item.id }) else { return }
+            // 先定好「起点是哪一格」，转场那一刻就要用到，不能等全屏页回来再同步
+            zoomedItemID = item.id
             overlay = .images(ImagePreviewRequest(items: images, startIndex: index))
         case .video:
             overlay = .video(VideoPlayRequest(item: item))

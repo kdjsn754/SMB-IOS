@@ -22,10 +22,23 @@ struct ImageViewerView: View {
     let items: [FileItem]
     let serverID: UUID
     let connection: SMBConnection
+    /// 目录页传进来的缩放转场命名空间。非 nil 且系统是 iOS 18+ 时，进出都交给系统的
+    /// 「从缩略图长出来 / 缩回去」转场（照片 App 那套），下面自绘的下拉退出就会被关掉。
+    let zoomNamespace: Namespace.ID?
+    /// 当前这一页的文件路径，回写给目录页：退出时系统要按它找「缩回哪一格」，
+    /// 左右翻页之后就能缩回当前那张的格子，而不是最初点开的那一格。
+    @Binding var zoomedItemID: String?
 
     @Environment(\.dismiss) private var dismiss
     @State private var index: Int
-    @State private var chromeVisible = true
+    /// 浮层（关闭按钮、页码、文件名）是否可见。
+    ///
+    /// 走系统缩放转场时初值是 false：转场会把**整页内容**一起从格子里放大，
+    /// 连按钮和页码也会被拉大，看着很怪（照片 App 里控件是图片到位之后才淡入的）。
+    /// 所以先藏起来，等画面长到位再淡入；退出时也先收掉，不让它跟着缩回去。
+    @State private var chromeVisible: Bool
+    /// 用户在自动淡入之前自己点过（切过浮层）就不再替他打开
+    @State private var chromeTouched = false
     /// 当前页是否处于放大状态：放大时手势交给页内的 pan（移动画面），外层不做翻页/退出
     @State private var isZoomed = false
     /// 手势过程中的实时位移（只影响图层，不触发图片内容重建）
@@ -33,17 +46,42 @@ struct ImageViewerView: View {
     /// 松手后正在收尾退出，期间忽略新手势
     @State private var isDismissing = false
 
-    init(items: [FileItem], startIndex: Int, serverID: UUID, connection: SMBConnection) {
+    init(
+        items: [FileItem],
+        startIndex: Int,
+        serverID: UUID,
+        connection: SMBConnection,
+        zoomNamespace: Namespace.ID? = nil,
+        zoomedItemID: Binding<String?> = .constant(nil)
+    ) {
         self.items = items
         self.serverID = serverID
         self.connection = connection
+        self.zoomNamespace = zoomNamespace
+        _zoomedItemID = zoomedItemID
         let safeIndex = items.isEmpty ? 0 : min(max(0, startIndex), items.count - 1)
         _index = State(initialValue: safeIndex)
+        _chromeVisible = State(initialValue: !(Self.supportsZoom(zoomNamespace)))
+    }
+
+    private static func supportsZoom(_ namespace: Namespace.ID?) -> Bool {
+        if #available(iOS 18.0, *) { return namespace != nil }
+        return false
+    }
+
+    /// 走系统缩放转场吗？
+    ///
+    /// 走了之后：进出场由系统负责（从缩略图长大 / 缩回缩略图），并且系统**自带**单指下滑退出、
+    /// 双指捏合反悔，而且下滑时系统会在底下垫一层不透明背景 —— 我们自绘的「下拉渐隐露出目录页」
+    /// 既多余又会和系统手势抢，所以在这一支里整体关掉。
+    private var usesSystemZoom: Bool {
+        Self.supportsZoom(zoomNamespace)
     }
 
     /// 下拉退出的进度 0…1：背景变透明、画面缩小、顶部栏淡出都跟着它
     private var pullProgress: CGFloat {
-        min(1, max(0, drag.height) / 380)
+        guard !usesSystemZoom else { return 0 }
+        return min(1, max(0, drag.height) / 380)
     }
 
     /// 只保留「上一页 / 当前页 / 下一页」三张：目录可能有几百张图，
@@ -73,28 +111,30 @@ struct ImageViewerView: View {
                     if items.isEmpty {
                         Color.clear
                     } else {
-                        PageStack(
-                            items: items,
-                            range: pageRange,
-                            index: index,
-                            serverID: serverID,
-                            connection: connection,
-                            width: width,
-                            height: height,
-                            isZoomed: $isZoomed
+                        paged(
+                            PageStack(
+                                items: items,
+                                range: pageRange,
+                                index: index,
+                                serverID: serverID,
+                                connection: connection,
+                                width: width,
+                                height: height,
+                                isZoomed: $isZoomed
+                            )
+                            .equatable()
+                            // 横向位移必须落在裁剪框「里面」：翻页时下一张从屏幕边缘滑进来，
+                            // 超出屏幕的部分被裁掉；否则下拉缩小（0.86 倍）时会在屏幕右边
+                            // 露出一条别页的边。
+                            .offset(x: drag.width)
+                            .clipped()
+                            // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
+                            // 露出下面被遮住的目录页。
+                            .offset(y: drag.height)
+                            .scaleEffect(1 - pullProgress * 0.14)
+                            .contentShape(Rectangle()),
+                            width: width
                         )
-                        .equatable()
-                        // 横向位移必须落在裁剪框「里面」：翻页时下一张从屏幕边缘滑进来，
-                        // 超出屏幕的部分被裁掉；否则下拉缩小（0.86 倍）时会在屏幕右边
-                        // 露出一条别页的边。
-                        .offset(x: drag.width)
-                        .clipped()
-                        // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
-                        // 露出下面被遮住的目录页。
-                        .offset(y: drag.height)
-                        .scaleEffect(1 - pullProgress * 0.14)
-                        .contentShape(Rectangle())
-                        .gesture(pagingGesture(width: width))
                         .onTapGesture { toggleChrome() }
                     }
                 }
@@ -113,9 +153,21 @@ struct ImageViewerView: View {
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(!chromeVisible || pullProgress > 0.05)
+        .task {
+            // 画面从缩略图长到位之后，浮层再淡入（照片 App 的节奏）。
+            // 旧系统的上滑盖屏不用这一步，`chromeVisible` 初值就是 true，这里直接返回。
+            guard usesSystemZoom, !chromeVisible else { return }
+            try? await Task.sleep(nanoseconds: 480_000_000)
+            guard !Task.isCancelled, !chromeTouched, !chromeVisible else { return }
+            withAnimation(.easeOut(duration: 0.22)) {
+                chromeVisible = true
+            }
+        }
         .onChange(of: index) { _ in
             // 换页时把上一页的放大状态清掉，否则新一页的翻页手势会被误判成「正在放大」
             isZoomed = false
+            // 退出时缩回的格子跟着当前页走
+            zoomedItemID = items[safe: index]?.id
         }
         .task(id: index) {
             // 翻页动画落定后，把前后两张的原图读进磁盘缓存。
@@ -151,12 +203,34 @@ struct ImageViewerView: View {
     }
 
     private func toggleChrome() {
+        chromeTouched = true
         withAnimation(.easeInOut(duration: 0.2)) {
             chromeVisible.toggle()
         }
     }
 
+    /// 关闭：先收掉浮层，再让系统做缩回缩略图的转场，
+    /// 否则关闭按钮和页码会跟着画面一起缩成一粒。
+    private func close() {
+        chromeVisible = false
+        dismiss()
+    }
+
     // MARK: - 手势
+
+    /// 翻页手势的挂法分两种：
+    /// - 旧系统（自绘下拉退出）：`.gesture`，我们自己独占拖动；
+    /// - iOS 18+ 走系统缩放转场时改成 `.simultaneousGesture`——系统的「下滑退出」是它自己的手势，
+    ///   独占的话两边会互相把对方顶掉（表现为要么翻不了页、要么退不出去）。
+    ///   并列之后系统负责下滑退出，我们只处理横向翻页（纵向位移在 `pagingGesture` 里直接忽略）。
+    @ViewBuilder
+    private func paged<Content: View>(_ content: Content, width: CGFloat) -> some View {
+        if usesSystemZoom {
+            content.simultaneousGesture(pagingGesture(width: width))
+        } else {
+            content.gesture(pagingGesture(width: width))
+        }
+    }
 
     private func pagingGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12)
@@ -164,6 +238,9 @@ struct ImageViewerView: View {
                 guard !isZoomed, !isDismissing else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
+
+                // 系统转场模式下纵向归系统的「下滑退出」，这里一点都不碰
+                if usesSystemZoom, abs(dy) > abs(dx) { return }
 
                 if abs(dy) > abs(dx) {
                     // 纵向：只在往下时跟手（往上没有退出语义，别让画面乱飘）
@@ -181,6 +258,9 @@ struct ImageViewerView: View {
                 guard !isZoomed, !isDismissing else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
+
+                // 纵向交给系统的下滑退出，这里直接收手（回弹也由系统做）
+                if usesSystemZoom, abs(dy) > abs(dx) { return }
 
                 if abs(dy) > abs(dx) {
                     // 位移超过 130pt，或者甩得够快，就退出
@@ -221,7 +301,7 @@ struct ImageViewerView: View {
         VStack {
             HStack {
                 Button {
-                    dismiss()
+                    close()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))

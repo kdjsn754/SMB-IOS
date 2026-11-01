@@ -163,6 +163,9 @@ struct MediaTile: View {
     let connection: SMBConnection
     let useGrid: Bool
     var order: Int = 0
+    /// 看图页的缩放转场命名空间：挂在缩略图上，点开时画面就从这个格子长出来。
+    /// 不传（nil）时完全不生效，旧系统 / 其它入口照旧。
+    var zoomNamespace: Namespace.ID? = nil
 
     var body: some View {
         if useGrid {
@@ -181,6 +184,9 @@ struct MediaTile: View {
                 order: order
             )
             .aspectRatio(TileAspect.box, contentMode: .fit)
+            // 缩放起点只包缩略图这块，不含下面的文件名 / 大小 / 日期，
+            // 否则画面会从一个「带两行文字的大方块」里长出来，落点和图片对不上。
+            .zoomSource(id: item.id, in: zoomNamespace)
 
             FileNameLabel(name: item.name)
             TileCaption(size: Format.bytes(item.size), date: Format.shortDate(item.modified))
@@ -198,6 +204,7 @@ struct MediaTile: View {
                 showPlayBadge: false
             )
             .frame(width: 56, height: 56)
+            .zoomSource(id: item.id, in: zoomNamespace, cornerRadius: 6)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.name)
