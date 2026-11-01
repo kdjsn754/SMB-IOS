@@ -323,6 +323,11 @@ private struct NativePageStack: View {
         ))
         .scrollDisabled(isZoomed)
         .scrollIndicators(.hidden)
+        // 页面必须真正全出血：ScrollView 的内容默认遵守安全区，932 高的页会被
+        // 垫到状态栏下面才开始（页顶 = 状态栏线）。放大平移的钳制按页面算，
+        // 页顶不在物理屏幕顶，图片边缘就永远只能顶到状态栏、上面留一条黑 ——
+        // 苹果照片是全出血：放大的图边缘直达物理屏幕边。
+        .ignoresSafeArea()
     }
 }
 
@@ -367,6 +372,13 @@ struct ZoomableImageView: View, Equatable {
     @State private var baseScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var dragOffset: CGSize = .zero
+
+    /// 捏合起点快照：两指中点（锚点）、起始 offset / scale。整个捏合手势期间不变。
+    /// 锚点缩放（照片 App 的手感）：**捏哪儿，哪儿不动** —— 之前锚死视图中心，
+    /// 无论捏哪里图像都朝上下对称膨胀，顶部一路顶进状态栏区。
+    @State private var pinchAnchor: CGPoint?
+    @State private var pinchBaseOffset: CGSize = .zero
+    @State private var pinchBaseScale: CGFloat = 1
 
     /// 放大时从原始文件现解的高清帧（照片 App 的分级加载：低清跟手、放大换高清）。
     /// 平时显示的是屏幕级预览（长边 2800），捏放到 1.3× 以上才解这份，
@@ -450,7 +462,9 @@ struct ZoomableImageView: View, Equatable {
             // 只有放大之后才接管拖动（未放大时的拖动归外层，用来翻页和下拉退出）
             .gesture(panGesture(size: size, imageSize: displaySize), including: scale > 1.01 ? .all : .none)
             .simultaneousGesture(magnificationGesture(size: size, imageSize: displaySize))
-            .onTapGesture(count: 2) { toggleZoom() }
+            .onTapGesture(count: 2, coordinateSpace: .local) { location in
+                toggleZoom(at: location, size: size, imageSize: displaySize)
+            }
         }
         .task(id: isActive) {
             guard isActive else {
@@ -485,18 +499,41 @@ struct ZoomableImageView: View, Equatable {
     /// - 缩小到 1x 时把 offset 清零并释放高清帧；
     /// - 中途缩小时用 `clamped` 收紧 offset，保证画面始终盖住屏幕（不会有边缘露黑）；
     /// - 捏过 1.3× 触发一次高清解码（照片 App 的分级加载）。
+    /// 双指缩放（照片 App 的锚点手感）。
+    /// - 捏合中点下的图像内容**保持原地**：offset 由锚点补偿公式闭式算出，
+    ///   每帧都从起点状态重算（不是增量累加），锚点不会漂；
+    /// - 图像盖满屏幕后继续捏，边界钳制接管（边贴住屏幕边，锚点让位）—— 同照片 App；
+    /// - 缩到 1x 时归零并释放高清帧；捏过 1.3× 触发一次高清解码。
     private func magnificationGesture(size: CGSize, imageSize: CGSize?) -> some Gesture {
         MagnifyGesture()
             .onChanged { value in
-                let next = min(max(1, baseScale * value.magnification), 6)
+                if pinchAnchor == nil {
+                    pinchAnchor = CGPoint(x: value.startAnchor.x * size.width,
+                                          y: value.startAnchor.y * size.height)
+                    pinchBaseOffset = offset
+                    pinchBaseScale = baseScale
+                }
+                guard let anchor = pinchAnchor else { return }
+                let next = min(max(1, pinchBaseScale * value.magnification), 6)
+                // 锚点补偿：屏幕位置 = center + (内容点 - center)×s + offset，
+                // 要求锚点处的内容点钉在锚点的屏幕位置上，解出 offset：
+                // offset = u - (u - offset0)×(s/s0)，u = 锚点 - center
+                let ux = anchor.x - size.width / 2
+                let uy = anchor.y - size.height / 2
+                let ratio = next / max(pinchBaseScale, 0.001)
+                let compensated = CGSize(
+                    width: ux - (ux - pinchBaseOffset.width) * ratio,
+                    height: uy - (uy - pinchBaseOffset.height) * ratio
+                )
                 scale = next
-                offset = Self.clamped(offset, scale: next, container: size, imageSize: imageSize)
+                offset = Self.clamped(compensated, scale: next, container: size, imageSize: imageSize)
                 isZoomed = next > 1.01
                 if next > 1.3 {
                     loadHiResIfNeeded()
                 }
             }
             .onEnded { _ in
+                pinchAnchor = nil
                 if scale <= 1.02 {
                     withAnimation(.easeOut(duration: 0.2)) {
                         scale = 1
@@ -583,7 +620,9 @@ struct ZoomableImageView: View, Equatable {
         hiRes = nil
     }
 
-    private func toggleZoom() {
+    /// 双击放大/还原。放大时以**双击点为锚**到 2.5×：点哪儿，哪儿不动（照片 App 手感）；
+    /// 点在角落时图像盖满屏幕后被边界钳住，锚点让位给边界。
+    private func toggleZoom(at location: CGPoint, size: CGSize, imageSize: CGSize?) {
         withAnimation(.easeInOut(duration: 0.2)) {
             if scale > 1.01 {
                 scale = 1
@@ -592,6 +631,12 @@ struct ZoomableImageView: View, Equatable {
                 isZoomed = false
                 releaseHiRes()
             } else {
+                let ux = location.x - size.width / 2
+                let uy = location.y - size.height / 2
+                offset = Self.clamped(
+                    CGSize(width: ux - ux * 2.5, height: uy - uy * 2.5),
+                    scale: 2.5, container: size, imageSize: imageSize
+                )
                 scale = 2.5
                 baseScale = 2.5
                 isZoomed = true
