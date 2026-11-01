@@ -152,7 +152,9 @@ struct BrowserView: View {
 
         case .image, .video:
             // 不用 `Button`：它在滚动容器里会把「横向拖动但没滚动」也判成点击，
-            // 于是「右滑返回」很容易变成「把这张图点开」。`tileTap` 只认没移动过的触摸。
+            // 于是「右滑返回」很容易变成「把这张图点开」。
+            // 也不用自己写的拖动识别器（1.3.3 试过，会把整页的滚动和右滑返回一起吞掉），
+            // 只留系统点击：它自带 ~10pt 位移容差，真滑动不会触发。见 `TileTap`。
             MediaTile(
                 item: item,
                 serverID: server.id,
