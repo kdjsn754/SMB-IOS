@@ -9,21 +9,23 @@ import UIKit
 /// 之前手搓 `ZStack + 每页 offset`（哪怕拖动时只改一个数值）每帧都要走一遍
 /// SwiftUI 更新管线，快速拖动时永远差一口气 —— 「不实时跟手」的根子在这。
 ///
-/// 下拉退出**没有** UIScrollView 原生的东西可用：
-/// - UIScrollView 只有「内容滚动」，没有任何「把页面关掉」的语义；
-/// - `fullScreenCover` 的系统交互式关闭实测不可靠（内容层并挂着别的拖动识别器时，
-///   只在部分时机认手、拖快一点就退回不认），而且它和我们页内的手势互相抢。
-///   这不是 iOS 偷懒 —— 安卓版同样是自己写的下拉手势（`pointerInput` 里的
-///   `verticalPull`），`HorizontalPager` 也不提供下拉关闭。
-/// 所以纵向由本页自绘手势负责，`simultaneousGesture` 并挂：
-/// 横向归滚动、纵向归下拉，各走各的（和安卓版同一个分工）。
+/// 下拉退出：**全归系统**。
+///
+/// 缩放转场自带原生交互式关闭（见 `ZoomTransition.swift`：单指下滑 / 双指捏合，
+/// 松手顺着缩回原格子 —— 照片 App 就是这一套）。之前把自绘下拉手势和它并挂，
+/// 两边抢识别导致系统那条「时灵时不灵」，于是索性 `interactiveDismissDisabled`
+/// 关掉系统、全部自绘 —— 但自绘每帧写 `@State` 走 SwiftUI 更新管线，
+/// 松手后画面还要交接给系统转场，两段式衔接怎么看都不如系统一条龙顺滑。
+/// 1.3.14 横向翻页归了原生滚动之后，内容层已经没有任何纵向手势竞争者，
+/// 系统交互式关闭可以完全放开了：整条自绘下拉删除，位移/回弹/缩回格子
+/// 全是 UIScrollView + 转场层的原生行为，跟手性和流畅度由系统保证。
 @MainActor
 struct ImageViewerView: View {
     let items: [FileItem]
     let serverID: UUID
     let connection: SMBConnection
-    /// 目录页传进来的缩放转场命名空间。非 nil 时进出场交给系统的
-    /// 「从缩略图长出来 / 缩回去」转场（照片 App 那套）；下滑手势仍由本页自绘。
+    /// 目录页传进来的缩放转场命名空间。非 nil 时进出场和下拉/捏合退出
+    /// 全部交给系统的「从缩略图长出来 / 缩回去」转场（照片 App 那套）。
     let zoomNamespace: Namespace.ID?
 
     @Environment(\.dismiss) private var dismiss
@@ -36,17 +38,8 @@ struct ImageViewerView: View {
     @State private var chromeVisible: Bool
     /// 用户在自动淡入之前自己点过（切过浮层）就不再替他打开
     @State private var chromeTouched = false
-    /// 当前页是否处于放大状态：放大时手势交给页内的 pan（移动画面），外层不做翻页/退出
+    /// 当前页是否处于放大状态：放大时拖动归页内 pan（移动画面），外层滚动已 `scrollDisabled`
     @State private var isZoomed = false
-    /// 手势过程中的实时位移（只影响图层，不触发图片内容重建）
-    @State private var drag: CGSize = .zero
-    /// 本次拖动锁定的方向：判一次就锁住，避免斜着拖时在下拉和「放给滚动」之间来回跳
-    @State private var dragAxis: DragAxis?
-    /// 松手后正在收尾退出，期间忽略新手势
-    @State private var isDismissing = false
-
-    /// 一次拖动只属于一个方向
-    private enum DragAxis { case horizontal, vertical }
 
     init(
         items: [FileItem],
@@ -62,11 +55,6 @@ struct ImageViewerView: View {
         let safeIndex = items.isEmpty ? 0 : min(max(0, startIndex), items.count - 1)
         _index = State(initialValue: safeIndex)
         _chromeVisible = State(initialValue: zoomNamespace == nil)
-    }
-
-    /// 下拉退出的进度 0…1：背景变透明、画面缩小、顶部栏淡出都跟着它
-    private var pullProgress: CGFloat {
-        min(1, max(0, drag.height) / 380)
     }
 
     /// 缩放转场的终点 id：**由本页的 `index` 直接算**。
@@ -85,10 +73,9 @@ struct ImageViewerView: View {
         ZStack {
             // 黑底放在 `GeometryReader` **外面**：弹进来的第一帧 `proxy.size` 可能还是 0，
             // 那样里的黑底只有 1×1 点，整页会先透出底下目录页、下一帧才变黑（就是「点开闪一下」）。
-            // 放在最外层后，第一帧就是满屏黑，跟后面的画面衔接不上任何空隙。
-            // 往下拖时背景逐渐透明，能看见下面被遮住的目录页，明确「松手就退出」。
+            // 放在最外层后，第一帧就是满屏黑。
+            // 下拉退出时露出的目录页由系统交互式关闭自己处理（转场层往下挪，本页黑底跟着走）。
             Color.black
-                .opacity(max(0, 1 - pullProgress * 1.1))
                 .ignoresSafeArea()
 
             GeometryReader { proxy in
@@ -102,7 +89,8 @@ struct ImageViewerView: View {
                         // 横向翻页交给**系统原生滚动**（对齐安卓版的 `HorizontalPager`）：
                         // 手指拖动由底层 UIScrollView 原生完成 —— 位移 1:1、自带速度追踪和惯性，
                         // 拖动全程不经过任何 SwiftUI 状态，「实时跟手」由系统保证。
-                        // 这里只保留纵向下拉退出，用 simultaneous 挂上，不拦横向。
+                        // 纵向下拉退出同样全归系统（缩放转场的原生交互式关闭）：
+                        // 本页不再挂任何纵向手势，横向/纵向各归各的原生机制。
                         NativePageStack(
                             items: items,
                             serverID: serverID,
@@ -112,11 +100,6 @@ struct ImageViewerView: View {
                             height: height,
                             isZoomed: $isZoomed
                         )
-                        .simultaneousGesture(verticalPullGesture(height: height))
-                        // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
-                        // 露出下面被遮住的目录页。（横向不再有自定义位移 —— 滚动自己管。）
-                        .offset(y: drag.height)
-                        .scaleEffect(1 - pullProgress * 0.14)
                         .contentShape(Rectangle())
                         .onTapGesture { toggleChrome() }
                     }
@@ -126,7 +109,7 @@ struct ImageViewerView: View {
             .ignoresSafeArea()
 
             // 浮层留在安全区内，不跟着画面全屏铺（否则按钮会压到状态栏）
-            if chromeVisible && pullProgress < 0.1 {
+            if chromeVisible {
                 // 单独抽成 `Equatable` 子视图：拖动时外层 body 每帧重算，
                 // 但这里的入参（页码 / 文件名 / 大小）在翻页前都不变，
                 // SwiftUI 就会跳过它的 body —— 毛玻璃 `.ultraThinMaterial`
@@ -140,16 +123,15 @@ struct ImageViewerView: View {
                 )
                 .equatable()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .opacity(1 - pullProgress * 6)
-                .allowsHitTesting(pullProgress < 0.02)
                 .transition(.opacity)
             }
         }
         .preferredColorScheme(.dark)
-        // 下滑退出只留一条通路：自己那条手势。系统的交互式关闭在 `fullScreenCover` 上
-        // 时灵时不灵，放开的话会出现「手指拖到一半被系统接管、然后弹回去」的抖动。
-        .interactiveDismissDisabled(true)
-        .statusBarHidden(!chromeVisible || pullProgress > 0.05)
+        // 下滑退出交给系统的交互式关闭（缩放转场原生手势）：不要 disable。
+        // 历史教训：之前在这里 disable 掉系统、换自绘手势，是因为当时自绘翻页
+        // 手势和系统抢识别；1.3.14 翻页归原生滚动后已无竞争者，系统的
+        // 下滑/捏合关闭（松手缩回原格子，照片 App 同款）是最顺滑的一条路。
+        .statusBarHidden(!chromeVisible)
         // 系统那层不透明黑底会让「下拉渐隐」白做，退出时还会跟着滑一次
         .presentationBackground(Color.clear)
         // 声明「用缩放转场进来」，终点取本页当前这张的 id（见 `currentItemID`）。
@@ -222,70 +204,15 @@ struct ImageViewerView: View {
         chromeVisible = false
         dismiss()
     }
-
-    // MARK: - 手势
-
-    /// **纵向下拉退出**手势（横向翻页归原生滚动，这里完全不管横向）。
-    ///
-    /// 用 `simultaneousGesture` 并挂而不是 `.gesture`：`.gesture` 会和滚动的 pan
-    /// 抢识别，抢赢了横向就翻不动页。并挂模式下横向位移归滚动、纵向位移归这里，
-    /// 各走各的 —— 和安卓版「horizontalDrag：不消费，交给 pager」同一个分工。
-    private func verticalPullGesture(height: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 1)
-            .onChanged { value in
-                guard !isZoomed, !isDismissing else { return }
-                let dx = value.translation.width
-                let dy = value.translation.height
-
-                // 方向只判一次：判完锁住，避免斜着拖在下拉和「放给滚动」之间来回跳。
-                // 判成横向就什么都不做 —— 那次拖动整个归滚动视图。
-                if dragAxis == nil {
-                    guard max(abs(dx), abs(dy)) > 6 else { return }
-                    dragAxis = abs(dy) > abs(dx) ? .vertical : .horizontal
-                }
-
-                if dragAxis == .vertical {
-                    // 只往下跟手：往上没有退出语义。横向分量不叠加
-                    // （安卓版下拉也只动 offsetY）。
-                    drag = CGSize(width: 0, height: max(0, dy))
-                }
-            }
-            .onEnded { value in
-                let axis = dragAxis
-                dragAxis = nil
-                guard !isZoomed, !isDismissing, axis == .vertical else {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                        drag = .zero
-                    }
-                    return
-                }
-                let dy = value.translation.height
-                // 拖过屏高约 1/7，或者甩得够快，就退出。
-                // 阈值别定太高：手指从图片中部往下拖到下巴附近也就 200pt 出头。
-                let distance = max(84, height * 0.14)
-                if dy > distance || value.predictedEndTranslation.height > height * 0.3 {
-                    // 退出只动一次：画面现在停在哪就留在哪，交给系统转场缩回格子。
-                    isDismissing = true
-                    dismiss()
-                } else {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                        drag = .zero
-                    }
-                }
-            }
-    }
-
-    /// 松手后的退出交给系统：不自己做第二段动画。
-    /// （曾经试过「先甩出去 0.24s 再 dismiss」，看起来是图片和黑底分两次落下。）
 }
 
 // MARK: - 浮层
 
 /// 顶部关闭按钮 + 页码、底部文件名 + 大小。
 ///
-/// 单独抽成 `Equatable` 视图：外层拖动时 `ImageViewerView` 的 body 每帧重算，
+/// 单独抽成 `Equatable` 视图：翻页换 `index` 时外层 body 重算，
 /// 但只要这几项入参没变，SwiftUI 就跳过这里的 body —— `ultraThinMaterial` 毛玻璃
-/// 和文字不必每帧重建。滑动时的卡顿有一截就来自这里（毛玻璃重合成的代价不小）。
+/// 和文字不必跟着重建。
 private struct ChromeLayer: View, Equatable {
     let index: Int
     let count: Int
