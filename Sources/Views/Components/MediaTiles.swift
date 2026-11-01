@@ -23,6 +23,7 @@ struct ThumbnailImage: View {
     /// 视频是否显示左下角的播放角标（列表页已有播放图标，传 false 避免重复）
     var showPlayBadge: Bool = true
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var image: UIImage?
     @State private var failed = false
 
@@ -56,6 +57,23 @@ struct ThumbnailImage: View {
         .contentShape(Rectangle())
         .task(id: item.id) {
             await load()
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .background:
+                // 进后台把格子手里的解码位图放掉：`RootView` 只清了 `NSCache`，
+                // 但这份 `@State image` 不属于缓存、是视图自己捏着的 —— 不放的话
+                // 「清缓存」对几十个可见格子等于没清，挂后台还是顶着几十兆。
+                // 回前台后下面 `.active` 分支会把图补回来（磁盘缓存，不跑网络）。
+                image = nil
+            case .active:
+                // `.task(id:)` 不会重跑，回来时手动拉一次
+                if image == nil {
+                    Task { await load() }
+                }
+            default:
+                break
+            }
         }
     }
 

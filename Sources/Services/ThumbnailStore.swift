@@ -202,8 +202,10 @@ final class ThumbnailStore: @unchecked Sendable {
         let cache = CacheManager.shared
         let url = cache.thumbnailURL(serverID: serverID, item: item)
 
-        // 磁盘缓存命中：不产生任何网络流量
-        if let data = try? Data(contentsOf: url), let cached = UIImage(data: data) {
+        // 磁盘缓存命中：不产生任何网络流量。
+        // 用 ImageIO 从文件解（和别处一致）：`UIImage(data:)` 是懒解码，
+        // 位图会拖到主线程第一次绘制时才解出来，压缩数据也一直在内存里挂着。
+        if let cached = ImageDownsampler.downsample(url: url, maxPixel: Self.pixelSize) {
             return cached
         }
         if cancel.isCancelled { return nil }

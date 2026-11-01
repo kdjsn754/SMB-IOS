@@ -123,11 +123,25 @@ final class DiagnosticsStore: @unchecked Sendable {
     /// 有它 → 进程是退到后台之后没的；没有它 → 进程是在前台直接消失的。
     func noteBackground() {
         guard started else { return }
-        // 顺便把「收到过几次内存警告」写进去：如果进程是被 jetsam 干掉的，
-        // 这一行就是最直接的证据（诊断页能看到）。
+        // 把「收到过几次内存警告」和「此刻进程占多少内存」写进去：
+        // 进程是不是被 jetsam 干掉的，这两行就是最直接的证据（诊断页能看到）。
+        // `phys_footprint` 正是系统判定内存超限用的那个指标。
         let warnings = UserDefaults.standard.integer(forKey: Self.memoryWarningKey)
-        let detail = "内存警告累计 \(warnings) 次"
+        let detail = "内存警告累计 \(warnings) 次；退后台时占用 \(Self.footprintMB()) MB"
         try? Data(detail.utf8).write(to: backgroundURL, options: .atomic)
+    }
+
+    /// 进程当前的物理内存占用（MB）。拿不到返回 -1。
+    static func footprintMB() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return -1 }
+        return Int(info.phys_footprint / 1024 / 1024)
     }
 
     /// 收到系统内存警告时记一笔（跨进程保留，进程被杀也还在）

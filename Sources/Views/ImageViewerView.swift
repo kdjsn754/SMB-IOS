@@ -485,6 +485,7 @@ struct ZoomableImageView: View {
     /// 把放大状态报给外层：放大时外层不再处理翻页/下拉退出
     @Binding var isZoomed: Bool
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var image: UIImage?
     /// 缩略图占位：网格里已经有 480px 的缩略图在内存里，先把它铺上去。
     /// 原图从 NAS 读完要几百毫秒到几秒，没有占位的话这期间是一片黑，
@@ -587,6 +588,24 @@ struct ZoomableImageView: View {
                 return
             }
             await load()
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .background:
+                // 看着图切到后台是常事（回个微信再回来）：此刻进程手里捏着
+                // 当前页 + 前后页的解码位图，清 `NSCache` 清不掉视图 `@State` 里这份。
+                // 进后台统一放掉，回前台再从磁盘补 —— 磁盘命中不走网络。
+                if image != nil {
+                    placeholder = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
+                    image = nil
+                }
+            case .active:
+                if isActive, image == nil {
+                    Task { await load() }
+                }
+            default:
+                break
+            }
         }
     }
 
