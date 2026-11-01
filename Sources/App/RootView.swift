@@ -36,7 +36,7 @@ struct RootView: View {
                 MediaStore.shared.cancelAllInflight()
                 MediaStore.shared.clearMemoryCache()
                 // 留个后台记号：下次启动靠它区分「后台被回收」和「前台消失」，
-                // 顺便把当时的内存占用记下来（诊断页能看到）
+                // 顺便把当时的内存占用记下来（写进日志，排查时能用）
                 DiagnosticsStore.shared.noteBackground()
             case .active:
                 if cameBackFromBackground {

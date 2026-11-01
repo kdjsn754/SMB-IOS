@@ -1,13 +1,14 @@
 import SwiftUI
 
-/// 设置首页：只放分类入口，每行的当前值直接显示在右侧，
-/// 点进去是二级页（详细设置）。这样首页一眼能看完，不会堆满开关和小字。
+/// 设置首页：外观直接展开在最上面（不再点进二级页），
+/// 其余分类每行右侧显示当前值，点进去是二级页。
 @MainActor
 struct SettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
     @ObservedObject private var gestures = PlayerGestureSettings.shared
 
-    @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.system.rawValue
+    @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.light.rawValue
+    @AppStorage(SettingsKey.gridLayout) private var useGrid: Bool = true
     @AppStorage(SettingsKey.thumbnailsEnabled) private var thumbnailsEnabled: Bool = true
     @AppStorage(SettingsKey.videoThumbnails) private var videoThumbnails: Bool = true
 
@@ -15,17 +16,15 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 Section {
-                    NavigationLink {
-                        AppearanceSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "circle.lefthalf.filled",
-                            tint: .indigo,
-                            title: "外观",
-                            value: themeTitle
-                        )
-                    }
+                    ThemePicker(selection: $themeRaw)
+                        .padding(.vertical, 2)
 
+                    Toggle("网格视图", isOn: $useGrid)
+                } header: {
+                    Text("外观")
+                }
+
+                Section {
                     NavigationLink {
                         GestureSettingsView()
                     } label: {
@@ -36,6 +35,8 @@ struct SettingsView: View {
                             value: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭"
                         )
                     }
+                } header: {
+                    Text("播放")
                 }
 
                 Section {
@@ -64,17 +65,6 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
-                        DiagnosticsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "stethoscope",
-                            tint: .teal,
-                            title: "诊断",
-                            value: DiagnosticsStore.shared.previousExit.shortTitle
-                        )
-                    }
-
-                    NavigationLink {
                         AboutSettingsView()
                     } label: {
                         SettingsRow(
@@ -89,10 +79,6 @@ struct SettingsView: View {
             .navigationTitle("设置")
             .onAppear { cache.refresh() }
         }
-    }
-
-    private var themeTitle: String {
-        (AppTheme(rawValue: themeRaw) ?? .system).title
     }
 
     private var thumbnailSummary: String {

@@ -5,13 +5,13 @@ import UIKit
 @MainActor
 struct SMBViewerApp: App {
     @StateObject private var app = AppModel()
-    @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.system.rawValue
+    @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.light.rawValue
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         AppDefaults.register()
         // 尽早装：崩溃只有在 handler 装好之后才记得下来。
-        // 上一次的判定结果由它自己落盘，设置 → 诊断里能看。
+        // 上一次的判定结果由它自己落盘（设置页已不展示，日志留着备用）。
         DiagnosticsStore.shared.start()
     }
 
@@ -19,7 +19,7 @@ struct SMBViewerApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(app)
-                .preferredColorScheme(AppTheme(rawValue: themeRaw)?.colorScheme)
+                .preferredColorScheme(AppTheme.resolve(themeRaw).colorScheme)
                 .task { app.bootstrap() }
                 .onChange(of: scenePhase) { phase in
                     if phase != .active {

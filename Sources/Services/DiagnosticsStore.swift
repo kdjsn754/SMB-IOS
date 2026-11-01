@@ -77,7 +77,7 @@ final class DiagnosticsStore: @unchecked Sendable {
     private(set) var previousExit: Exit = .unknown
     /// `last-exit.txt` 的落盘时间（等于上次启动时间）
     private(set) var previousExitAt: Date?
-    /// 上一次会话最后几步操作（启动时读出来，给诊断页展示）
+    /// 上一次会话最后几步操作（启动时读出来，写进日志备用）
     private(set) var previousSteps: [String] = []
 
     /// 本次会话的操作轨迹（只在关键节点追加，最多 24 条）
@@ -141,7 +141,7 @@ final class DiagnosticsStore: @unchecked Sendable {
     func noteBackground() {
         guard started else { return }
         // 把「收到过几次内存警告」和「此刻进程占多少内存」写进去：
-        // 进程是不是被 jetsam 干掉的，这两行就是最直接的证据（诊断页能看到）。
+        // 进程是不是被 jetsam 干掉的，这两行就是最直接的证据（日志里能看到）。
         // `phys_footprint` 正是系统判定内存超限用的那个指标。
         let warnings = UserDefaults.standard.integer(forKey: Self.memoryWarningKey)
         let detail = "内存警告累计 \(warnings) 次；退后台时占用 \(Self.footprintMB()) MB"
@@ -154,7 +154,7 @@ final class DiagnosticsStore: @unchecked Sendable {
     /// 之后哪怕进程是在**前台**点导航栏时没的，下次启动也一律判成「后台结束（无崩溃记录）」——
     /// 真正的闪退被这条过期记号盖住了，于是「反复闪退、却永远查不到」。
     ///
-    /// 记号里的内容（内存占用）搬到 `last-bg.txt` 继续给诊断页展示，不影响对账。
+    /// 记号里的内容（内存占用）搬到 `last-bg.txt` 继续写进日志备用，不影响对账。
     func noteForeground() {
         guard started else { return }
         if let data = try? Data(contentsOf: backgroundURL) {
