@@ -131,6 +131,14 @@ struct ImageViewerView: View {
         // 历史教训：之前在这里 disable 掉系统、换自绘手势，是因为当时自绘翻页
         // 手势和系统抢识别；1.3.14 翻页归原生滚动后已无竞争者，系统的
         // 下滑/捏合关闭（松手缩回原格子，照片 App 同款）是最顺滑的一条路。
+        //
+        // 但系统那条「捏合退出」要单独摘掉：它和页内图片放大后的向内捏合缩小
+        // 是同一个手势形态，两条同时识别，系统一赢页面就被关掉（用户实测
+        // 「缩小不起作用了，直接退出」）。见 `PinchDismissDisabler`。
+        .background {
+            PinchDismissDisabler()
+                .frame(width: 0, height: 0)
+        }
         .statusBarHidden(!chromeVisible)
         // 系统那层不透明黑底会让「下拉渐隐」白做，退出时还会跟着滑一次
         .presentationBackground(Color.clear)
