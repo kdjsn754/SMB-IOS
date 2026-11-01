@@ -405,6 +405,10 @@ struct ZoomableImageView: View, Equatable {
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
+            // 实际显示的那张图（高清帧 > 预览 > 缩略图）。
+            // 平移钳制必须按**它的真实渲染尺寸**算：图片是 scaledToFit 进容器的，
+            // 横图/竖图总有一个方向没铺满容器，按容器算可拖距离会远超图片实际大小。
+            let displaySize = (hiRes ?? image ?? placeholder)?.size
 
             ZStack {
                 // 底层：缩略图，**全程保持不透明**，原图淡入时它只是被盖住。
@@ -444,8 +448,8 @@ struct ZoomableImageView: View, Equatable {
             .offset(x: offset.width + dragOffset.width, y: offset.height + dragOffset.height)
             .contentShape(Rectangle())
             // 只有放大之后才接管拖动（未放大时的拖动归外层，用来翻页和下拉退出）
-            .gesture(panGesture(size: size), including: scale > 1.01 ? .all : .none)
-            .simultaneousGesture(magnificationGesture(size: size))
+            .gesture(panGesture(size: size, imageSize: displaySize), including: scale > 1.01 ? .all : .none)
+            .simultaneousGesture(magnificationGesture(size: size, imageSize: displaySize))
             .onTapGesture(count: 2) { toggleZoom() }
         }
         .task(id: isActive) {
@@ -481,12 +485,12 @@ struct ZoomableImageView: View, Equatable {
     /// - 缩小到 1x 时把 offset 清零并释放高清帧；
     /// - 中途缩小时用 `clamped` 收紧 offset，保证画面始终盖住屏幕（不会有边缘露黑）；
     /// - 捏过 1.3× 触发一次高清解码（照片 App 的分级加载）。
-    private func magnificationGesture(size: CGSize) -> some Gesture {
+    private func magnificationGesture(size: CGSize, imageSize: CGSize?) -> some Gesture {
         MagnifyGesture()
             .onChanged { value in
                 let next = min(max(1, baseScale * value.magnification), 6)
                 scale = next
-                offset = Self.clamped(offset, scale: next, size: size)
+                offset = Self.clamped(offset, scale: next, container: size, imageSize: imageSize)
                 isZoomed = next > 1.01
                 if next > 1.3 {
                     loadHiResIfNeeded()
@@ -509,14 +513,24 @@ struct ZoomableImageView: View, Equatable {
     }
 
     /// 放大状态下拖动画面。
-    /// offset 逐帧钳制在「画面边缘不离开屏幕」的范围内：
-    /// 最大可平移距离 = (倍率 - 1) × 容器边长 / 2 —— 放大 1x 时为 0（拖不动），放大 3x 时可移一倍边长。
-    /// 之前没有这道钳制，图片能被整个拖出屏幕外。
-    private func panGesture(size: CGSize) -> some Gesture {
+    ///
+    /// 钳制规则（对齐苹果照片）：
+    /// - 上限 = 缩放后**图片实际渲染尺寸**超出容器的部分的一半 —— 画面边缘永远不离开屏幕；
+    /// - 按**累计位置**（offset + 本次位移）钳制，而不是按本次位移单独钳：
+    ///   增量单独钳的话，offset 已在边界时画面能冲到两倍边界、松手再弹回 ——
+    ///   上一版「放大后还能拖出屏幕」就是这两个洞叠加（洞一：按容器算上限，
+    ///   没铺满容器的方向（黑边方向）可拖距离远超图片实际大小；洞二：本条）。
+    private func panGesture(size: CGSize, imageSize: CGSize?) -> some Gesture {
         DragGesture()
             .onChanged { value in
                 guard scale > 1.01 else { return }
-                dragOffset = Self.clamped(value.translation, scale: scale, size: size)
+                let total = CGSize(
+                    width: offset.width + value.translation.width,
+                    height: offset.height + value.translation.height
+                )
+                let clampedTotal = Self.clamped(total, scale: scale, container: size, imageSize: imageSize)
+                dragOffset = CGSize(width: clampedTotal.width - offset.width,
+                                    height: clampedTotal.height - offset.height)
             }
             .onEnded { value in
                 guard scale > 1.01 else {
@@ -527,15 +541,22 @@ struct ZoomableImageView: View, Equatable {
                     width: offset.width + value.translation.width,
                     height: offset.height + value.translation.height
                 )
-                offset = Self.clamped(total, scale: scale, size: size)
+                offset = Self.clamped(total, scale: scale, container: size, imageSize: imageSize)
                 dragOffset = .zero
             }
     }
 
-    /// 平移上限：让缩放后的画面边缘不越出容器（容器没越出，画面内容必然也在屏内）。
-    private static func clamped(_ value: CGSize, scale s: CGFloat, size: CGSize) -> CGSize {
-        let maxX = max(0, (s - 1) * size.width / 2)
-        let maxY = max(0, (s - 1) * size.height / 2)
+    /// 平移上限：`max(0, (图片渲染尺寸 × 倍率 - 容器) / 2)`，按轴独立。
+    /// - 图片某方向没铺满容器（黑边方向）：该方向上限为 0，图片不离开屏幕中央；
+    /// - 没有图（极端情况）：退回按容器估算。
+    private static func clamped(_ value: CGSize, scale s: CGFloat, container: CGSize, imageSize: CGSize?) -> CGSize {
+        var maxX = max(0, (s - 1) * container.width / 2)
+        var maxY = max(0, (s - 1) * container.height / 2)
+        if let img = imageSize, img.width > 1, img.height > 1 {
+            let fit = min(container.width / img.width, container.height / img.height)
+            maxX = max(0, (img.width * fit * s - container.width) / 2)
+            maxY = max(0, (img.height * fit * s - container.height) / 2)
+        }
         return CGSize(
             width: min(max(value.width, -maxX), maxX),
             height: min(max(value.height, -maxY), maxY)
