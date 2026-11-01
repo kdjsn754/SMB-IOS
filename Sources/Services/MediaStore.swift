@@ -230,7 +230,7 @@ final class MediaStore: @unchecked Sendable {
         let temp = cacheURL.appendingPathExtension("part")
         try? FileManager.default.removeItem(at: temp)
         guard FileManager.default.createFile(atPath: temp.path, contents: nil),
-              let handle = FileHandle(forWritingTo: temp)
+              let handle = try? FileHandle(forWritingTo: temp)
         else { return false }
 
         var written: Int64 = 0
