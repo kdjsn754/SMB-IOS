@@ -137,6 +137,9 @@ struct ImageViewerView: View {
                                 connection: connection,
                                 width: width,
                                 height: height,
+                                // 相邻页被推开的距离：随拖动线性增长（拖满一页时约 0.16 屏宽），
+                                // 松手随 drag 弹回合拢。当前图本身始终 1:1 跟手、不变形。
+                                spread: min(width * 0.4, abs(drag.width) * 0.16),
                                 isZoomed: $isZoomed
                             )
                             .equatable()
@@ -444,9 +447,13 @@ private struct PageStack: View, Equatable {
     let connection: SMBConnection
     let width: CGFloat
     let height: CGFloat
-    /// 页与页之间的空隙。滑动时当前图和下一张之间能看到一条背景缝，
-    /// 两张图是分开的个体，而不是像连体画一样贴着（参考用户录屏）。
-    static let pageGap: CGFloat = 12
+    /// 拖动时相邻页被「推开」的额外距离：随拖动线性增长，松手随 drag 一起弹回 0。
+    ///
+    /// 参考对比（用户提供的别的软件录屏）：拖动中当前图**严格 1:1 跟手、不变形**，
+    /// 同时两图之间的缝隙越拖越大 —— 页与页在拖动中是被「拉开」的。
+    /// 所以相邻页的位置 = 1:1 连排位置 + 往外推 spread；当前页不动这个额外量。
+    /// 静止时 spread = 0，相邻页紧贴屏幕边缘外，和普通连排一样。
+    let spread: CGFloat
     @Binding var isZoomed: Bool
 
     static func == (lhs: PageStack, rhs: PageStack) -> Bool {
@@ -454,6 +461,7 @@ private struct PageStack: View, Equatable {
             && lhs.range == rhs.range
             && lhs.width == rhs.width
             && lhs.height == rhs.height
+            && lhs.spread == rhs.spread
             && lhs.items.count == rhs.items.count
             && lhs.items.first?.id == rhs.items.first?.id
     }
@@ -470,9 +478,12 @@ private struct PageStack: View, Equatable {
                     isZoomed: $isZoomed
                 )
                 .frame(width: width, height: height)
-                // 每页槽位 = 页宽 + 缝隙；静止时邻页的缝正好停在屏幕外，
-                // 拖动时缝跟着一起进来，两张图中间就露出一条背景。
-                .offset(x: CGFloat(offset - index) * (width + Self.pageGap))
+                .offset(x: {
+                    let rel = CGFloat(offset - index)
+                    guard rel != 0 else { return 0 }
+                    // 相邻页：1:1 连排位置 + 往外推 spread（缝随拖动张开）
+                    return rel * width + (rel > 0 ? spread : -spread)
+                }())
                 .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
             }
         }
