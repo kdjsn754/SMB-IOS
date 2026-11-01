@@ -556,9 +556,12 @@ struct VideoPlayerView: View {
     }
 
     private var magnifyGesture: some Gesture {
-        MagnificationGesture()
-            .onChanged { scale in
+        // MagnifyGesture（iOS 17+）替代旧的 MagnificationGesture：同一套语义，
+        // 系统未来只维护这一条 API（看图页 1.3.16 已换，这里补齐）
+        MagnifyGesture()
+            .onChanged { value in
                 guard gestures.isEnabled else { return }
+                let scale = value.magnification
                 if !isPinching {
                     isPinching = true
                     holdStartTask?.cancel()
@@ -572,10 +575,10 @@ struct VideoPlayerView: View {
                 logGesture("捏合中 \(String(format: "%.2f", scale))")
                 handlePinch(scale, ended: false)
             }
-            .onEnded { scale in
-                handlePinch(scale, ended: true)
+            .onEnded { value in
+                handlePinch(value.magnification, ended: true)
                 isPinching = false
-                logGesture("捏合结束 \(String(format: "%.2f", scale))")
+                logGesture("捏合结束 \(String(format: "%.2f", value.magnification))")
             }
     }
 
@@ -861,7 +864,8 @@ struct VideoPlayerView: View {
     /// 顶部栏：自己做，跟着 `chromeVisible` 一起淡出（系统导航栏不参与自动隐藏）
     private var topBar: some View {
         HStack(spacing: 12) {
-            circleButton("xmark") { dismiss() }
+            // iOS 26 系统标准关闭钮（Liquid Glass 圆钮），替代自绘 xmark + 黑圈
+            Button(role: .close) { dismiss() }
                 .accessibilityLabel("关闭")
 
             Text(item.name)
@@ -915,17 +919,6 @@ struct VideoPlayerView: View {
             )
             .ignoresSafeArea(edges: .top)
         )
-    }
-
-    private func circleButton(_ systemName: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 36, height: 36)
-                .background(.black.opacity(0.45), in: Circle())
-        }
-        .buttonStyle(.plain)
     }
 
     /// 手势 HUD 的纵向偏移：除「播放/暂停」气泡外都抬到播放键上方，避免压住中间的暂停按钮
