@@ -17,7 +17,10 @@ struct SettingsView: View {
             List {
                 Section {
                     ThemePicker(selection: $themeRaw)
-                        .padding(.vertical, 2)
+                        .padding(.vertical, 6)
+                        // 行背景留空，让两块玻璃浮在分组背景上（叠在白色卡片上几乎看不出边界）
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
 
                     Toggle("网格视图", isOn: $useGrid)
                 } header: {
