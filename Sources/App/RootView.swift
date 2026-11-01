@@ -1,7 +1,10 @@
 import SwiftUI
+import UIKit
 
 @MainActor
 struct RootView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         TabView {
             ServerListView()
@@ -9,6 +12,17 @@ struct RootView: View {
 
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape") }
+        }
+        // 缩略图内存缓存上限是 64 MB，挂在后台时这部分内存白占着，
+        // 系统在后台吃紧时更容易被 jetsam 掉（表现就是「切回来直接退出」）。
+        // 进后台时丢掉，回来按需从磁盘缓存重建，纯本地读取、不跑网络。
+        .onChange(of: scenePhase) { phase in
+            if phase == .background {
+                ThumbnailStore.shared.clearMemoryCache()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            ThumbnailStore.shared.clearMemoryCache()
         }
     }
 }

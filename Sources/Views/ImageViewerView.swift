@@ -57,16 +57,19 @@ struct ImageViewerView: View {
 
     var body: some View {
         ZStack {
+            // 黑底放在 `GeometryReader` **外面**：弹进来的第一帧 `proxy.size` 可能还是 0，
+            // 那样里的黑底只有 1×1 点，整页会先透出底下目录页、下一帧才变黑（就是「点开闪一下」）。
+            // 放在最外层后，第一帧就是满屏黑，跟后面的画面衔接不上任何空隙。
+            // 往下拖时背景逐渐透明，能看见下面被遮住的目录页，明确「松手就退出」。
+            Color.black
+                .opacity(max(0, 1 - pullProgress * 1.1))
+                .ignoresSafeArea()
+
             GeometryReader { proxy in
                 let width = max(proxy.size.width, 1)
                 let height = max(proxy.size.height, 1)
 
                 ZStack {
-                    // 往下拖时背景逐渐透明，能看见下面被遮住的目录页，明确「松手就退出」
-                    Color.black
-                        .opacity(max(0, 1 - pullProgress * 1.1))
-                        .ignoresSafeArea()
-
                     if items.isEmpty {
                         Color.clear
                     } else {
@@ -335,7 +338,7 @@ struct ZoomableImageView: View {
     /// 原图从 NAS 读完要几百毫秒到几秒，没有占位的话这期间是一片黑，
     /// 原图一回来又「啪」地整张出现——翻页时看着就是闪一下。
     @State private var placeholder: UIImage?
-    @State private var isLoading = false
+    @State private var isLoading: Bool
     @State private var failed = false
 
     @State private var scale: CGFloat = 1
@@ -343,15 +346,39 @@ struct ZoomableImageView: View {
     @State private var offset: CGSize = .zero
     @State private var dragOffset: CGSize = .zero
 
+    /// 缩略图在 `init` 里就取好：`.onAppear` 要等封面已经滑上来才开始跑，
+    /// 那之前的一两帧只有黑底，缩略图随后「啪」地出现，同样是「点开闪一下」的来源。
+    /// 放进 `State` 的初始值后，第一帧画出来就已经是缩略图。
+    init(
+        item: FileItem,
+        serverID: UUID,
+        connection: SMBConnection,
+        isActive: Bool,
+        isZoomed: Binding<Bool>
+    ) {
+        self.item = item
+        self.serverID = serverID
+        self.connection = connection
+        self.isActive = isActive
+        _isZoomed = isZoomed
+        let cached = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
+        _placeholder = State(initialValue: cached)
+        // 没有缩略图铺底时才转圈；有图还在加载中就安静地显示这张图
+        _isLoading = State(initialValue: cached == nil)
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
 
             ZStack {
-                // 底层：缩略图（有就先铺，原图淡入后淡出）
+                // 底层：缩略图，**全程保持不透明**，原图淡入时它只是被盖住。
+                //
+                // 不要让它跟着原图一起淡出：两层同时半透明叠在黑底上，中间那一刻
+                // 合成覆盖率只有 1-(1-0.5)² = 0.75，画面会先暗一下再亮回来——
+                // 慢速加载时还看不出来，缓存命中（原图几乎瞬间到达）时就是明显的「闪一下」。
                 if let placeholder {
                     filled(placeholder, size: size)
-                        .opacity(image == nil ? 1 : 0)
                         .allowsHitTesting(false)
                 }
 
@@ -385,11 +412,6 @@ struct ZoomableImageView: View {
             .gesture(panGesture, including: scale > 1.01 ? .all : .none)
             .simultaneousGesture(magnificationGesture)
             .onTapGesture(count: 2) { toggleZoom() }
-        }
-        .onAppear {
-            if placeholder == nil {
-                placeholder = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
-            }
         }
         .task(id: isActive) {
             guard isActive else { return }
@@ -462,12 +484,9 @@ struct ZoomableImageView: View {
         if image != nil { return }
         // 已经有缩略图铺底就不要再转圈，否则会在缩略图上盖一个加载指示器
         if placeholder == nil {
-            if let cached = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID) {
-                placeholder = cached
-            } else {
-                isLoading = true
-            }
+            placeholder = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
         }
+        isLoading = placeholder == nil
         failed = false
 
         let box = CancellationBox()
@@ -488,6 +507,12 @@ struct ZoomableImageView: View {
             // 淡入盖住缩略图，而不是「啪」地整张换掉
             withAnimation(.easeOut(duration: 0.18)) {
                 image = loaded
+            }
+            // 淡入结束后再丢掉缩略图（省内存）。这一步没有动画、原图也已完全不透明，
+            // 所以看不出任何变化；如果在同一个事务里一起清掉，就会又变成两层交叉淡出。
+            Task {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                placeholder = nil
             }
         } else if placeholder == nil {
             failed = true
