@@ -40,9 +40,6 @@ struct ImageViewerView: View {
     @State private var isZoomed = false
     /// 手势过程中的实时位移（只影响图层，不触发图片内容重建）
     @State private var drag: CGSize = .zero
-    /// 横向翻页时的「压缩系数」：拖得越远、图片越窄，像系统相册那样把图「挤」成窄条，
-    /// 两侧露出背景；松手后回弹到 1。纵向退出时不压缩。
-    @State private var horizontalPinch: CGFloat = 1
     /// 本次拖动锁定的方向：判一次就锁住，避免斜着拖时在翻页/下拉之间来回跳
     @State private var dragAxis: DragAxis?
     /// 松手后正在收尾退出，期间忽略新手势
@@ -140,13 +137,12 @@ struct ImageViewerView: View {
                                 connection: connection,
                                 width: width,
                                 height: height,
-                                pinch: horizontalPinch,
                                 isZoomed: $isZoomed
                             )
                             .equatable()
                             // 横向位移必须落在裁剪框「里面」：翻页时下一张从屏幕边缘滑进来，
                             // 超出屏幕的部分被裁掉；否则下拉缩小（0.86 倍）时会在屏幕右边
-                            // 露出一条别页的边。逐页压缩在 PageStack 内部完成（见 pinch 注释）。
+                            // 露出一条别页的边。位移是严格 1:1 跟手（见 pagingGesture）。
                             .offset(x: drag.width)
                             .clipped()
                             // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
@@ -297,25 +293,19 @@ struct ImageViewerView: View {
 
                 switch dragAxis {
                 case .vertical?:
-                    // 往下才跟手：往上没有退出语义，别让画面乱飘。
-                    // 纵向拖动时不做横向压缩。
-                    if horizontalPinch != 1 {
-                        horizontalPinch = 1
-                    }
+                    // 往下才跟手：往上没有退出语义，别让画面乱飘
                     drag = CGSize(width: dx * 0.18, height: max(0, dy))
                 case .horizontal?:
-                    // 首尾页加阻尼，像系统那样拖到头有回弹感
+                    // 严格 1:1 跟手：手指动多少，图片就平移多少。
+                    // （1.3.9/1.3.10 在这里叠了「横向压缩」，图片内容动得比手指慢，
+                    // 用户明确否掉 —— 要的就是平平地跟手。）
+                    // 只有拖到第一张/最后一张、已经拖不过去时才给一点橡皮筋阻尼，
+                    // 提示「到头了」；中间任何位置都不打折扣。
                     var x = dx
                     if (index == 0 && dx > 0) || (index == items.count - 1 && dx < 0) {
                         x *= 0.32
                     }
                     drag = CGSize(width: x, height: 0)
-                    // 跟手压缩：拖得越远图越窄。首尾页（拖不过去）时也轻微压一下，
-                    // 给「拖到头了」一点触感，但幅度收敛，别压得比正常翻页还狠。
-                    let progress = min(1, abs(x) / width)
-                    let edge = (index == 0 && dx > 0) || (index == items.count - 1 && dx < 0)
-                    // 拖满一整页时压到约 0.62 宽，缝隙清晰可见；首尾页（拖不过去）幅度减半
-                    horizontalPinch = max(0.55, 1 - progress * (edge ? 0.20 : 0.38))
                 case .none:
                     break
                 }
@@ -326,7 +316,6 @@ struct ImageViewerView: View {
                 guard !isZoomed, !isDismissing, let axis else {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                         drag = .zero
-                        horizontalPinch = 1
                     }
                     return
                 }
@@ -344,7 +333,6 @@ struct ImageViewerView: View {
                     } else {
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                             drag = .zero
-                            horizontalPinch = 1
                         }
                     }
                     return
@@ -359,7 +347,6 @@ struct ImageViewerView: View {
                 }
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
                     drag = .zero
-                    horizontalPinch = 1
                     index = target
                 }
             }
@@ -457,11 +444,9 @@ private struct PageStack: View, Equatable {
     let connection: SMBConnection
     let width: CGFloat
     let height: CGFloat
-    /// 横向翻页的逐页压缩系数：1 = 不压。每页绕**自己的视觉中心**压窄，
-    /// 页与页之间就会张开一条背景缝隙（参考录屏的效果）。
-    /// 整条连排一起压是压不出缝隙的 —— 三页等比变窄后依然紧贴，看着就是普通滑动，
-    /// 这正是 1.3.9「改了没效果」的原因。
-    let pinch: CGFloat
+    /// 页与页之间的空隙。滑动时当前图和下一张之间能看到一条背景缝，
+    /// 两张图是分开的个体，而不是像连体画一样贴着（参考用户录屏）。
+    static let pageGap: CGFloat = 12
     @Binding var isZoomed: Bool
 
     static func == (lhs: PageStack, rhs: PageStack) -> Bool {
@@ -469,7 +454,6 @@ private struct PageStack: View, Equatable {
             && lhs.range == rhs.range
             && lhs.width == rhs.width
             && lhs.height == rhs.height
-            && lhs.pinch == rhs.pinch
             && lhs.items.count == rhs.items.count
             && lhs.items.first?.id == rhs.items.first?.id
     }
@@ -486,16 +470,9 @@ private struct PageStack: View, Equatable {
                     isZoomed: $isZoomed
                 )
                 .frame(width: width, height: height)
-                .offset(x: CGFloat(offset - index) * width)
-                // 逐页压缩。锚点必须取「这一页视觉中心」对应的 UnitPoint（允许越界 0~1）：
-                // offset 是渲染变换，所有页的布局中心其实都压在 ZStack 正中，
-                // 用 .center 锚点会全部绕整条连排的中心压 —— 那样每页的中心会被拉近，
-                // 缝隙同样出不来。锚点对准每页自己的中心后，每页原地变窄，缝隙自然张开。
-                .scaleEffect(
-                    x: pinch,
-                    y: 1,
-                    anchor: UnitPoint(x: 0.5 + CGFloat(offset - index), y: 0.5)
-                )
+                // 每页槽位 = 页宽 + 缝隙；静止时邻页的缝正好停在屏幕外，
+                // 拖动时缝跟着一起进来，两张图中间就露出一条背景。
+                .offset(x: CGFloat(offset - index) * (width + Self.pageGap))
                 .animation(.spring(response: 0.32, dampingFraction: 0.88), value: index)
             }
         }
