@@ -40,6 +40,9 @@ struct ImageViewerView: View {
     @State private var isZoomed = false
     /// 手势过程中的实时位移（只影响图层，不触发图片内容重建）
     @State private var drag: CGSize = .zero
+    /// 横向翻页时的「压缩系数」：拖得越远、图片越窄，像系统相册那样把图「挤」成窄条，
+    /// 两侧露出背景；松手后回弹到 1。纵向退出时不压缩。
+    @State private var horizontalPinch: CGFloat = 1
     /// 本次拖动锁定的方向：判一次就锁住，避免斜着拖时在翻页/下拉之间来回跳
     @State private var dragAxis: DragAxis?
     /// 松手后正在收尾退出，期间忽略新手势
@@ -144,6 +147,10 @@ struct ImageViewerView: View {
                             // 超出屏幕的部分被裁掉；否则下拉缩小（0.86 倍）时会在屏幕右边
                             // 露出一条别页的边。
                             .offset(x: drag.width)
+                            // 横向翻页时的「跟手压缩」：图片宽度跟着拖动的进度收窄，
+                            // 像系统相册那样被「挤」成窄条、两侧露出背景；松手回弹。
+                            // 用 scaleEffect 的 x 方向，纯图层变换，不触发内容重建。
+                            .scaleEffect(x: horizontalPinch, y: 1, anchor: .center)
                             .clipped()
                             // 纵向位移落在裁剪框「外面」：整块画面跟着手指往下走，
                             // 露出下面被遮住的目录页。
@@ -293,7 +300,11 @@ struct ImageViewerView: View {
 
                 switch dragAxis {
                 case .vertical?:
-                    // 往下才跟手：往上没有退出语义，别让画面乱飘
+                    // 往下才跟手：往上没有退出语义，别让画面乱飘。
+                    // 纵向拖动时不做横向压缩。
+                    if horizontalPinch != 1 {
+                        horizontalPinch = 1
+                    }
                     drag = CGSize(width: dx * 0.18, height: max(0, dy))
                 case .horizontal?:
                     // 首尾页加阻尼，像系统那样拖到头有回弹感
@@ -302,6 +313,11 @@ struct ImageViewerView: View {
                         x *= 0.32
                     }
                     drag = CGSize(width: x, height: 0)
+                    // 跟手压缩：拖得越远图越窄。首尾页（拖不过去）时也轻微压一下，
+                    // 给「拖到头了」一点触感，但幅度收敛，别压得比正常翻页还狠。
+                    let progress = min(1, abs(x) / width)
+                    let edge = (index == 0 && dx > 0) || (index == items.count - 1 && dx < 0)
+                    horizontalPinch = max(0.62, 1 - progress * (edge ? 0.18 : 0.30))
                 case .none:
                     break
                 }
@@ -310,7 +326,10 @@ struct ImageViewerView: View {
                 let axis = dragAxis
                 dragAxis = nil
                 guard !isZoomed, !isDismissing, let axis else {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drag = .zero }
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        drag = .zero
+                        horizontalPinch = 1
+                    }
                     return
                 }
                 let dx = value.translation.width
@@ -327,6 +346,7 @@ struct ImageViewerView: View {
                     } else {
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                             drag = .zero
+                            horizontalPinch = 1
                         }
                     }
                     return
@@ -339,8 +359,9 @@ struct ImageViewerView: View {
                 } else if dx > threshold || value.predictedEndTranslation.width > width * 0.45 {
                     target = max(0, index - 1)
                 }
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
                     drag = .zero
+                    horizontalPinch = 1
                     index = target
                 }
             }
