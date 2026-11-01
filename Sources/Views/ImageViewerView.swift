@@ -175,13 +175,11 @@ struct ImageViewerView: View {
         }
     }
 
-    /// 预热前后两页：磁盘上没有的读回磁盘，然后把**解码好的屏幕级预览**放进内存缓存。
+    /// 预热前后两页：**只保证磁盘上有原始副本，不解码**（1.3.24 起当前页直接解原图，
+    /// 全分辨率位图一张一两百 MB，把没显示的邻居页也解进内存吃不消）。
     /// 用户很快又划走时任务会被取消，`CancellationBox` 会把底层 SMB 传输一起掐掉，
-    /// 不会在后台白读几十兆。
-    ///
-    /// 为什么现在也把图留在内存里：1.3.1 那版只写盘不落地，结果每次翻页都要在主线程解一张 3000 边长的大图 ——
-    /// 「左右滑动切换图片很卡顿」就是这么来的。现在解码在后台完成、结果进 `NSCache`（最多 4 张、可被系统回收），
-    /// 滑过去第一帧就是清晰的。
+    /// 不会在后台白读几十兆。翻到邻居页那一刻再由 `MediaStore.image(for:)` 现解原图，
+    /// 等待期由缩略图铺底。
     private func prefetchNeighbors() async {
         for offset in [index + 1, index - 1] {
             guard !Task.isCancelled, items.indices.contains(offset) else { continue }
@@ -381,18 +379,12 @@ struct ZoomableImageView: View, Equatable {
     @State private var pinchBaseOffset: CGSize = .zero
     @State private var pinchBaseScale: CGFloat = 1
 
-    /// 放大时从原始文件现解的高清帧（照片 App 的分级加载：低清跟手、放大换高清）。
-    /// 平时显示的是屏幕级预览（长边 2800），捏放到 1.3× 以上才解这份，
-    /// 缩回 1x / 翻走就释放 —— 一次只留一张，不进 NSCache（约 60–90MB 位图，缓存它挤占配额）。
-    @State private var hiRes: UIImage?
-    @State private var hiResTask: Task<Void, Never>?
-
     /// 缩略图在 `init` 里就取好：`.onAppear` 要等封面已经滑上来才开始跑，
     /// 那之前的一两帧只有黑底，缩略图随后「啪」地出现，同样是「点开闪一下」的来源。
     /// 放进 `State` 的初始值后，第一帧画出来就已经是缩略图。
     ///
-    /// 原图同理：预热过的相邻页在内存里已经有**解码好的**预览，这里直接拿来当初值，
-    /// 翻页时第一帧就是清晰原图，不会「先糊着缩略图、再啪一下换掉」。
+    /// 原图：刚看过的那张在内存里还有解码好的原图（`MediaStore` 缓存），直接拿来当初值；
+    /// 没有的话显示缩略图铺底，原图在后台解码完淡入（1.3.24 起解码的就是全分辨率原图，无分级）。
     init(
         item: FileItem,
         serverID: UUID,
@@ -418,10 +410,10 @@ struct ZoomableImageView: View, Equatable {
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            // 实际显示的那张图（高清帧 > 预览 > 缩略图）。
+            // 实际显示的那张图（原图 > 缩略图）。
             // 平移钳制必须按**它的真实渲染尺寸**算：图片是 scaledToFit 进容器的，
             // 横图/竖图总有一个方向没铺满容器，按容器算可拖距离会远超图片实际大小。
-            let displaySize = (hiRes ?? image ?? placeholder)?.size
+            let displaySize = (image ?? placeholder)?.size
 
             ZStack {
                 // 底层：缩略图，**全程保持不透明**，原图淡入时它只是被盖住。
@@ -434,9 +426,9 @@ struct ZoomableImageView: View, Equatable {
                         .allowsHitTesting(false)
                 }
 
-                // 上层：原图预览（放大后换成高清帧），加载完成后淡入，盖住缩略图
-                if let top = hiRes ?? image {
-                    filled(top, size: size)
+                // 上层：原图（全分辨率，无分级），加载完成后淡入，盖住缩略图
+                if let image {
+                    filled(image, size: size)
                         .transition(.opacity)
                 }
 
@@ -469,12 +461,8 @@ struct ZoomableImageView: View, Equatable {
         }
         .task(id: isActive) {
             guard isActive else {
-                // 高清帧最重（60–90MB），翻走立刻放
-                hiResTask?.cancel()
-                hiResTask = nil
-                hiRes = nil
-                // 变成前后页之后，把解码好的图放掉，降低内存峰值。
-                // 但如果它正躺在解码缓存里（翻页预热留下的那张），放掉也省不到内存 ——
+                // 变成前后页之后，把解码好的原图放掉，降低内存峰值（全分辨率位图很重）。
+                // 但如果它正躺在解码缓存里（刚看过的那张），放掉也省不到内存 ——
                 // 缓存拿着同一个对象 —— 反而会让翻回来时先看到糊的缩略图。那就留着。
                 try? await Task.sleep(nanoseconds: 900_000_000)
                 guard !Task.isCancelled else { return }
@@ -497,14 +485,12 @@ struct ZoomableImageView: View, Equatable {
     }
 
     /// 双指缩放。
-    /// - 缩小到 1x 时把 offset 清零并释放高清帧；
-    /// - 中途缩小时用 `clamped` 收紧 offset，保证画面始终盖住屏幕（不会有边缘露黑）；
-    /// - 捏过 1.3× 触发一次高清解码（照片 App 的分级加载）。
+    /// - 中途缩小时用 `clamped` 收紧 offset，保证画面始终盖住屏幕（不会有边缘露黑）。
     /// 双指缩放（照片 App 的锚点手感）。
     /// - 捏合中点下的图像内容**保持原地**：offset 由锚点补偿公式闭式算出，
     ///   每帧都从起点状态重算（不是增量累加），锚点不会漂；
     /// - 图像盖满屏幕后继续捏，边界钳制接管（边贴住屏幕边，锚点让位）—— 同照片 App；
-    /// - 缩到 1x 时归零并释放高清帧；捏过 1.3× 触发一次高清解码。
+    /// - 缩到 1x 时归零（显示的本来就是原图，没有要释放的分层帧）。
     private func magnificationGesture(size: CGSize, imageSize: CGSize?) -> some Gesture {
         MagnifyGesture()
             .onChanged { value in
@@ -529,9 +515,6 @@ struct ZoomableImageView: View, Equatable {
                 scale = next
                 offset = Self.clamped(compensated, scale: next, container: size, imageSize: imageSize)
                 isZoomed = next > 1.01
-                if next > 1.3 {
-                    loadHiResIfNeeded()
-                }
             }
             .onEnded { _ in
                 pinchAnchor = nil
@@ -542,7 +525,6 @@ struct ZoomableImageView: View, Equatable {
                         offset = .zero
                     }
                     isZoomed = false
-                    releaseHiRes()
                 } else {
                     baseScale = scale
                     isZoomed = true
@@ -601,26 +583,6 @@ struct ZoomableImageView: View, Equatable {
         )
     }
 
-    /// 捏过 1.3× 才解一次高清帧；已在解/已就绪时是空操作。
-    private func loadHiResIfNeeded() {
-        guard hiRes == nil, hiResTask == nil else { return }
-        hiResTask = Task {
-            let decoded = await MediaStore.shared.highResImage(for: item, serverID: serverID)
-            guard !Task.isCancelled else { return }
-            // 解码这几百毫秒里用户可能已经缩回 1x：那种情况直接丢弃，别白占内存
-            if scale > 1.2, let decoded {
-                hiRes = decoded
-            }
-            hiResTask = nil
-        }
-    }
-
-    private func releaseHiRes() {
-        hiResTask?.cancel()
-        hiResTask = nil
-        hiRes = nil
-    }
-
     /// 双击放大/还原。放大时以**双击点为锚**到 2.5×：点哪儿，哪儿不动（照片 App 手感）；
     /// 点在角落时图像盖满屏幕后被边界钳住，锚点让位给边界。
     private func toggleZoom(at location: CGPoint, size: CGSize, imageSize: CGSize?) {
@@ -630,7 +592,6 @@ struct ZoomableImageView: View, Equatable {
                 baseScale = 1
                 offset = .zero
                 isZoomed = false
-                releaseHiRes()
             } else {
                 let ux = location.x - size.width / 2
                 let uy = location.y - size.height / 2
@@ -641,16 +602,14 @@ struct ZoomableImageView: View, Equatable {
                 scale = 2.5
                 baseScale = 2.5
                 isZoomed = true
-                // 双击直接到 2.5×，预览分辨率肯定不够，立刻解高清
-                loadHiResIfNeeded()
             }
         }
     }
 
     private func load() async {
         if image != nil { return }
-        // 这张图在本页创建之后才被预热好（后台解码刚完成）：直接用内存里那份，
-        // 不再读盘再解一遍。轻微淡入，避免和占位缩略图之间「啪」地换一张。
+        // 这张图在本页创建之后才被预热好（磁盘副本刚落好）：走 `image(for:)` 现解原图，
+        // 缓存命中或后台解码完成后淡入，避免和占位缩略图之间「啪」地换一张。
         if let cached = MediaStore.shared.cachedPreview(for: item, serverID: serverID) {
             withAnimation(.easeOut(duration: 0.12)) {
                 image = cached
