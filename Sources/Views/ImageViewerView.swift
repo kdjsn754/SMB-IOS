@@ -236,10 +236,18 @@ private struct ChromeLayer: View, Equatable {
     var body: some View {
         VStack {
             HStack {
-                // iOS 26+ 的系统标准关闭钮（Liquid Glass 圆钮 + xmark），
-                // 替代自绘的 xmark + 毛玻璃圆底 —— 原生控件自带正确的高亮/按压反馈
-                Button(role: .close, action: onClose)
-                    .padding(.leading, 8)
+                // 和播放页左上角完全同款：白箭头 + 36 pt 黑色圆底（1.3.32）
+                Button(action: onClose) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(.black.opacity(0.45), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭")
+                .padding(.leading, 8)
 
                 Spacer()
 
@@ -499,6 +507,9 @@ struct ZoomableImageView: View, Equatable {
                                           y: value.startAnchor.y * size.height)
                     pinchBaseOffset = offset
                     pinchBaseScale = baseScale
+                    // 捏合一发力就把系统那条「捏合退出」再清一遍：
+                    // 它可能是在轮询的间隙才挂上的，等它够到退出阈值就被关页了
+                    PinchDismissGuard.shared.enforce()
                 }
                 guard let anchor = pinchAnchor else { return }
                 let next = min(max(1, pinchBaseScale * value.magnification), 6)
