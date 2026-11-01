@@ -10,10 +10,11 @@ enum Format {
         return formatter
     }()
 
+    /// 服务器卡片右侧的「最近连接」：只到天（1.2.8 起去掉时分，用户要求别显示时间）
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
 
