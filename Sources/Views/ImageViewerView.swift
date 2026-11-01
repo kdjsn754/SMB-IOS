@@ -360,6 +360,12 @@ struct ZoomableImageView: View, Equatable {
     @State private var offset: CGSize = .zero
     @State private var dragOffset: CGSize = .zero
 
+    /// 放大时从原始文件现解的高清帧（照片 App 的分级加载：低清跟手、放大换高清）。
+    /// 平时显示的是屏幕级预览（长边 2800），捏放到 1.3× 以上才解这份，
+    /// 缩回 1x / 翻走就释放 —— 一次只留一张，不进 NSCache（约 60–90MB 位图，缓存它挤占配额）。
+    @State private var hiRes: UIImage?
+    @State private var hiResTask: Task<Void, Never>?
+
     /// 缩略图在 `init` 里就取好：`.onAppear` 要等封面已经滑上来才开始跑，
     /// 那之前的一两帧只有黑底，缩略图随后「啪」地出现，同样是「点开闪一下」的来源。
     /// 放进 `State` 的初始值后，第一帧画出来就已经是缩略图。
@@ -403,9 +409,9 @@ struct ZoomableImageView: View, Equatable {
                         .allowsHitTesting(false)
                 }
 
-                // 上层：原图，加载完成后淡入，盖住缩略图
-                if let image {
-                    filled(image, size: size)
+                // 上层：原图预览（放大后换成高清帧），加载完成后淡入，盖住缩略图
+                if let top = hiRes ?? image {
+                    filled(top, size: size)
                         .transition(.opacity)
                 }
 
@@ -430,12 +436,16 @@ struct ZoomableImageView: View, Equatable {
             .offset(x: offset.width + dragOffset.width, y: offset.height + dragOffset.height)
             .contentShape(Rectangle())
             // 只有放大之后才接管拖动（未放大时的拖动归外层，用来翻页和下拉退出）
-            .gesture(panGesture, including: scale > 1.01 ? .all : .none)
-            .simultaneousGesture(magnificationGesture)
+            .gesture(panGesture(size: size), including: scale > 1.01 ? .all : .none)
+            .simultaneousGesture(magnificationGesture(size: size))
             .onTapGesture(count: 2) { toggleZoom() }
         }
         .task(id: isActive) {
             guard isActive else {
+                // 高清帧最重（60–90MB），翻走立刻放
+                hiResTask?.cancel()
+                hiResTask = nil
+                hiRes = nil
                 // 变成前后页之后，把解码好的图放掉，降低内存峰值。
                 // 但如果它正躺在解码缓存里（翻页预热留下的那张），放掉也省不到内存 ——
                 // 缓存拿着同一个对象 —— 反而会让翻回来时先看到糊的缩略图。那就留着。
@@ -459,14 +469,20 @@ struct ZoomableImageView: View, Equatable {
             .frame(width: size.width, height: size.height)
     }
 
-    private var magnificationGesture: some Gesture {
-        // MagnifyGesture（iOS 17+）替代旧的 MagnificationGesture：同一套语义，
-        // 值从 magnification 里取，系统未来只维护这一条 API
+    /// 双指缩放。
+    /// - 缩小到 1x 时把 offset 清零并释放高清帧；
+    /// - 中途缩小时用 `clamped` 收紧 offset，保证画面始终盖住屏幕（不会有边缘露黑）；
+    /// - 捏过 1.3× 触发一次高清解码（照片 App 的分级加载）。
+    private func magnificationGesture(size: CGSize) -> some Gesture {
         MagnifyGesture()
             .onChanged { value in
                 let next = min(max(1, baseScale * value.magnification), 6)
                 scale = next
+                offset = Self.clamped(offset, scale: next, size: size)
                 isZoomed = next > 1.01
+                if next > 1.3 {
+                    loadHiResIfNeeded()
+                }
             }
             .onEnded { _ in
                 if scale <= 1.02 {
@@ -476,6 +492,7 @@ struct ZoomableImageView: View, Equatable {
                         offset = .zero
                     }
                     isZoomed = false
+                    releaseHiRes()
                 } else {
                     baseScale = scale
                     isZoomed = true
@@ -483,21 +500,58 @@ struct ZoomableImageView: View, Equatable {
             }
     }
 
-    private var panGesture: some Gesture {
+    /// 放大状态下拖动画面。
+    /// offset 逐帧钳制在「画面边缘不离开屏幕」的范围内：
+    /// 最大可平移距离 = (倍率 - 1) × 容器边长 / 2 —— 放大 1x 时为 0（拖不动），放大 3x 时可移一倍边长。
+    /// 之前没有这道钳制，图片能被整个拖出屏幕外。
+    private func panGesture(size: CGSize) -> some Gesture {
         DragGesture()
             .onChanged { value in
                 guard scale > 1.01 else { return }
-                dragOffset = value.translation
+                dragOffset = Self.clamped(value.translation, scale: scale, size: size)
             }
             .onEnded { value in
                 guard scale > 1.01 else {
                     dragOffset = .zero
                     return
                 }
-                offset.width += value.translation.width
-                offset.height += value.translation.height
+                let total = CGSize(
+                    width: offset.width + value.translation.width,
+                    height: offset.height + value.translation.height
+                )
+                offset = Self.clamped(total, scale: scale, size: size)
                 dragOffset = .zero
             }
+    }
+
+    /// 平移上限：让缩放后的画面边缘不越出容器（容器没越出，画面内容必然也在屏内）。
+    private static func clamped(_ value: CGSize, scale s: CGFloat, size: CGSize) -> CGSize {
+        let maxX = max(0, (s - 1) * size.width / 2)
+        let maxY = max(0, (s - 1) * size.height / 2)
+        return CGSize(
+            width: min(max(value.width, -maxX), maxX),
+            height: min(max(value.height, -maxY), maxY)
+        )
+    }
+
+    /// 捏过 1.3× 才解一次高清帧；已在解/已就绪时是空操作。
+    private func loadHiResIfNeeded() {
+        guard hiRes == nil, hiResTask == nil else { return }
+        hiResTask = Task {
+            let decoded = await MediaStore.shared.highResImage(for: item, serverID: serverID)
+            guard !Task.isCancelled else { return }
+            // 解码这几百毫秒里用户可能已经缩回 1x：那种情况直接丢弃，别白占内存
+            if scale > 1.2, let decoded {
+                hiRes = decoded
+            }
+            hiResTask = nil
+        }
+    }
+
+    private func releaseHiRes() {
+        hiResTask?.cancel()
+        hiResTask = nil
+        hiRes = nil
     }
 
     private func toggleZoom() {
@@ -507,10 +561,13 @@ struct ZoomableImageView: View, Equatable {
                 baseScale = 1
                 offset = .zero
                 isZoomed = false
+                releaseHiRes()
             } else {
                 scale = 2.5
                 baseScale = 2.5
                 isZoomed = true
+                // 双击直接到 2.5×，预览分辨率肯定不够，立刻解高清
+                loadHiResIfNeeded()
             }
         }
     }

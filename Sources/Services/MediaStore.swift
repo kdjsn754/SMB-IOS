@@ -16,11 +16,14 @@ final class MediaStore: @unchecked Sendable {
     /// `NSCache` 会在系统内存吃紧时自动清空，加上 `countLimit`，占用有上界。
     private let previews = NSCache<NSString, UIImage>()
 
-    /// 预览长边。2000 ≈ 3 倍屏宽（430pt × 3 = 1290）的 1.55 倍，
-    /// 在这个倍率内放大仍是一比一像素；比原来 3000 边长省一半以上内存。
-    private static let previewMaxPixel = 2000
-    /// 落盘的长边：放大时更耐看，和预览分开
-    private static let diskMaxPixel = 3000
+    /// 屏幕级预览长边。2800 ≈ 竖屏满屏高度（932pt × 3 = 2796px）。
+    /// 之前是 2000：竖屏照片（长边=高）连 1:1 满屏都盖不住，用户反馈「不是原图、看着很模糊」；
+    /// 放大后另有 `zoomMaxPixel` 一档兜底（照片 App 的分级加载思路：低清跟手、放大换高清）。
+    private static let previewMaxPixel = 2800
+    /// 放大查看时从磁盘上的**原始文件**重新解码的长边上限。
+    /// 双击 2.5× 在 3x 屏上约需 7000px 宽，5500 能覆盖常见 4000~5000 万像素照片的观感；
+    /// 再往上就是 CATiledLayer 分块渲染的领域了，位图内存会爆，不做。
+    private static let zoomMaxPixel = 5500
     /// 超过这个大小就不再整份读进内存，改成边读边落临时文件（见 `cacheLargeImage`）
     private static let streamThreshold: Int64 = 24 * 1024 * 1024
     /// 分块读取大小（单次 SMB 请求上限）
@@ -36,7 +39,9 @@ final class MediaStore: @unchecked Sendable {
 
     init() {
         previews.countLimit = 3
-        previews.totalCostLimit = 48 * 1024 * 1024
+        // 2800px 预览一张约 23MB，3 张 70MB —— 旧的 48MB 上限会让第三张把前面挤掉，
+        // 白白多解码。96MB 仍然有上界，系统内存吃紧时 NSCache 照样自动清。
+        previews.totalCostLimit = 96 * 1024 * 1024
     }
 
     /// 进后台时调用：把还在跑的读取/解码全部取消
@@ -109,20 +114,17 @@ final class MediaStore: @unchecked Sendable {
         }
         if cancel?.isCancelled == true { return nil }
 
-        guard let full = ImageDownsampler.downsample(data: data, maxPixel: Self.diskMaxPixel) else {
+        // 磁盘上**原样保留原始字节**，不做「解码→重压 JPEG→落盘」：
+        // ① 重压会永久丢掉原始分辨率（之前落盘的是 3000px JPEG，放大要高清时无米下锅）；
+        // ② 少一次解码+编码，读得更快。放大时的高清帧直接从这份原始文件重新解。
+        try? data.write(to: url, options: .atomic)
+        cache.noteWrite(bytes: Int64(data.count))
+
+        guard let preview = ImageDownsampler.downsample(url: url, maxPixel: Self.previewMaxPixel) else {
             return nil
         }
-        if let jpeg = full.jpegData(compressionQuality: 0.9) {
-            try? jpeg.write(to: url, options: .atomic)
-            cache.noteWrite(bytes: Int64(jpeg.count))
-        }
-        // 刚落盘的文件再取一次屏幕级的：一次 ImageIO 小文件解码，比在主线程解 3000 边长便宜得多
-        if let preview = ImageDownsampler.downsample(url: url, maxPixel: Self.previewMaxPixel) {
-            store(preview, key: key)
-            return preview
-        }
-        store(full, key: key)
-        return full
+        store(preview, key: key)
+        return preview
     }
 
     /// 预热（翻页用）：保证磁盘上有压缩副本，**并把已解码的预览放进内存**。
@@ -158,13 +160,9 @@ final class MediaStore: @unchecked Sendable {
                 }
                 if cancel?.isCancelled == true { return }
 
-                autoreleasepool {
-                    if let image = ImageDownsampler.downsample(data: data, maxPixel: Self.diskMaxPixel),
-                       let jpeg = image.jpegData(compressionQuality: 0.9) {
-                        try? jpeg.write(to: url, options: .atomic)
-                        cache.noteWrite(bytes: Int64(jpeg.count))
-                    }
-                }
+                // 原样落原始字节（理由见 `image(for:)`），解码只出屏幕级预览这一份
+                try? data.write(to: url, options: .atomic)
+                cache.noteWrite(bytes: Int64(data.count))
             }
             if cancel?.isCancelled == true { return }
         }
@@ -175,6 +173,18 @@ final class MediaStore: @unchecked Sendable {
             }
             store(decoded, key: key)
         }
+    }
+
+    /// 放大查看用的高清帧：从磁盘上的**原始文件**重新解码（长边 ≤ `zoomMaxPixel`）。
+    ///
+    /// 照片 App 的分级加载思路：平时显示屏幕级预览（跟手、省内存），
+    /// 用户捏开放大后再按需解一份高清的换上去。不进 `NSCache` ——
+    /// 一次只看一张、缩回 1x 就释放，缓存它反而挤占预览的配额。
+    /// 非 isolated async：解码在后台线程跑，不占主线程。
+    func highResImage(for item: FileItem, serverID: UUID) async -> UIImage? {
+        let url = CacheManager.shared.mediaURL(serverID: serverID, item: item, suffix: "jpg")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return ImageDownsampler.downsample(url: url, maxPixel: Self.zoomMaxPixel)
     }
 
     func localVideoURL(
@@ -213,12 +223,14 @@ final class MediaStore: @unchecked Sendable {
 
     // MARK: - 内部
 
-    /// 大图：**分块读到临时文件** → 从文件降采样 3000 边长 → 压成 jpeg 落进缓存。
+    /// 大图：**分块读到临时文件 → 原样搬进缓存**。
     ///
     /// 为什么不 `readAll`：`connection.readAll` 会把整份文件读成一个 `Data`（相机 JPEG 常见 20–60MB），
-    /// 紧接着 `downsample` 又解出 3000 边长的位图（约 36MB）。两个峰值叠在一起，
-    /// 看几张图就能把前台内存顶到被系统杀掉的量级 —— 用户看到的是「点着点着就退出了」。
-    /// 走临时文件后，内存里只有「一个 8MB 的块」和「降采样后的位图」，和文件大小基本解耦。
+    /// 再解出大位图，两个峰值叠在一起很容易被系统杀掉。走临时文件后，
+    /// 内存里只有「一个 8MB 的块」。
+    ///
+    /// 1.3.19 起落盘的就是**原始文件本身**（搬完即止，不解码不重压）：
+    /// 屏幕预览在需要时按 `previewMaxPixel` 从它现解，放大高清按 `zoomMaxPixel` 现解。
     ///
     /// - Returns: 缓存文件是否写好且可用（调用方据此决定要不要再解一次预览）。
     private func cacheLargeImage(
@@ -248,20 +260,21 @@ final class MediaStore: @unchecked Sendable {
         }
         try? handle.close()
 
-        // 没读满就是残缺数据：宁可下次再读，也别拿半张图去解码
+        // 没读满就是残缺数据：宁可下次再读，也别拿半张图当原图
         guard written >= item.size, cancel?.isCancelled != true else {
             try? FileManager.default.removeItem(at: temp)
             return false
         }
 
-        autoreleasepool {
-            guard let image = ImageDownsampler.downsample(url: temp, maxPixel: Self.diskMaxPixel),
-                  let jpeg = image.jpegData(compressionQuality: 0.9) else { return }
-            try? jpeg.write(to: cacheURL, options: .atomic)
-            CacheManager.shared.noteWrite(bytes: Int64(jpeg.count))
+        try? FileManager.default.removeItem(at: cacheURL)
+        do {
+            try FileManager.default.moveItem(at: temp, to: cacheURL)
+        } catch {
+            try? FileManager.default.removeItem(at: temp)
+            return false
         }
-        try? FileManager.default.removeItem(at: temp)
-        return FileManager.default.fileExists(atPath: cacheURL.path)
+        CacheManager.shared.noteWrite(bytes: item.size)
+        return true
     }
 
     private func store(_ image: UIImage, key: NSString) {
