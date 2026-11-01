@@ -92,6 +92,8 @@ final class DiagnosticsStore: @unchecked Sendable {
     /// 每次退到后台留一个记号：用来区分「进程在前台没了」和「退到后台之后没的」
     private var backgroundURL: URL { directory.appendingPathComponent("background.flag") }
     private var reportURL: URL { directory.appendingPathComponent("last-exit.txt") }
+    /// 内存警告次数（`UserDefaults`，进程被杀也留得住）
+    private static let memoryWarningKey = "diag.memoryWarnings"
 
     // MARK: - 生命周期
 
@@ -121,7 +123,17 @@ final class DiagnosticsStore: @unchecked Sendable {
     /// 有它 → 进程是退到后台之后没的；没有它 → 进程是在前台直接消失的。
     func noteBackground() {
         guard started else { return }
-        try? Data().write(to: backgroundURL, options: .atomic)
+        // 顺便把「收到过几次内存警告」写进去：如果进程是被 jetsam 干掉的，
+        // 这一行就是最直接的证据（诊断页能看到）。
+        let warnings = UserDefaults.standard.integer(forKey: Self.memoryWarningKey)
+        let detail = "内存警告累计 \(warnings) 次"
+        try? Data(detail.utf8).write(to: backgroundURL, options: .atomic)
+    }
+
+    /// 收到系统内存警告时记一笔（跨进程保留，进程被杀也还在）
+    func noteMemoryWarning() {
+        let defaults = UserDefaults.standard
+        defaults.set(defaults.integer(forKey: Self.memoryWarningKey) + 1, forKey: Self.memoryWarningKey)
     }
 
     /// 设置里「清除记录」
@@ -147,6 +159,11 @@ final class DiagnosticsStore: @unchecked Sendable {
         } else {
             lines.append("")
             lines.append(previousExit.hint)
+        }
+        if let background = try? String(contentsOf: backgroundURL, encoding: .utf8),
+           !background.isEmpty {
+            lines.append("")
+            lines.append("上次退到后台时：\(background)")
         }
         return lines.joined(separator: "\n")
     }

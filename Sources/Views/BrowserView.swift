@@ -16,11 +16,6 @@ struct BrowserView: View {
     @FocusState private var searchFocused: Bool
     /// 看图的缩放转场命名空间：缩略图（起点）与全屏页（终点）共用同一个命名空间才配得上
     @Namespace private var zoomNamespace
-    /// 刚退出全屏看图的一小段时间里忽略格子点击。
-    ///
-    /// 退出动画还在收尾时手指其实已经落在格子上了，这时候进来的一下「触摸」很容易
-    /// 被当成点击（直接把图片又点开）。这段时间一律不认，`onDismiss` 里设。
-    @State private var tapGuardUntil: Date = .distantPast
 
     init(server: SMBServer, path: String) {
         self.server = server
@@ -78,8 +73,18 @@ struct BrowserView: View {
         .toolbar { toolbarContent }
         .task { await load() }
         .fullScreenCover(item: $overlay, onDismiss: {
-            // 退出动画收尾时手指已经回到格子上，这一下别让它变成「又点开一张图」
-            tapGuardUntil = Date().addingTimeInterval(0.45)
+            // 退出动画收尾时手指已经回到格子上，这一下别让它变成「又点开一张图」。
+            //
+            // 这里**不能**写 `@State`：退出看图那一刻整页正在从转场里恢复，
+            // 任何一个 `@State` 变化都会让 `BrowserView` 的 body 连同 `LazyVGrid`
+            // 里所有可见格子重算一遍，正好压在系统恢复手势的时间点上 ——
+            // 用户感受到的就是「退出后要等一下才能右滑返回」。
+            // 所以时间戳存在 model 上（普通属性，不是 `@Published`，不触发刷新）。
+            model.noteViewerDismissed()
+            // 顺带把「右滑返回」立刻恢复：模态呈现期间系统会把它关掉，退出后要等半秒才认手
+            // （用户 1.3.4 实测：这段时间里滚动、点文件夹都正常，只有 pop 手势没反应）。
+            // 见 `PopGestureEnabler`。
+            PopGestureEnabler.enableAfterModalDismiss()
         }) { item in
             switch item {
             case .images(let request):
@@ -305,8 +310,8 @@ struct BrowserView: View {
     }
 
     private func open(_ item: FileItem) {
-        // 刚退出全屏看图的那几百毫秒内不认点击（见 `tapGuardUntil`）
-        guard Date() >= tapGuardUntil else { return }
+        // 刚退出全屏看图的一小段时间内不认点击（见 `BrowserModel.noteViewerDismissed`）
+        guard model.canOpenViewer else { return }
         switch item.kind {
         case .image:
             let images = visibleItems.filter { $0.kind == .image }

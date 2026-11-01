@@ -21,10 +21,37 @@ final class MediaStore: @unchecked Sendable {
     private static let previewMaxPixel = 2000
     /// 落盘的长边：放大时更耐看，和预览分开
     private static let diskMaxPixel = 3000
+    /// 超过这个大小就不再整份读进内存，改成边读边落临时文件（见 `cacheLargeImage`）
+    private static let streamThreshold: Int64 = 24 * 1024 * 1024
+    /// 分块读取大小（单次 SMB 请求上限）
+    private static let readChunk: Int = 8 * 1024 * 1024
+
+    /// 在途的读取：退到后台时全部掐掉。
+    ///
+    /// 挂后台的那一刻如果还有一张几十兆的图在读、在解，进程会在后台被系统直接回收
+    /// （用户看到的是「切回来 App 重新启动 / 像闪退」）。`NSCache` 清空只是把已经解好的丢掉，
+    /// 在途任务不清，后台峰值照样会顶上去。
+    private let inflight = NSHashTable<CancellationBox>.weakObjects()
+    private let inflightLock = NSLock()
 
     init() {
-        previews.countLimit = 4
-        previews.totalCostLimit = 64 * 1024 * 1024
+        previews.countLimit = 3
+        previews.totalCostLimit = 48 * 1024 * 1024
+    }
+
+    /// 进后台时调用：把还在跑的读取/解码全部取消
+    func cancelAllInflight() {
+        inflightLock.lock()
+        let boxes = inflight.allObjects
+        inflightLock.unlock()
+        for box in boxes { box.cancel() }
+    }
+
+    private func track(_ cancel: CancellationBox?) {
+        guard let cancel else { return }
+        inflightLock.lock()
+        inflight.add(cancel)
+        inflightLock.unlock()
     }
 
     /// 内存吃紧 / 进后台时调用
@@ -51,12 +78,27 @@ final class MediaStore: @unchecked Sendable {
         let key = Self.cacheKey(for: item, serverID: serverID)
 
         if let hit = previews.object(forKey: key) { return hit }
+        track(cancel)
 
         // 磁盘命中：一定要走 ImageIO 降采样，不能用 `UIImage(data:)`（懒解码会落到主线程）
         if FileManager.default.fileExists(atPath: url.path),
            let decoded = ImageDownsampler.downsample(url: url, maxPixel: Self.previewMaxPixel) {
             store(decoded, key: key)
             return decoded
+        }
+
+        // 大图**不看**「整份读进内存」这条路（见 `cacheLargeImage`）：
+        // 一张 40MB 的图，`Data` 就占 40MB，再解出 3000 边长的位图又是 36MB，
+        // 峰值能到八九十兆。切到临时文件之后，内存里只有「一个 8MB 的块」和「降采样后的位图」。
+        if item.size > Self.streamThreshold {
+            guard await cacheLargeImage(item: item, connection: connection, cacheURL: url, cancel: cancel) else {
+                return nil
+            }
+            guard cancel?.isCancelled != true,
+                  let preview = ImageDownsampler.downsample(url: url, maxPixel: Self.previewMaxPixel)
+            else { return nil }
+            store(preview, key: key)
+            return preview
         }
 
         let data: Data
@@ -98,21 +140,30 @@ final class MediaStore: @unchecked Sendable {
         let url = cache.mediaURL(serverID: serverID, item: item, suffix: "jpg")
         let key = Self.cacheKey(for: item, serverID: serverID)
         if previews.object(forKey: key) != nil { return }
+        track(cancel)
 
         if !FileManager.default.fileExists(atPath: url.path) {
-            let data: Data
-            do {
-                data = try await connection.readAll(item.path, cancel: cancel)
-            } catch {
-                return
-            }
-            if cancel?.isCancelled == true { return }
+            // 大图同样走「分块落盘」：预热常常是在用户已经翻到下一页时跑完的，
+            // 这时候再整份读进内存，和正在显示的图叠在一起，很容易被系统直接杀掉。
+            if item.size > Self.streamThreshold {
+                guard await cacheLargeImage(
+                    item: item, connection: connection, cacheURL: url, cancel: cancel
+                ) else { return }
+            } else {
+                let data: Data
+                do {
+                    data = try await connection.readAll(item.path, cancel: cancel)
+                } catch {
+                    return
+                }
+                if cancel?.isCancelled == true { return }
 
-            autoreleasepool {
-                if let image = ImageDownsampler.downsample(data: data, maxPixel: Self.diskMaxPixel),
-                   let jpeg = image.jpegData(compressionQuality: 0.9) {
-                    try? jpeg.write(to: url, options: .atomic)
-                    cache.noteWrite(bytes: Int64(jpeg.count))
+                autoreleasepool {
+                    if let image = ImageDownsampler.downsample(data: data, maxPixel: Self.diskMaxPixel),
+                       let jpeg = image.jpegData(compressionQuality: 0.9) {
+                        try? jpeg.write(to: url, options: .atomic)
+                        cache.noteWrite(bytes: Int64(jpeg.count))
+                    }
                 }
             }
             if cancel?.isCancelled == true { return }
@@ -161,6 +212,57 @@ final class MediaStore: @unchecked Sendable {
     }
 
     // MARK: - 内部
+
+    /// 大图：**分块读到临时文件** → 从文件降采样 3000 边长 → 压成 jpeg 落进缓存。
+    ///
+    /// 为什么不 `readAll`：`connection.readAll` 会把整份文件读成一个 `Data`（相机 JPEG 常见 20–60MB），
+    /// 紧接着 `downsample` 又解出 3000 边长的位图（约 36MB）。两个峰值叠在一起，
+    /// 看几张图就能把前台内存顶到被系统杀掉的量级 —— 用户看到的是「点着点着就退出了」。
+    /// 走临时文件后，内存里只有「一个 8MB 的块」和「降采样后的位图」，和文件大小基本解耦。
+    ///
+    /// - Returns: 缓存文件是否写好且可用（调用方据此决定要不要再解一次预览）。
+    private func cacheLargeImage(
+        item: FileItem,
+        connection: SMBConnection,
+        cacheURL: URL,
+        cancel: CancellationBox?
+    ) async -> Bool {
+        let temp = cacheURL.appendingPathExtension("part")
+        try? FileManager.default.removeItem(at: temp)
+        guard FileManager.default.createFile(atPath: temp.path, contents: nil),
+              let handle = FileHandle(forWritingTo: temp)
+        else { return false }
+
+        var written: Int64 = 0
+        do {
+            while written < item.size {
+                if cancel?.isCancelled == true { break }
+                let want = Int(min(Int64(Self.readChunk), item.size - written))
+                let chunk = try await connection.read(item.path, offset: written, length: want, cancel: cancel)
+                if chunk.isEmpty { break }
+                try handle.write(contentsOf: chunk)
+                written += Int64(chunk.count)
+            }
+        } catch {
+            written = -1
+        }
+        try? handle.close()
+
+        // 没读满就是残缺数据：宁可下次再读，也别拿半张图去解码
+        guard written >= item.size, cancel?.isCancelled != true else {
+            try? FileManager.default.removeItem(at: temp)
+            return false
+        }
+
+        autoreleasepool {
+            guard let image = ImageDownsampler.downsample(url: temp, maxPixel: Self.diskMaxPixel),
+                  let jpeg = image.jpegData(compressionQuality: 0.9) else { return }
+            try? jpeg.write(to: cacheURL, options: .atomic)
+            CacheManager.shared.noteWrite(bytes: Int64(jpeg.count))
+        }
+        try? FileManager.default.removeItem(at: temp)
+        return FileManager.default.fileExists(atPath: cacheURL.path)
+    }
 
     private func store(_ image: UIImage, key: NSString) {
         previews.setObject(image, forKey: key, cost: Self.cost(of: image))

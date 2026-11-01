@@ -66,8 +66,20 @@ final class ThumbnailStore: @unchecked Sendable {
     private let displayLimiter = OrderedLimiter(limit: 1, settleMilliseconds: 250)
 
     init() {
-        memory.countLimit = 600
-        memory.totalCostLimit = 64 * 1024 * 1024
+        memory.countLimit = 400
+        memory.totalCostLimit = 40 * 1024 * 1024
+    }
+
+    /// 进后台时调用：把还在排队的缩略图任务全部取消。
+    ///
+    /// 挂后台时列表里可能还有一堆缩略图在陆续读 SMB，每张都要经过「读 → 解码」，
+    /// 峰值叠在后台那点内存额度上，很容易被系统回收掉进程。
+    func cancelAllInflight() {
+        lock.lock()
+        let running = Array(jobs.values)
+        jobs.removeAll()
+        lock.unlock()
+        for job in running { job.box.cancel() }
     }
 
     func clearMemoryCache() {
