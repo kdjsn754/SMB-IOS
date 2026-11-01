@@ -139,10 +139,10 @@ struct ImageViewerView: View {
                                 height: height,
                                 // 相邻页被推开的距离：随拖动线性增长（拖满一页时约 0.16 屏宽），
                                 // 松手随 drag 弹回合拢。当前图本身始终 1:1 跟手、不变形。
+                                // 它只落在每页最外层的 `.offset` 上，拖动全程不重建任何图片视图。
                                 spread: min(width * 0.4, abs(drag.width) * 0.16),
                                 isZoomed: $isZoomed
                             )
-                            .equatable()
                             // 横向位移必须落在裁剪框「里面」：翻页时下一张从屏幕边缘滑进来，
                             // 超出屏幕的部分被裁掉；否则下拉缩小（0.86 倍）时会在屏幕右边
                             // 露出一条别页的边。位移是严格 1:1 跟手（见 pagingGesture）。
@@ -276,7 +276,11 @@ struct ImageViewerView: View {
     }
 
     private func pagingGesture(width: CGFloat, height: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 10)
+        // minimumDistance 给到 1：手指一动（约 1pt）画面就开始跟。
+        // 之前是 10：手指要先空走约 10pt 画面才动、再一下子追上来，
+        // 用户感受就是「没有实时跟着手指」。1pt 不会和单击切换浮层打架
+        //（单击几乎不带位移，drag 不会启动，tap 照常识别）。
+        DragGesture(minimumDistance: 1)
             .onChanged { value in
                 guard !isZoomed, !isDismissing else { return }
                 let dx = value.translation.width
@@ -430,16 +434,22 @@ private struct ChromeLayer: View, Equatable {
 
 /// 三张页面的横向堆叠，但**位置不靠布局，靠 offset**。
 ///
-/// 单独抽出来并实现 `Equatable`，配合 `.equatable()` 使用：外层拖动时
-/// `drag` 每帧都在变、`body` 每帧都会重算，但只要这里的入参没变，
-/// SwiftUI 就会跳过它的 `body`，里面的 `Image` 一帧都不重建。
+/// 等值比较的边界在**每一页**上（`ZoomableImageView` 自己 `Equatable`），
+/// 不在整条堆叠上：拖动时每帧都在变的只有「相邻页被推开的 `spread`」，
+/// 它只作用在最外层的 `.offset` 上 —— 于是拖动全程里三张图片的 `body`
+/// 一帧都不重建，`GeometryReader`、两层 `Image`、手势修饰符全部原样复用，
+/// 位移就是纯图层变换，主线程每一帧只剩「改一个数」的成本。
+///
+/// （曾经把 `Equatable` 放在整条 `PageStack` 上、`spread` 参与 `==`：
+/// 拖动时 spread 每帧都变 → 等值必失败 → 三页视图每帧全量重算。
+/// 高刷设备上这就是拖动掉帧、「画面跟不上手指」的另一来源。）
 ///
 /// 每页的 x 位移是 `(页号 - 当前页号) * 屏宽`：换页时这个值从 `±1 屏宽` 平滑过渡到 `0`，
 /// 是一条纯图层变换，`withAnimation` 一定动画得出来。
 /// 如果改成 `HStack` 布局 + 外层 offset 补偿，换页那一刻 `range` 会平移一格，
 /// 兄弟页被增删会让布局位置**瞬间**跳一个屏宽（布局跳变无法动画），
 /// 画面表现就是「图片直接闪出来」。
-private struct PageStack: View, Equatable {
+private struct PageStack: View {
     let items: [FileItem]
     let range: ClosedRange<Int>
     let index: Int
@@ -456,16 +466,6 @@ private struct PageStack: View, Equatable {
     let spread: CGFloat
     @Binding var isZoomed: Bool
 
-    static func == (lhs: PageStack, rhs: PageStack) -> Bool {
-        lhs.index == rhs.index
-            && lhs.range == rhs.range
-            && lhs.width == rhs.width
-            && lhs.height == rhs.height
-            && lhs.spread == rhs.spread
-            && lhs.items.count == rhs.items.count
-            && lhs.items.first?.id == rhs.items.first?.id
-    }
-
     var body: some View {
         ZStack {
             ForEach(range, id: \.self) { offset in
@@ -477,6 +477,7 @@ private struct PageStack: View, Equatable {
                     isActive: offset == index,
                     isZoomed: $isZoomed
                 )
+                .equatable()
                 .frame(width: width, height: height)
                 .offset(x: {
                     let rel = CGFloat(offset - index)
@@ -497,8 +498,14 @@ private extension Array {
     }
 }
 
+/// 单页图片视图。
+///
+/// 实现 `Equatable` 配合 `.equatable()`：拖动翻页时外层每帧都在改各页的 offset，
+/// 但这一页自己的入参（哪张图、是不是当前页）没变，SwiftUI 就跳过这里的 `body` ——
+/// `GeometryReader`、两层 `Image`、手势修饰符一帧都不重建，拖动全程零重建。
+/// （`@State` 的变化 —— 比如原图加载完成 —— 不受影响，照常刷新。）
 @MainActor
-struct ZoomableImageView: View {
+struct ZoomableImageView: View, Equatable {
     let item: FileItem
     let serverID: UUID
     let connection: SMBConnection
@@ -506,6 +513,13 @@ struct ZoomableImageView: View {
     let isActive: Bool
     /// 把放大状态报给外层：放大时外层不再处理翻页/下拉退出
     @Binding var isZoomed: Bool
+
+    /// 入参比较：同一张图、同一个当前页标志即可复用上一帧的视图。
+    /// `isZoomed` 是绑定（内容稳定，不比较）；`serverID` / `connection`
+    /// 在一次会话里不会变；`@State`（图片加载进度）不经过父视图，不受此门影响。
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.item.id == rhs.item.id && lhs.isActive == rhs.isActive
+    }
 
     @State private var image: UIImage?
     /// 缩略图占位：网格里已经有 480px 的缩略图在内存里，先把它铺上去。
