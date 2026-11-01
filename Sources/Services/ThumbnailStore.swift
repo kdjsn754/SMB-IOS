@@ -5,7 +5,9 @@ import AVFoundation
 ///
 /// 设计要点：
 /// 1. 同一个文件只生成一份 480px 缩略图，网格和列表共用，避免同一张图取两次。
-/// 2. 图片和视频共用一道有序闸门（一次一个、按格子序号放行），缩略图严格按「左上 → 右下」依次出现。
+/// 2. 图片和视频共用一道有序闸门（一次一个，先比优先级层再比格子序号放行）：
+///    前台（屏幕上的格子）严格按「左上 → 右下」依次出现；目录级后台预载（`isPrefetch`）
+///    排在所有前台之后，负责把整个文件夹的缩略图都加载完。
 /// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输。
 /// 4. 失败的文件进负缓存冷却几分钟，避免「划回去就重试」把 NAS 打满。
 final class ThumbnailStore: @unchecked Sendable {
@@ -95,7 +97,15 @@ final class ThumbnailStore: @unchecked Sendable {
 
     /// 取缩略图。返回 nil 表示「没有 / 暂时失败」，界面应显示占位图标，不要一直转圈。
     /// - Parameter order: 该文件在目录里的显示序号，用来让缩略图按「左上 → 右下」的顺序出现。
-    func thumbnail(for item: FileItem, serverID: UUID, connection: SMBConnection, order: Int = 0) async -> UIImage? {
+    /// - Parameter isPrefetch: 目录级后台预载走这条通道 —— 闸门里排在所有前台格子之后，
+    ///   屏幕上的格子永远优先；内存/磁盘已缓存的照常快速跳过。
+    func thumbnail(
+        for item: FileItem,
+        serverID: UUID,
+        connection: SMBConnection,
+        order: Int = 0,
+        isPrefetch: Bool = false
+    ) async -> UIImage? {
         guard item.isMedia else { return nil }
 
         let key = Self.key(for: item, serverID: serverID)
@@ -111,7 +121,7 @@ final class ThumbnailStore: @unchecked Sendable {
 
         if isCoolingDown(key: key) { return nil }
 
-        let job = makeJob(key: key, item: item, serverID: serverID, connection: connection, order: order)
+        let job = makeJob(key: key, item: item, serverID: serverID, connection: connection, order: order, isPrefetch: isPrefetch)
         let waiter = Waiter()
         let result = await withTaskCancellationHandler {
             await job.task.value
@@ -139,7 +149,7 @@ final class ThumbnailStore: @unchecked Sendable {
 
     // MARK: - 任务管理
 
-    private func makeJob(key: String, item: FileItem, serverID: UUID, connection: SMBConnection, order: Int) -> Job {
+    private func makeJob(key: String, item: FileItem, serverID: UUID, connection: SMBConnection, order: Int, isPrefetch: Bool = false) -> Job {
         lock.lock()
         if let existing = jobs[key] {
             existing.waiters += 1
@@ -151,7 +161,8 @@ final class ThumbnailStore: @unchecked Sendable {
         let task = Task<UIImage?, Never> { [weak self] in
             guard let self else { return nil }
             return await self.produce(
-                key: key, item: item, serverID: serverID, connection: connection, order: order, cancel: box
+                key: key, item: item, serverID: serverID, connection: connection,
+                order: order, isPrefetch: isPrefetch, cancel: box
             )
         }
         let job = Job(task: task, box: box)
@@ -197,6 +208,7 @@ final class ThumbnailStore: @unchecked Sendable {
         serverID: UUID,
         connection: SMBConnection,
         order: Int,
+        isPrefetch: Bool = false,
         cancel: CancellationBox
     ) async -> UIImage? {
         let cache = CacheManager.shared
@@ -213,9 +225,9 @@ final class ThumbnailStore: @unchecked Sendable {
         var image: UIImage?
         switch item.kind {
         case .image, .video:
-            // 图片和视频共用一道闸门：一次只跑一个、按格子序号放行，
-            // 缩略图才会严格按「左上 → 右下」依次出现
-            await displayLimiter.acquire(order: order)
+            // 图片和视频共用一道闸门：一次只跑一个、按「优先级层 + 格子序号」放行 ——
+            // 前台（屏幕上的格子）永远排在后台（整目录预载）前面，层内按左上 → 右下
+            await displayLimiter.acquire(order: order, priority: isPrefetch ? 1 : 0)
             if cancel.isCancelled {
                 await displayLimiter.release()
                 return nil

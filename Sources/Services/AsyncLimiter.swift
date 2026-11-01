@@ -49,6 +49,9 @@ actor OrderedLimiter {
 
     private struct Waiter {
         let order: Int
+        /// 优先级层：0 = 前台（屏幕上的格子），1 = 后台（整目录预载）。
+        /// 排序先比 priority 再比 order —— 屏幕上的格子永远排在没显示的预载前面。
+        let priority: Int
         let seq: Int
         let continuation: CheckedContinuation<Void, Never>
     }
@@ -69,7 +72,7 @@ actor OrderedLimiter {
         self.burstGapNanos = UInt64(max(0, burstGapMilliseconds)) * 1_000_000
     }
 
-    func acquire(order: Int) async {
+    func acquire(order: Int, priority: Int = 0) async {
         if running == 0, waiters.isEmpty {
             // 从空闲转忙：只有「隔了一段时间」才当成新一批，需要聚集；
             // 连续滚动时一张接一张地来，不额外等待
@@ -84,7 +87,7 @@ actor OrderedLimiter {
         sequence += 1
         let seq = sequence
         await withCheckedContinuation { continuation in
-            waiters.append(Waiter(order: order, seq: seq, continuation: continuation))
+            waiters.append(Waiter(order: order, priority: priority, seq: seq, continuation: continuation))
             // 不能在 continuation 体内直接 await pump（会把「登记」卡住）
             Task { await self.pump() }
         }
@@ -113,8 +116,10 @@ actor OrderedLimiter {
             for index in 1..<waiters.count {
                 let candidate = waiters[index]
                 let current = waiters[best]
-                if candidate.order < current.order
-                    || (candidate.order == current.order && candidate.seq < current.seq) {
+                // 先比优先级层（前台格子 > 后台预载），再比格子序号，最后比先来后到
+                if candidate.priority < current.priority
+                    || (candidate.priority == current.priority && candidate.order < current.order)
+                    || (candidate.priority == current.priority && candidate.order == current.order && candidate.seq < current.seq) {
                     best = index
                 }
             }

@@ -14,6 +14,9 @@ struct BrowserView: View {
     @State private var showSearch = false
     @State private var query = ""
     @FocusState private var searchFocused: Bool
+    /// 整目录缩略图预载：进目录后把文件夹里**所有**媒体文件的缩略图都拉完（含屏幕外的），
+    /// 只在离开目录 / 刷新 / 换排序时取消重建。屏幕上格子的请求通过优先级层插到它前面。
+    @State private var thumbnailPrefetch: Task<Void, Never>?
     /// 看图的缩放转场命名空间：缩略图（起点）与全屏页（终点）共用同一个命名空间才配得上
     @Namespace private var zoomNamespace
 
@@ -73,12 +76,18 @@ struct BrowserView: View {
         .toolbar { toolbarContent }
         .task { await load() }
         // 操作轨迹：只记「离开这一页」这一个点，够用来判断进程消失时人在哪一层
-        .onDisappear { DiagnosticsStore.shared.note("离开目录 \(title)") }
+        .onDisappear {
+            DiagnosticsStore.shared.note("离开目录 \(title)")
+            // 离开目录就停掉整目录预载，别在后台白拉别的文件夹
+            thumbnailPrefetch?.cancel()
+        }
         .onChange(of: useGrid) { grid in
             DiagnosticsStore.shared.note(grid ? "切换网格视图" : "切换列表视图")
         }
         .onChange(of: sortRaw) { _ in
             DiagnosticsStore.shared.note("切换排序 \(currentSort.title)")
+            // 换排序 = 显示顺序变了：按新顺序重排预载优先级（已缓存的会在 store 里秒回）
+            startThumbnailPrefetch()
         }
         .fullScreenCover(item: $overlay, onDismiss: {
             // 退出动画收尾时手指已经回到格子上，这一下别让它变成「又点开一张图」。
@@ -312,6 +321,9 @@ struct BrowserView: View {
         await model.load(using: connection)
         if model.errorMessage == nil {
             app.markConnected(server)
+            // 目录读完了：把整个文件夹的缩略图都排进队列（含屏幕外的），
+            // 屏幕上的格子有自己的前台请求，永远排在预载前面
+            startThumbnailPrefetch()
         }
     }
 
@@ -319,6 +331,35 @@ struct BrowserView: View {
         DiagnosticsStore.shared.note("刷新目录 \(path)")
         let connection = app.connection(for: server)
         await model.refresh(using: connection)
+        if model.errorMessage == nil {
+            startThumbnailPrefetch()
+        }
+    }
+
+    /// 整目录缩略图预载：按当前排序把文件夹里所有媒体文件过一遍。
+    ///
+    /// - 已在内存/磁盘缓存里的在 `ThumbnailStore` 内部秒回（磁盘命中不进闸门、零流量）；
+    /// - 需要远端读取的以**后台优先级**进闸门：屏幕上格子的前台请求随时插队；
+    /// - 排序用 `model.items` 而不是 `visibleItems`：搜索过滤时预载范围不变，
+    ///   依旧是整个文件夹（用户要求「当前打开目录内的都加载完」）；
+    /// - 离开目录 / 刷新 / 换排序时任务被取消，`CancellationBox` 连底层 SMB 传输一起掐断。
+    private func startThumbnailPrefetch() {
+        thumbnailPrefetch?.cancel()
+        let connection = app.connection(for: server)
+        let serverID = server.id
+        let items = currentSort.sorted(model.items)
+        thumbnailPrefetch = Task {
+            for (index, item) in items.enumerated() {
+                if Task.isCancelled { return }
+                _ = await ThumbnailStore.shared.thumbnail(
+                    for: item,
+                    serverID: serverID,
+                    connection: connection,
+                    order: index,
+                    isPrefetch: true
+                )
+            }
+        }
     }
 
     private func open(_ item: FileItem) {
