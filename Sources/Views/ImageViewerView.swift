@@ -601,7 +601,13 @@ struct ZoomableImageView: View {
                 }
             case .active:
                 if isActive, image == nil {
-                    Task { await load() }
+                    // 同样缓一拍再读：回前台瞬间网络可能还没恢复，
+                    // 立刻读原图（几十兆）容易白跑一趟还要重试
+                    Task {
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        guard !Task.isCancelled else { return }
+                        await load()
+                    }
                 }
             default:
                 break

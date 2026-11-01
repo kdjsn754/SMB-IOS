@@ -175,6 +175,7 @@ struct ServerListView: View {
     // MARK: - 动作
 
     private func add() {
+        DiagnosticsStore.shared.note("点「+」添加服务器")
         editor = ServerEditorTarget(
             server: SMBServer(name: "", host: "", port: 445, share: "", domain: "", username: "guest"),
             isNew: true
@@ -182,6 +183,7 @@ struct ServerListView: View {
     }
 
     private func edit(_ server: SMBServer) {
+        DiagnosticsStore.shared.note("编辑服务器 \(server.displayName)")
         editor = ServerEditorTarget(server: server, isNew: false)
     }
 }

@@ -14,6 +14,11 @@ import UIKit
 ///
 /// 判定顺序：有 `crash.txt` → 崩溃（带栈）；没有但标记还在 → 被系统终止（多为内存回收）；
 /// 都没有 → 上次正常退出。
+///
+/// **`background.flag` 只在「这次真的没回前台」时才算数**：回前台由 `noteForeground()` 撤掉。
+/// 1.3.6 及之前没有这一步，于是「进过后台 → 回前台 → 前台闪退」被一律误判成「后台结束」，
+/// 真正的闪退永远显示不出来。1.3.7 起改掉，并额外记一份操作轨迹（`steps.txt`）——
+/// `SIGPIPE`、看门狗这类死法没有崩溃栈，只有「最后一步在干什么」能定位。
 final class DiagnosticsStore: @unchecked Sendable {
     static let shared = DiagnosticsStore()
 
@@ -57,13 +62,13 @@ final class DiagnosticsStore: @unchecked Sendable {
             case .crash:
                 return "App 自己捕获到了崩溃，下面的调用栈可以直接对照代码定位。"
             case .terminatedInBackground:
-                return "App 退到后台之后进程没了，这种情况本身**不算闪退**："
-                    + "① 你在多任务里把它划掉了；② 后台内存超限被系统回收（看图多、机型内存紧时更容易）。"
-                    + "想确认是不是闪退，看下面有没有出现「前台消失」这一条。"
+                return "进程是在**退到后台之后**没的：挂在后台被系统回收，或你在多任务里划掉了。"
+                    + "这种情况本身不算闪退；但如果它出现得太频繁，把下面的「退到后台时占用」发我。"
             case .terminatedInForeground:
-                return "没有崩溃记录，也没进过后台的痕迹 —— 进程是在前台直接消失的，这一条才值得查。"
-                    + "重点怀疑：重签证书被吊销或过期（表现是「点开就退回桌面」）、"
-                    + "以及启动时卡太久被看门狗判定超时（0x8badf00d）。"
+                return "没有崩溃记录，也没进过后台的痕迹 —— 进程是在前台直接消失的，这一条最值得查："
+                    + "① 往已断开的 SMB 连接上写数据触发 SIGPIPE（1.3.7 起已全局忽略）；"
+                    + "② 主线程卡太久被看门狗判死（0x8badf00d）；③ 内存超限。"
+                    + "往下看「上次会话最后几步」，最后一条基本就是出事那一刻在做什么。"
             }
         }
     }
@@ -72,6 +77,14 @@ final class DiagnosticsStore: @unchecked Sendable {
     private(set) var previousExit: Exit = .unknown
     /// `last-exit.txt` 的落盘时间（等于上次启动时间）
     private(set) var previousExitAt: Date?
+    /// 上一次会话最后几步操作（启动时读出来，给诊断页展示）
+    private(set) var previousSteps: [String] = []
+
+    /// 本次会话的操作轨迹（只在关键节点追加，最多 24 条）
+    private let stepsLock = NSLock()
+    private var steps: [String] = []
+    /// 上一条轨迹（内容 + 时间），用于节流
+    private var lastNote: (text: String, at: Date)?
 
     private let directory: URL
     /// 信号处理里不能用 `FileManager`，提前把路径转成 C 字符串
@@ -91,6 +104,10 @@ final class DiagnosticsStore: @unchecked Sendable {
     private var flagURL: URL { directory.appendingPathComponent("session.flag") }
     /// 每次退到后台留一个记号：用来区分「进程在前台没了」和「退到后台之后没的」
     private var backgroundURL: URL { directory.appendingPathComponent("background.flag") }
+    /// 上一次「退到后台时的内存占用」长期存档（`backgroundURL` 会在回前台时被撤掉）
+    private var lastBackgroundURL: URL { directory.appendingPathComponent("last-bg.txt") }
+    /// 上一次会话最后几步操作（崩溃前在干什么）
+    private var stepsURL: URL { directory.appendingPathComponent("steps.txt") }
     private var reportURL: URL { directory.appendingPathComponent("last-exit.txt") }
     /// 内存警告次数（`UserDefaults`，进程被杀也留得住）
     private static let memoryWarningKey = "diag.memoryWarnings"
@@ -131,6 +148,53 @@ final class DiagnosticsStore: @unchecked Sendable {
         try? Data(detail.utf8).write(to: backgroundURL, options: .atomic)
     }
 
+    /// 每次回到前台记一笔：把「后台记号」撤掉。
+    ///
+    /// 不撤的后果很严重（1.3.6 及之前一直是这样）：只要进过一次后台，这条记号就一直留着，
+    /// 之后哪怕进程是在**前台**点导航栏时没的，下次启动也一律判成「后台结束（无崩溃记录）」——
+    /// 真正的闪退被这条过期记号盖住了，于是「反复闪退、却永远查不到」。
+    ///
+    /// 记号里的内容（内存占用）搬到 `last-bg.txt` 继续给诊断页展示，不影响对账。
+    func noteForeground() {
+        guard started else { return }
+        if let data = try? Data(contentsOf: backgroundURL) {
+            try? data.write(to: lastBackgroundURL, options: .atomic)
+        }
+        try? FileManager.default.removeItem(at: backgroundURL)
+    }
+
+    /// 记一步操作轨迹（只写一个小文件，几十字节）。
+    ///
+    /// 为什么需要：`SIGPIPE`、`0x8badf00d`（看门狗）这类死法**不会留下任何崩溃栈**，
+    /// 只有「进程消失前最后一步在干什么」能帮上忙。轨迹只在关键节点写（进目录、点工具栏、
+    /// 退/回前台、SMB 出错），不会拖慢滚动。
+    func note(_ step: String) {
+        guard started else { return }
+        let now = Date()
+        let line = "\(Self.clockText(now)) \(step)"
+        stepsLock.lock()
+        // 同一条内容 2 秒内只记一次：批量失败（几十个格子同时报同一个错）时不刷屏，
+        // 也不会因为频繁写文件拖慢主线程
+        if let last = lastNote, last.text == step, now.timeIntervalSince(last.at) < 2 {
+            stepsLock.unlock()
+            return
+        }
+        lastNote = (text: step, at: now)
+        steps.append(line)
+        if steps.count > 24 { steps.removeFirst(steps.count - 24) }
+        let text = steps.joined(separator: "\n")
+        stepsLock.unlock()
+        try? text.write(to: stepsURL, atomically: true, encoding: .utf8)
+    }
+
+    /// 只取时钟部分，轨迹里不需要日期
+    private static func clockText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
     /// 进程当前的物理内存占用（MB）。拿不到返回 -1。
     static func footprintMB() -> Int {
         var info = task_vm_info_data_t()
@@ -155,8 +219,10 @@ final class DiagnosticsStore: @unchecked Sendable {
         try? FileManager.default.removeItem(at: reportURL)
         try? FileManager.default.removeItem(at: crashURL)
         try? FileManager.default.removeItem(at: backgroundURL)
+        try? FileManager.default.removeItem(at: lastBackgroundURL)
         previousExit = .unknown
         previousExitAt = nil
+        previousSteps = []
     }
 
     /// 给设置页展示的完整文本
@@ -174,10 +240,16 @@ final class DiagnosticsStore: @unchecked Sendable {
             lines.append("")
             lines.append(previousExit.hint)
         }
-        if let background = try? String(contentsOf: backgroundURL, encoding: .utf8),
+        if let background = try? String(contentsOf: lastBackgroundURL, encoding: .utf8),
            !background.isEmpty {
             lines.append("")
             lines.append("上次退到后台时：\(background)")
+        }
+        if !previousSteps.isEmpty {
+            lines.append("")
+            lines.append("上次会话最后几步：")
+            // 只展示最近 10 步，够定位、又不至于刷屏
+            lines.append(contentsOf: previousSteps.suffix(10).map { "· \($0)" })
         }
         return lines.joined(separator: "\n")
     }
@@ -185,6 +257,16 @@ final class DiagnosticsStore: @unchecked Sendable {
     // MARK: - 上次退出
 
     private func readPreviousExit() {
+        // 先把上次的后台记号内容搬走：下面 `beginSession()` 会删掉记号文件本身
+        if FileManager.default.fileExists(atPath: backgroundURL.path) {
+            try? FileManager.default.removeItem(at: lastBackgroundURL)
+            try? FileManager.default.copyItem(at: backgroundURL, to: lastBackgroundURL)
+        }
+        // 上次会话的操作轨迹（崩溃前最后几步）
+        previousSteps = ((try? String(contentsOf: stepsURL, encoding: .utf8)) ?? "")
+            .split(separator: "\n")
+            .map { String($0) }
+
         let crashText = (try? String(contentsOf: crashURL, encoding: .utf8)) ?? ""
         if !crashText.isEmpty {
             previousExit = .crash(crashText)
@@ -216,10 +298,14 @@ final class DiagnosticsStore: @unchecked Sendable {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
-    /// 本次会话开始：清掉上一次的崩溃文件与后台记号，立一个新标记
+    /// 本次会话开始：清掉上一次的崩溃文件、后台记号与操作轨迹，立一个新标记
     private func beginSession() {
         try? FileManager.default.removeItem(at: crashURL)
         try? FileManager.default.removeItem(at: backgroundURL)
+        try? FileManager.default.removeItem(at: stepsURL)
+        stepsLock.lock()
+        steps.removeAll()
+        stepsLock.unlock()
         try? Data().write(to: flagURL, options: .atomic)
     }
 
@@ -228,6 +314,18 @@ final class DiagnosticsStore: @unchecked Sendable {
     private func installHandlers() {
         // 用文件级函数而不是闭包：C 函数指针不能捕获上下文，抽成函数最稳
         NSSetUncaughtExceptionHandler(smbViewerExceptionHandler)
+
+        // ⚠️ SIGPIPE 必须忽略 —— 这是「回前台点一下导航栏就退回桌面、诊断里却一条记录都没有」的元凶。
+        //
+        // SMB 的底层是 TCP socket。App 挂后台期间（尤其是几分钟以上），服务器或路由器
+        // 会把这条连接悄悄回收掉。回到前台后任何一次操作继续往死 socket 上写，内核就给
+        // 进程发 SIGPIPE —— **默认行为是直接终止进程**，它既不走 `NSException`，也走不到
+        // 下面那几个信号的处理器（我们没注册它）。于是进程静默消失、`crash.txt` 为空，
+        // 只留下一条过期的 `background.flag`，被判定成「后台结束（无崩溃记录）」。
+        //
+        // 忽略之后，写失败会退化成正常的 `EPIPE` 错误码，由 SMB 那一层当普通 I/O 错误处理
+        // （见 `SMBConnection.describe`），连接会被丢弃、下一次操作自动重连。
+        signal(SIGPIPE, SIG_IGN)
 
         // 只接「会被系统判死」的那几个：Swift 的数组越界 / 强制解包 nil 走 SIGTRAP，
         // fatalError 走 SIGILL/SIGTRAP，野指针走 SIGSEGV/SIGBUS。

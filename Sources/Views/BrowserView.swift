@@ -72,6 +72,14 @@ struct BrowserView: View {
         .toolbar(.visible, for: .navigationBar)
         .toolbar { toolbarContent }
         .task { await load() }
+        // 操作轨迹：只记「离开这一页」这一个点，够用来判断进程消失时人在哪一层
+        .onDisappear { DiagnosticsStore.shared.note("离开目录 \(title)") }
+        .onChange(of: useGrid) { grid in
+            DiagnosticsStore.shared.note(grid ? "切换网格视图" : "切换列表视图")
+        }
+        .onChange(of: sortRaw) { _ in
+            DiagnosticsStore.shared.note("切换排序 \(currentSort.title)")
+        }
         .fullScreenCover(item: $overlay, onDismiss: {
             // 退出动画收尾时手指已经回到格子上，这一下别让它变成「又点开一张图」。
             //
@@ -255,6 +263,7 @@ struct BrowserView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button {
+                DiagnosticsStore.shared.note(showSearch ? "关闭搜索" : "打开搜索")
                 withAnimation(.easeInOut(duration: 0.18)) {
                     showSearch.toggle()
                     if showSearch {
@@ -297,6 +306,8 @@ struct BrowserView: View {
     // MARK: - 行为
 
     private func load() async {
+        // 记一步轨迹：万一「点导航栏就退出」再次出现，能对上最后一步在做什么
+        DiagnosticsStore.shared.note("读取目录 \(path)")
         let connection = app.connection(for: server)
         await model.load(using: connection)
         if model.errorMessage == nil {
@@ -305,6 +316,7 @@ struct BrowserView: View {
     }
 
     private func reload() async {
+        DiagnosticsStore.shared.note("刷新目录 \(path)")
         let connection = app.connection(for: server)
         await model.refresh(using: connection)
     }

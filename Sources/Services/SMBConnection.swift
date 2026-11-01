@@ -79,7 +79,10 @@ actor SMBConnection {
             return try await body(manager)
         } catch {
             self.manager = nil
-            throw SMBFailure.operation(Self.describe(error))
+            let message = Self.describe(error)
+            // 记一步轨迹：这类失败往往紧接着就是「进程没了」，事后能对上时间
+            DiagnosticsStore.shared.note("SMB 操作失败：\(message)")
+            throw SMBFailure.operation(message)
         }
     }
 
@@ -87,6 +90,16 @@ actor SMBConnection {
         guard let manager else { return }
         try? await manager.disconnectShare()
         self.manager = nil
+    }
+
+    /// 作废当前连接（回前台时调用）。
+    ///
+    /// 只置空引用，**不** `disconnectShare()`：那条调用要往 socket 上写数据，而 socket
+    /// 很可能已经在后台期间被对端回收，正好会触发 SIGPIPE。置空引用后，
+    /// 下一次操作走 `connect()` 重建，AMSMB2 对象释放时自己会关掉旧 fd。
+    func invalidate() {
+        manager = nil
+        connecting = nil
     }
 
     // MARK: - 目录与文件
@@ -185,6 +198,11 @@ actor SMBConnection {
                 return "目标不是目录"
             case EIO:
                 return "读写失败（I/O 错误）"
+            case EPIPE:
+                // 后台回来最常见的错误：连接在挂起期间被对端关掉了。
+                // 我们已全局忽略 SIGPIPE（见 `DiagnosticsStore.installHandlers`），
+                // 所以这里只是普通失败，丢弃连接后下一次会自动重连。
+                return "连接已断开，正在重新连接"
             case 80:
                 return "认证失败，请检查用户名、密码与域"
             default:
