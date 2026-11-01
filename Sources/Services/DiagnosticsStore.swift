@@ -22,14 +22,18 @@ final class DiagnosticsStore: @unchecked Sendable {
         case unknown
         case clean
         case crash(String)
-        case terminated
+        /// 退到后台之后进程没了：划掉多任务 / 系统回收内存，**都不算闪退**
+        case terminatedInBackground
+        /// 没进过后台、也不在正常终止里：进程在前台直接消失，这才最可疑
+        case terminatedInForeground
 
         var title: String {
             switch self {
             case .unknown: return "未知"
             case .clean: return "正常退出"
             case .crash: return "上次是崩溃退出"
-            case .terminated: return "上次被系统终止（无崩溃记录）"
+            case .terminatedInBackground: return "上次在后台结束（无崩溃记录）"
+            case .terminatedInForeground: return "上次在前台意外消失（无崩溃记录）"
             }
         }
 
@@ -39,7 +43,8 @@ final class DiagnosticsStore: @unchecked Sendable {
             case .unknown: return "-"
             case .clean: return "正常"
             case .crash: return "崩溃"
-            case .terminated: return "被终止"
+            case .terminatedInBackground: return "后台结束"
+            case .terminatedInForeground: return "前台消失"
             }
         }
 
@@ -51,9 +56,14 @@ final class DiagnosticsStore: @unchecked Sendable {
                 return "上一次会话是正常结束的。"
             case .crash:
                 return "App 自己捕获到了崩溃，下面的调用栈可以直接对照代码定位。"
-            case .terminated:
-                return "没有崩溃记录，进程是被外部干掉的。最常见的原因是后台内存超限被系统回收，"
-                    + "其次是重签工具的证书过期/被吊销（那种情况通常「点开就退回桌面」）。"
+            case .terminatedInBackground:
+                return "App 退到后台之后进程没了，这种情况本身**不算闪退**："
+                    + "① 你在多任务里把它划掉了；② 后台内存超限被系统回收（看图多、机型内存紧时更容易）。"
+                    + "想确认是不是闪退，看下面有没有出现「前台消失」这一条。"
+            case .terminatedInForeground:
+                return "没有崩溃记录，也没进过后台的痕迹 —— 进程是在前台直接消失的，这一条才值得查。"
+                    + "重点怀疑：重签证书被吊销或过期（表现是「点开就退回桌面」）、"
+                    + "以及启动时卡太久被看门狗判定超时（0x8badf00d）。"
             }
         }
     }
@@ -79,6 +89,8 @@ final class DiagnosticsStore: @unchecked Sendable {
 
     private var crashURL: URL { directory.appendingPathComponent("crash.txt") }
     private var flagURL: URL { directory.appendingPathComponent("session.flag") }
+    /// 每次退到后台留一个记号：用来区分「进程在前台没了」和「退到后台之后没的」
+    private var backgroundURL: URL { directory.appendingPathComponent("background.flag") }
     private var reportURL: URL { directory.appendingPathComponent("last-exit.txt") }
 
     // MARK: - 生命周期
@@ -97,12 +109,26 @@ final class DiagnosticsStore: @unchecked Sendable {
     /// 正常终止时调用（`willTerminate`）：抹掉标记，下次启动就不会误报
     func markCleanExit() {
         try? FileManager.default.removeItem(at: flagURL)
+        try? FileManager.default.removeItem(at: backgroundURL)
+    }
+
+    /// 每次退到后台记一笔。
+    ///
+    /// App 在**挂起状态**被用户从多任务划掉时，系统不会调 `willTerminate`。
+    /// 只看会话标记的话，「手动划掉」和「后台被系统回收」会混在一起，
+    /// 全都被报成「被系统终止」，容易让人误以为又闪退了。
+    /// 有了这个记号就能把两种情况分开：
+    /// 有它 → 进程是退到后台之后没的；没有它 → 进程是在前台直接消失的。
+    func noteBackground() {
+        guard started else { return }
+        try? Data().write(to: backgroundURL, options: .atomic)
     }
 
     /// 设置里「清除记录」
     func clear() {
         try? FileManager.default.removeItem(at: reportURL)
         try? FileManager.default.removeItem(at: crashURL)
+        try? FileManager.default.removeItem(at: backgroundURL)
         previousExit = .unknown
         previousExitAt = nil
     }
@@ -134,9 +160,14 @@ final class DiagnosticsStore: @unchecked Sendable {
             // 崩溃文件的修改时间 ≈ 崩溃发生的那一刻
             previousExitAt = Self.modified(crashURL) ?? Date()
         } else if FileManager.default.fileExists(atPath: flagURL.path) {
-            previousExit = .terminated
-            // 标记文件是上次启动时写的，修改时间 ≈ 上次启动时刻
-            previousExitAt = Self.modified(flagURL) ?? Date()
+            if FileManager.default.fileExists(atPath: backgroundURL.path) {
+                previousExit = .terminatedInBackground
+                // 后台记号的时间 ≈ 最后一次退到后台的时刻
+                previousExitAt = Self.modified(backgroundURL) ?? Self.modified(flagURL)
+            } else {
+                previousExit = .terminatedInForeground
+                previousExitAt = Self.modified(flagURL)
+            }
         } else if FileManager.default.fileExists(atPath: reportURL.path) {
             previousExit = .clean
             previousExitAt = Self.modified(reportURL)
@@ -154,9 +185,10 @@ final class DiagnosticsStore: @unchecked Sendable {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
-    /// 本次会话开始：清掉上一次的崩溃文件，立一个新标记
+    /// 本次会话开始：清掉上一次的崩溃文件与后台记号，立一个新标记
     private func beginSession() {
         try? FileManager.default.removeItem(at: crashURL)
+        try? FileManager.default.removeItem(at: backgroundURL)
         try? Data().write(to: flagURL, options: .atomic)
     }
 

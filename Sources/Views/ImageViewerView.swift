@@ -103,6 +103,18 @@ struct ImageViewerView: View {
         return lower...max(lower, upper)
     }
 
+    /// 缩放转场的终点 id：**由本页的 `index` 直接算**，不经过外面的 `zoomedItemID`。
+    ///
+    /// 为什么不用外面那个绑定：`zoomedItemID` 是 `BrowserView` 的 `@State`，
+    /// 点开时和 `overlay` 在同一个更新周期里改。系统在呈现那一刻去读 destination 的
+    /// `sourceID`，偶尔读到的还是**上一张**（跨视图的状态传播慢半拍），
+    /// 配不上当前格子的 `matchedTransitionSource` 就退回默认的「从下往上」——
+    /// 这正是「有时候动画还是从下面升上来」。`index` 是 `init` 里就定好的本页状态，
+    /// 第一帧就是正确的值，不存在这个时序。
+    private var currentItemID: String? {
+        items[safe: index]?.id
+    }
+
     var body: some View {
         ZStack {
             // 黑底放在 `GeometryReader` **外面**：弹进来的第一帧 `proxy.size` 可能还是 0，
@@ -167,6 +179,11 @@ struct ImageViewerView: View {
         // 时灵时不灵，放开的话会出现「手指拖到一半被系统接管、然后弹回去」的抖动。
         .interactiveDismissDisabled(usesSystemZoom)
         .statusBarHidden(!chromeVisible || pullProgress > 0.05)
+        // 系统那层不透明黑底会让「下拉渐隐」白做，退出时还会跟着滑一次
+        .clearPresentationBackground()
+        // 声明「用缩放转场进来」，终点取本页当前这张的 id（见 `currentItemID`）。
+        // 必须是这条链的最外层，系统才认得出它和缩略图的配对。
+        .zoomDestination(id: currentItemID, in: zoomNamespace)
         .task {
             // 画面从缩略图长到位之后，浮层再淡入（照片 App 的节奏）。
             // 旧系统的上滑盖屏不用这一步，`chromeVisible` 初值就是 true，这里直接返回。

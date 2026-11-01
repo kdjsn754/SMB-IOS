@@ -16,7 +16,9 @@ struct BrowserView: View {
     @FocusState private var searchFocused: Bool
     /// 看图的缩放转场命名空间：缩略图（起点）与全屏页（终点）共用同一个命名空间才配得上
     @Namespace private var zoomNamespace
-    /// 当前正在看的那张图（换页时会更新），决定退出时缩回哪一格
+    /// 当前正在看的那张图（换页时会由看图页回写）。
+    /// 缩放转场的终点不再读它——终点改由 `ImageViewerView` 内部按 `index` 算，
+    /// 这里只是留个记录，方便以后做「返回时高亮上次看的那格」之类的功能。
     @State private var zoomedItemID: String?
 
     init(server: SMBServer, path: String) {
@@ -85,10 +87,9 @@ struct BrowserView: View {
                     zoomNamespace: zoomNamespace,
                     zoomedItemID: $zoomedItemID
                 )
-                // 系统那层不透明黑底会让「下拉渐隐」白做，退出时还会跟着滑一次
-                .clearPresentationBackground()
-                // iOS 18+：进出场走系统缩放转场（从缩略图长出来 / 缩回去），旧系统原样返回
-                .zoomDestination(id: zoomedItemID, in: zoomNamespace)
+                // 缩放转场的终点（`.zoomDestination`）挪进了 `ImageViewerView` 自己身上：
+                // 那里的 id 由页内 `index` 直接算出，不受这里 `@State` 传播时序影响。
+                // 透传背景（`clearPresentationBackground`）也一起搬过去了，保持那条链的顺序。
             case .video(let request):
                 VideoPlayerView(
                     item: request.item,

@@ -19,6 +19,8 @@ struct RootView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .background {
                 ThumbnailStore.shared.clearMemoryCache()
+                // 留个后台记号：下次启动靠它区分「后台被回收/被划掉」和「前台消失」
+                DiagnosticsStore.shared.noteBackground()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
