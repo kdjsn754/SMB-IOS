@@ -21,17 +21,18 @@ struct RootView: View {
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape") }
         }
-        // 缩略图内存缓存上限 40 MB、大图预览最多 3 张（约 40 MB），挂在后台时这部分内存白占着，
-        // 系统在后台吃紧时更容易被 jetsam 掉（表现就是「切回来直接退出」）。
-        // 进后台时丢掉；同时把**还在跑**的读取/解码掐掉 —— 只清缓存不清在途任务的话，
-        // 后台峰值照样会被一张几十兆的图顶上去。回来按需从磁盘缓存重建，纯本地读取、不跑网络。
+        // 进后台的清理，只动「真正的大头」：
+        // ① 取消在途的读取/解码（几十兆的原图正读一半，这才是后台内存峰值来源）；
+        // ② 清掉大图预览缓存（每张几十兆）。
+        // **刻意不清缩略图内存缓存**：缩略图每张才几百 KB、上限 40 MB，它让「切回来不闪占位图」；
+        // 而且它从来不是闪退主因（真凶 SIGPIPE 已在 1.3.7 修掉）。内存真告急时，
+        // 下面 `didReceiveMemoryWarning` 会把全部缓存一起清掉，保命优先。
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .background:
                 cameBackFromBackground = true
                 DiagnosticsStore.shared.note("退到后台")
                 ThumbnailStore.shared.cancelAllInflight()
-                ThumbnailStore.shared.clearMemoryCache()
                 MediaStore.shared.cancelAllInflight()
                 MediaStore.shared.clearMemoryCache()
                 // 留个后台记号：下次启动靠它区分「后台被回收」和「前台消失」，
