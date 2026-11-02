@@ -102,10 +102,10 @@ struct ServerListView: View {
     private func serverCard(_ server: SMBServer) -> some View {
         HStack(spacing: 14) {
             Image(systemName: "externaldrive.fill")
-                .font(.system(size: 26, weight: .semibold))
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
-                .frame(width: 56, height: 56)
-                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .frame(width: 48, height: 48)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(server.displayName)
@@ -121,14 +121,11 @@ struct ServerListView: View {
             Spacer(minLength: 8)
 
             // 唯一的一个小箭头：卡片自己画，不走 `List`/`NavigationLink` 的系统 accessory
-            // 右侧留白比左侧多 6pt，让箭头往内收一点，不贴着卡片边缘
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 14)
-        .padding(.leading, 14)
-        .padding(.trailing, 20)
+        .padding(14)
         .background(
             Color(uiColor: .secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
