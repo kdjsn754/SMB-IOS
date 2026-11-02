@@ -560,10 +560,13 @@ final class ThumbnailStore: @unchecked Sendable {
         var image: UIImage?
         switch item.kind {
         case .image, .video:
-            // 后台预载先过自己的小闸门：最多 3 个在跑，永远给前台留 3 个名额
-            if isPrefetch { await prefetchGate.acquire() }
+            // 后台预载先过自己的小闸门：最多 3 个在跑，永远给前台留 3 个名额。
+            // 身份用优先级的活值判断（预载 = 2/3 层）：预载任务被前台格子 join 之后
+            // 会升到 0/1，这时它就是前台请求，不该再算后台名额。
+            let background = priority.current >= 2
+            if background { await prefetchGate.acquire() }
             defer {
-                if isPrefetch {
+                if background {
                     // 这里的 release 是异步的：defer 体不能 await，扔一个 Task 收尾。
                     // 晚几微秒释放不影响正确性，只是下一波预载稍晚一点开始。
                     let gate = prefetchGate
