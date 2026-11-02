@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 底部面板。主流播放器（Infuse / nPlayer / B 站）都把「按一下就改一个设置」的东西
 /// 收进这种从底下升起来的卡片里，而不是弹一堆 `Menu` —— 菜单在横屏上会飘到屏幕中间，
@@ -11,6 +12,16 @@ enum PlayerPanel: String, Identifiable {
     case audio
     case timer
     case more
+    /// 播放手势总览。**不再弹独立的全屏表单**（用户 2026-11-02 反馈「不要跳到那个界面去」），
+    /// 它就是这个面板里的一页：左上角返回、右上角 × 关全部，风格和其它二级面板一致。
+    case gestures
+    /// 每一行手势的取值页（第三级）：双击 / 快退快进 / 左右拖 / 上下拖 / 长按 / 捏合
+    case gestureDoubleTap
+    case gestureSeekStep
+    case gestureHorizontal
+    case gestureVertical
+    case gestureLongPress
+    case gesturePinch
 
     var id: String { rawValue }
 
@@ -23,6 +34,24 @@ enum PlayerPanel: String, Identifiable {
         case .audio: return "音轨"
         case .timer: return "定时关闭"
         case .more: return "更多"
+        case .gestures: return "播放手势"
+        case .gestureDoubleTap: return "双击画面"
+        case .gestureSeekStep: return "快进 / 快退"
+        case .gestureHorizontal: return "左右拖动"
+        case .gestureVertical: return "上下拖动"
+        case .gestureLongPress: return "长按画面"
+        case .gesturePinch: return "双指捏合"
+        }
+    }
+
+    /// 是不是「某一项手势取值」这一层
+    var isGestureOption: Bool {
+        switch self {
+        case .gestureDoubleTap, .gestureSeekStep, .gestureHorizontal,
+             .gestureVertical, .gestureLongPress, .gesturePinch:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -32,9 +61,12 @@ enum PlayerPanel: String, Identifiable {
 /// **二级面板要能退回来**：从「更多」点进「屏幕方向 / 画面 / 字幕…」时，左上角出现返回箭头，
 /// 退回上一级；右上角的 × 才是把整个面板关掉。所以这层需要 `canGoBack` / `onBack`，
 /// 由页面用一个栈来维护（见 `VideoPlayerView.open(_:)` / `goBackPanel()`）。
+@MainActor
 struct PlayerPanelSheet: View {
     let panel: PlayerPanel
     @ObservedObject var model: VideoPlaybackModel
+    /// 手势配置。播放页里的「播放手势」页直接改这一份，改完立刻生效
+    @ObservedObject var gestures = PlayerGestureSettings.shared
 
     var isLocked: Bool
     var canGoBack: Bool
@@ -43,10 +75,19 @@ struct PlayerPanelSheet: View {
     var onShow: (PlayerPanel) -> Void
     var onToggleLock: () -> Void
     var onDownload: () -> Void
-    var onGestureSettings: () -> Void
     var onGestureHelp: () -> Void
     var orientationMode: PlaybackOrientationMode
     var onSelectOrientation: (PlaybackOrientationMode) -> Void
+
+    /// 每个面板各自的滚动位置。
+    ///
+    /// 面板全是同一个 `ScrollView` 换内容：从「更多」（已经滚到工具那一组）点进「屏幕方向」，
+    /// 内容一下变短，系统把偏移夹回 0，退回「更多」就停在顶部了 —— 用户要接着看下面的设置，
+    /// 只能重新往下滑（2026-11-02 反馈）。所以按面板各记一份偏移，换回来时写回去。
+    @State private var scrollPosition = ScrollPosition()
+    @State private var storedOffsets: [String: CGFloat] = [:]
+    /// 恢复偏移的过程中别把中间值记下来（见 `restoreScroll`）
+    @State private var isRestoringScroll = false
 
     private static let rates: [Float] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
     private static let timerChoices = [15, 30, 45, 60]
@@ -68,6 +109,16 @@ struct PlayerPanelSheet: View {
             }
             .scrollBounceBehavior(.basedOnSize)
             .frame(maxHeight: 420)
+            .scrollPosition($scrollPosition)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, offset in
+                guard !isRestoringScroll else { return }
+                storedOffsets[panel.rawValue] = offset
+            }
+            .onChange(of: panel) { _, newPanel in
+                restoreScroll(for: newPanel)
+            }
         }
         .background {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -141,6 +192,11 @@ struct PlayerPanelSheet: View {
             timerList
         case .more:
             moreList
+        case .gestures:
+            gestureList
+        case .gestureDoubleTap, .gestureSeekStep, .gestureHorizontal,
+             .gestureVertical, .gestureLongPress, .gesturePinch:
+            gestureOptionList(panel)
         }
     }
 
@@ -374,13 +430,212 @@ struct PlayerPanelSheet: View {
                 )
 
                 PanelRow(icon: "hand.draw", title: "播放手势") {
-                    onGestureSettings()
+                    onShow(.gestures)
                 }
 
                 PanelRow(icon: "questionmark.circle", title: "手势说明") {
                     onGestureHelp()
                 }
             }
+        }
+    }
+
+    // MARK: - 播放手势
+
+    /// 手势总览页。每行只写「名字 + 当前取值」，点进去改哪一项就是哪一项。
+    ///
+    /// 关掉「启用手势」时，下面几行变暗也不可点（跟设置页里的 Form 一致），
+    /// 但「启用手势」和「恢复默认手势」始终可点 —— 不然关了就再也没入口打开。
+    private var gestureList: some View {
+        VStack(spacing: 12) {
+            card {
+                PanelRow(
+                    icon: "hand.draw",
+                    title: "启用手势",
+                    checked: gestures.isEnabled,
+                    chevron: false
+                ) {
+                    gestures.isEnabled.toggle()
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+
+                PanelRow(
+                    icon: "hand.tap",
+                    title: "双击画面",
+                    value: gestures.doubleTap.shortTitle,
+                    enabled: gestures.isEnabled
+                ) {
+                    onShow(.gestureDoubleTap)
+                }
+
+                PanelRow(
+                    icon: "goforward",
+                    title: "快进 / 快退",
+                    value: "\(Int(gestures.seekStep)) 秒",
+                    enabled: gestures.isEnabled && gestures.doubleTap != .none
+                ) {
+                    onShow(.gestureSeekStep)
+                }
+
+                PanelRow(
+                    icon: "arrow.left.and.right",
+                    title: "左右拖动",
+                    value: gestures.horizontal.title,
+                    enabled: gestures.isEnabled
+                ) {
+                    onShow(.gestureHorizontal)
+                }
+
+                PanelRow(
+                    icon: "arrow.up.and.down",
+                    title: "上下拖动",
+                    value: gestures.vertical.title,
+                    enabled: gestures.isEnabled
+                ) {
+                    onShow(.gestureVertical)
+                }
+
+                PanelRow(
+                    icon: "hand.point.up.left",
+                    title: "长按画面",
+                    value: gestures.longPress.title,
+                    enabled: gestures.isEnabled
+                ) {
+                    onShow(.gestureLongPress)
+                }
+
+                PanelRow(
+                    icon: "arrow.up.left.and.arrow.down.right",
+                    title: "双指捏合",
+                    value: gestures.pinch.title,
+                    enabled: gestures.isEnabled
+                ) {
+                    onShow(.gesturePinch)
+                }
+            }
+
+            card {
+                PanelRow(icon: "arrow.counterclockwise", title: "恢复默认手势", chevron: false) {
+                    gestures.resetToDefaults()
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+            }
+        }
+    }
+
+    /// 某一项手势的取值页：一行一个选项，选完退回手势总览（不关面板）。
+    private func gestureOptionList(_ panel: PlayerPanel) -> some View {
+        card {
+            ForEach(gestureOptions(panel)) { option in
+                ChoiceRow(title: option.title, selected: option.selected) {
+                    option.apply()
+                    onBack()
+                }
+            }
+        }
+    }
+
+    private struct GestureOption: Identifiable {
+        let id: String
+        let title: String
+        let selected: Bool
+        let apply: () -> Void
+    }
+
+    private func gestureOptions(_ panel: PlayerPanel) -> [GestureOption] {
+        switch panel {
+        case .gestureDoubleTap:
+            return DoubleTapAction.allCases.map { action in
+                GestureOption(
+                    id: action.rawValue,
+                    title: action.shortTitle,
+                    selected: gestures.doubleTap == action
+                ) {
+                    gestures.doubleTap = action
+                }
+            }
+
+        case .gestureSeekStep:
+            return PlayerGestureSettings.seekStepChoices.map { step in
+                GestureOption(
+                    id: "\(step)",
+                    title: "\(Int(step)) 秒",
+                    selected: abs(gestures.seekStep - step) < 0.01
+                ) {
+                    gestures.seekStep = step
+                }
+            }
+
+        case .gestureHorizontal:
+            return HorizontalDragAction.allCases.map { action in
+                GestureOption(
+                    id: action.rawValue,
+                    title: action.title,
+                    selected: gestures.horizontal == action
+                ) {
+                    gestures.horizontal = action
+                }
+            }
+
+        case .gestureVertical:
+            return VerticalDragAction.allCases.map { action in
+                GestureOption(
+                    id: action.rawValue,
+                    title: action.title,
+                    selected: gestures.vertical == action
+                ) {
+                    gestures.vertical = action
+                }
+            }
+
+        case .gestureLongPress:
+            return LongPressAction.allCases.map { action in
+                GestureOption(
+                    id: action.rawValue,
+                    title: action.title,
+                    selected: gestures.longPress == action
+                ) {
+                    gestures.longPress = action
+                }
+            }
+
+        case .gesturePinch:
+            return PinchAction.allCases.map { action in
+                GestureOption(
+                    id: action.rawValue,
+                    title: action.title,
+                    selected: gestures.pinch == action
+                ) {
+                    gestures.pinch = action
+                }
+            }
+
+        default:
+            return []
+        }
+    }
+
+    // MARK: - 滚动位置
+
+    /// 换面板时把上一次滚到的地方写回去。
+    ///
+    /// 三件事必须一起做，少一件就会出错：
+    /// 1. `isRestoringScroll` 一进来就置上 —— 换内容后系统会把偏移夹回 0，
+    ///    那一拍的回调如果被记下来，正好把「旧面板记住的位置」覆盖成 0；
+    /// 2. 只在**旧位置真的大于 0** 时才滚（短面板本来就没得滚）；
+    /// 3. 分两拍写，第二拍多写 0.5pt —— `scrollTo` 只在值变化时才动，
+    ///    第一拍时新内容可能还没量出高度、被夹在内容底部，同一个值再写一次是空操作。
+    private func restoreScroll(for panel: PlayerPanel) {
+        let target = storedOffsets[panel.rawValue] ?? 0
+        isRestoringScroll = true
+        Task { @MainActor in
+            if target > 0.5 {
+                scrollPosition.scrollTo(y: target)
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                scrollPosition.scrollTo(y: target + 0.5)
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            isRestoringScroll = false
         }
     }
 
@@ -465,6 +720,8 @@ private struct PanelRow: View {
     var value: String?
     var checked = false
     var chevron = true
+    /// 关掉某项功能后，被它连带的几行变暗、不可点（仍然占位，位置不跳）
+    var enabled = true
     let action: () -> Void
 
     var body: some View {
@@ -496,6 +753,40 @@ private struct PanelRow: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.3))
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 47)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlayerRowPressStyle())
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+    }
+}
+
+/// 选项行：只有名字 +（选中时）一个勾，没有图标。
+///
+/// 手势取值页用它。第三级页面不再挂图标 —— 上面两级已经用图标区分了功能，
+/// 到这里全是同类选项，再多一列图标反而会把「哪个被选中」这件事冲淡。
+private struct ChoiceRow: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white)
+
+                Spacer(minLength: 8)
+
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
                 }
             }
             .padding(.horizontal, 12)

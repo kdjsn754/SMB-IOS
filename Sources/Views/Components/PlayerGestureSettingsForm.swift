@@ -78,24 +78,3 @@ struct PlayerGestureSettingsSections: View {
         }
     }
 }
-
-/// 播放页「⋯ → 播放手势设置」弹出的面板
-@MainActor
-struct PlayerGestureSettingsSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                PlayerGestureSettingsSections()
-            }
-            .navigationTitle("播放手势")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }
-                }
-            }
-        }
-    }
-}

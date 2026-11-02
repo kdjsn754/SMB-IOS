@@ -40,7 +40,6 @@ struct VideoPlayerView: View {
     @State private var toast: String?
     @State private var toastTask: Task<Void, Never>?
     @State private var showGestureHelp = false
-    @State private var showGestureSettings = false
 
     // 横竖屏
     /// 进播放页那一刻的形态。退出时转回它——「回到手机原本的状态」，
@@ -167,9 +166,6 @@ struct VideoPlayerView: View {
             Button("知道了", role: .cancel) {}
         } message: {
             Text(gestureHelpText)
-        }
-        .sheet(isPresented: $showGestureSettings) {
-            PlayerGestureSettingsSheet()
         }
         .onAppear {
             engine.model = model
@@ -540,10 +536,6 @@ struct VideoPlayerView: View {
                             connection: connection
                         )
                     }
-                },
-                onGestureSettings: {
-                    closePanel()
-                    showGestureSettings = true
                 },
                 onGestureHelp: {
                     closePanel()
