@@ -14,6 +14,8 @@ final class ChromeVisibility: ObservableObject {
     @Published var visible = true
     @Published var locked = false
     @Published var isLandscape = false
+    /// 面板打开时不自动隐藏（面板盖住画面，控件收起来没有意义）
+    @Published var panelOpen = false
 }
 
 // MARK: - 画面舞台
@@ -47,14 +49,53 @@ struct PlayerStage: View {
 
 // MARK: - 按钮零件
 
-/// 圆形玻璃底 + 内容的容器。
-/// `Menu` 的 label 用不了 `Button` 那套，所以玻璃底单独抽一层共用。
-struct PlayerGlassCircle<Content: View>: View {
-    var size: CGFloat = 36
+/// 按下缩一点、暗一点：这些按钮都浮在画面上，需要一点实体感
+struct PlayerPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.88 : 1)
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .animation(.snappy(duration: 0.16), value: configuration.isPressed)
+    }
+}
+
+/// 画面上的图标按钮。
+///
+/// **不做黑色圆底**：那是旧版的样子，一排黑疙瘩压在画面上很吵。
+/// 现在只有图标 + 一层很淡的投影（亮画面里也看得清），命中区域仍然 40×40。
+struct PlayerIconButton: View {
+    let symbol: String
+    var size: CGFloat = 20
+    var weight: Font.Weight = .semibold
+    var tint: Color = .white
+    var hit: CGFloat = 40
+    var label: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: size, weight: weight))
+                .foregroundStyle(tint)
+                .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
+                .frame(width: hit, height: hit)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PlayerPressStyle())
+        .accessibilityLabel(label)
+    }
+}
+
+/// 圆形按钮（中央播放键、结束卡片、锁定徽标）：这些地方需要一块底，
+/// 否则图标直接怼在画面上，白底视频里会消失。
+struct PlayerRoundButton<Content: View>: View {
+    var size: CGFloat = 44
+    var filled = false
     let content: Content
 
-    init(size: CGFloat = 36, @ViewBuilder content: () -> Content) {
+    init(size: CGFloat = 44, filled: Bool = false, @ViewBuilder content: () -> Content) {
         self.size = size
+        self.filled = filled
         self.content = content()
     }
 
@@ -63,30 +104,55 @@ struct PlayerGlassCircle<Content: View>: View {
             .frame(width: size, height: size)
             .background {
                 Circle()
-                    .fill(.black.opacity(0.40))
-                    .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 0.5))
+                    .fill(filled ? Color.white.opacity(0.92) : Color.black.opacity(0.42))
+                    .overlay(
+                        Circle().strokeBorder(.white.opacity(filled ? 0 : 0.18), lineWidth: 0.5)
+                    )
             }
             .contentShape(Circle())
     }
 }
 
-/// 播放页统一的圆形图标按钮
-struct PlayerGlassButton: View {
-    let symbol: String
-    var size: CGFloat = 36
-    var label: String
-    var action: () -> Void
+/// 胶囊按钮：底部那几个「有当前值」的项（倍速、画面、字幕）用它，
+/// 值直接写在按钮上，不用点开才知道现在是什么状态。
+struct PlayerPill: View {
+    let text: String
+    var icon: String? = nil
+    var highlighted = false
+    var height: CGFloat = 30
+    let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            PlayerGlassCircle(size: size) {
-                Image(systemName: symbol)
-                    .font(.system(size: size * 0.42, weight: .semibold))
-                    .foregroundStyle(.white)
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                Text(text)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
+                    .lineLimit(1)
             }
+            .foregroundStyle(highlighted ? Color.accentColor : Color.white)
+            .padding(.horizontal, 11)
+            .frame(height: height)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(highlighted ? Color.accentColor.opacity(0.16) : Color.black.opacity(0.35))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(
+                                highlighted
+                                    ? Color.accentColor.opacity(0.5)
+                                    : Color.white.opacity(0.16),
+                                lineWidth: 0.5
+                            )
+                    )
+            }
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(PlayerPressStyle())
-        .accessibilityLabel(label)
+        .accessibilityLabel(text)
     }
 }
 
@@ -95,8 +161,6 @@ struct PlayerGlassButton: View {
 /// **不用 SF Symbol**：`rectangle.landscape` 这类名字在不同系统版本上会出现缺失，
 /// 缺失时 `Image(systemName:)` 不报错、直接渲染成 0 尺寸空白——用户截图里
 /// 「横屏时按钮只剩『横屏』两个字，竖屏时却有图标」就是这么来的。
-/// 自己用 `RoundedRectangle` 画，系统怎么改都画得出来。
-/// 画的是「点下去会变成的方向」：横着的那块 = 点了转横屏。
 struct OrientationGlyph: View {
     /// true = 画横着的方块（点下去进横屏）
     var landscape: Bool
@@ -105,64 +169,26 @@ struct OrientationGlyph: View {
     var body: some View {
         RoundedRectangle(cornerRadius: 2.4, style: .continuous)
             .strokeBorder(lineWidth: lineWidth)
-            .frame(width: landscape ? 15 : 10, height: landscape ? 10 : 15)
-    }
-}
-
-/// 胶囊按钮：底部那几个「有当前值」的项（倍速、画面）用它，
-/// 值直接写在按钮上，不用点开才知道现在是什么状态。
-struct PlayerGlassPill: View {
-    let text: String
-    var highlighted = false
-    var height: CGFloat = 34
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(text)
-                .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
-                .foregroundStyle(highlighted ? Color.accentColor : Color.white)
-                .lineLimit(1)
-                .padding(.horizontal, 12)
-                .frame(height: height)
-                .background {
-                    Capsule(style: .continuous)
-                        .fill(.black.opacity(0.40))
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .strokeBorder(
-                                    highlighted ? Color.accentColor.opacity(0.55) : Color.white.opacity(0.16),
-                                    lineWidth: 0.5
-                                )
-                        )
-                }
-                .contentShape(Capsule(style: .continuous))
-        }
-        .buttonStyle(PlayerPressStyle())
-        .accessibilityLabel(text)
-    }
-}
-
-/// 按下缩一点、暗一点：这些按钮都浮在画面上，需要一点实体感
-struct PlayerPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.9 : 1)
-            .opacity(configuration.isPressed ? 0.72 : 1)
-            .animation(.snappy(duration: 0.16), value: configuration.isPressed)
+            .frame(width: landscape ? 15 : 10, height: landscape ? 15 : 10)
     }
 }
 
 // MARK: - 进度条
 
-/// 自绘进度条。相比系统 `Slider` 多两件事：
-/// 1. **单击即跳转**——`DragGesture(minimumDistance: 0)` 让「按下」就等于「拖到该点」。
-/// 2. 拖动时轨道变粗、圆点变大，手指压着的地方有明确反馈。
+/// 自绘进度条，按主流播放器的做法重做：
+///
+/// 1. **三段轨道**：已播（强调色）/ 已缓冲（半透明白）/ 未播（淡轨道）。
+///    缓冲段是从 `AVPlayerItem.loadedTimeRanges` 来的真实数据，远端流上很需要——
+///    用户能看出「跳到这儿不用等」。
+/// 2. **静止时很细（4 pt），按下变粗（7 pt）并冒出圆点**，不占地也不挡画面。
+/// 3. **拖动时上方浮出时间气泡**，不用低头看两端的小字。
+/// 4. `DragGesture(minimumDistance: 0)` 让「按下」就等于「拖到该点」，单击即可跳转。
 ///
 /// 它仍然只写本地 `scrubTime`（走 `onScrub`），一次都不碰播放器。
-struct ScrubBar: View {
+struct PlayerScrubBar: View {
     var value: Double
     var total: Double
+    var buffered: Double
     /// seek 在途（不只是手指在拖）：圆点保持放大，表示「正在跳」
     var isActive: Bool
     var onBegin: () -> Void
@@ -177,28 +203,41 @@ struct ScrubBar: View {
         return min(max(value / total, 0), 1)
     }
 
+    private var bufferedFraction: Double {
+        guard total > 0, buffered.isFinite else { return 0 }
+        return min(max(buffered / total, 0), 1)
+    }
+
     var body: some View {
         GeometryReader { geo in
             let width = max(geo.size.width, 1)
-            let barHeight: CGFloat = (isDragging || isActive) ? 6 : 4
-            let knob: CGFloat = (isDragging || isActive) ? 15 : 11
+            let active = isDragging || isActive
+            let barHeight: CGFloat = active ? 7 : 4
+            let knob: CGFloat = 14
+            let played = width * CGFloat(fraction)
+            let bufferedWidth = width * CGFloat(max(bufferedFraction, fraction))
 
             ZStack(alignment: .leading) {
                 Capsule(style: .continuous)
-                    .fill(Color.white.opacity(0.28))
+                    .fill(Color.white.opacity(0.22))
                     .frame(height: barHeight)
 
                 Capsule(style: .continuous)
-                    .fill(Color.white)
-                    .frame(width: width * CGFloat(fraction), height: barHeight)
+                    .fill(Color.white.opacity(0.34))
+                    .frame(width: bufferedWidth, height: barHeight)
 
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: knob, height: knob)
-                    .shadow(color: .black.opacity(0.35), radius: 2, y: 0.5)
-                    // 贴到两端时圆点不越界（否则最左/最右会露出半个圆）
-                    .offset(x: min(max(width * CGFloat(fraction) - knob / 2, 0), max(width - knob, 0)))
-                    .scaleEffect(isDragging ? 1.0 : 0.9)
+                Capsule(style: .continuous)
+                    .fill(Color.accentColor)
+                    .frame(width: played, height: barHeight)
+
+                if active {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: knob, height: knob)
+                        .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                        // 贴到两端时圆点不越界（否则最左/最右会露出半个圆）
+                        .offset(x: min(max(played - knob / 2, 0), max(width - knob, 0)))
+                }
             }
             .frame(width: width, height: geo.size.height, alignment: .leading)
             // 整块都是热区：点哪儿跳哪儿
@@ -221,9 +260,25 @@ struct ScrubBar: View {
                         onCommit()
                     }
             )
+            .overlay(alignment: .topLeading) {
+                if isDragging, total > 0 {
+                    Text("\(Format.duration(value)) / \(Format.duration(total))")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule(style: .continuous).fill(.black.opacity(0.72))
+                        )
+                        .fixedSize()
+                        .offset(x: min(max(played - 44, 0), max(width - 88, 0)), y: -30)
+                        .allowsHitTesting(false)
+                }
+            }
             .animation(.easeOut(duration: 0.14), value: isDragging)
             .animation(.easeOut(duration: 0.14), value: isActive)
         }
+        .frame(height: 26)
     }
 
     /// 值没变就别回调：手指按住不动时 `onChanged` 仍会持续触发，
@@ -242,192 +297,40 @@ struct ScrubBar: View {
     }
 }
 
-// MARK: - 底部控件
+// MARK: - 状态件
 
-/// 底部一整块：进度条一行 + 按钮一行。
-///
-/// 传进来的 `progress` **不加 `@ObservedObject`**：播放中每 0.25 秒的时间刷新
-/// 不该把这一排按钮也跟着重算，只有 `ScrubRow` 需要跟着跳。
-struct PlayerBottomBar: View {
-    let progress: PlaybackProgress
-    let isPlaying: Bool
-    let rate: Float
-    let seekStep: Double
-    let fit: VideoFit
-    let isMuted: Bool
-    var onBackward: () -> Void
-    var onPlayPause: () -> Void
-    var onForward: () -> Void
-    var onRate: (Float) -> Void
-    var onFit: () -> Void
-    var onMute: () -> Void
-    var onBeginScrub: () -> Void
-    var onScrub: (Double) -> Void
-    var onCommitScrub: () -> Void
-
-    private static let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2]
+/// 中央转圈：只观察 `progress.isBuffering`，播放中每 0.25 秒的刷新不会牵动整页。
+struct PlayerBufferingIndicator: View {
+    @ObservedObject var progress: PlaybackProgress
+    var visible: Bool
 
     var body: some View {
-        VStack(spacing: 10) {
-            ScrubRow(
-                progress: progress,
-                onBegin: onBeginScrub,
-                onScrub: onScrub,
-                onCommit: onCommitScrub
-            )
-
-            HStack(spacing: 6) {
-                PlayerGlassButton(
-                    symbol: backSymbol,
-                    size: 34,
-                    label: "后退 \(Int(seekStep)) 秒",
-                    action: onBackward
-                )
-
-                PlayerGlassButton(
-                    symbol: isPlaying ? "pause.fill" : "play.fill",
-                    size: 40,
-                    label: isPlaying ? "暂停" : "播放",
-                    action: onPlayPause
-                )
-
-                PlayerGlassButton(
-                    symbol: forwardSymbol,
-                    size: 34,
-                    label: "前进 \(Int(seekStep)) 秒",
-                    action: onForward
-                )
-
-                Spacer(minLength: 4)
-
-                rateMenu
-
-                PlayerGlassPill(
-                    text: fit.shortTitle,
-                    highlighted: fit != .aspect,
-                    action: onFit
-                )
-
-                PlayerGlassButton(
-                    symbol: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                    size: 34,
-                    label: isMuted ? "取消静音" : "静音",
-                    action: onMute
-                )
+        ZStack {
+            if visible, progress.isBuffering {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .scaleEffect(1.25)
+                    .transition(.opacity)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-    }
-
-    /// 倍速胶囊。播放页不在 `List` 里，`Menu` 的 label 不会被染成 accent 色，
-    /// 所以可以整体做成菜单（设置页那行是另一回事，见交接文档第 7 节 59 条）。
-    private var rateMenu: some View {
-        Menu {
-            ForEach(Self.rates, id: \.self) { value in
-                Button {
-                    onRate(value)
-                } label: {
-                    if abs(rate - value) < 0.01 {
-                        Label(rateText(value), systemImage: "checkmark")
-                    } else {
-                        Text(rateText(value))
-                    }
-                }
-            }
-        } label: {
-            Text(rateText(rate))
-                .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
-                // 非 1× 时高亮，提醒「现在不是常速」
-                .foregroundStyle(abs(rate - 1) > 0.01 ? Color.accentColor : Color.white)
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .background {
-                    Capsule(style: .continuous)
-                        .fill(.black.opacity(0.40))
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .strokeBorder(
-                                    abs(rate - 1) > 0.01
-                                        ? Color.accentColor.opacity(0.55)
-                                        : Color.white.opacity(0.16),
-                                    lineWidth: 0.5
-                                )
-                        )
-                }
-                .contentShape(Capsule(style: .continuous))
-        }
-        .accessibilityLabel("播放速度")
-    }
-
-    /// 图标跟着「快进跨度」走：按钮上写的数字就是实际会跳的秒数，
-    /// 设置里改成 30 秒，这里也跟着变成 30。
-    private var backSymbol: String {
-        switch Int(seekStep) {
-        case 10: return "gobackward.10"
-        case 15: return "gobackward.15"
-        case 30: return "gobackward.30"
-        default: return "gobackward"   // 5 秒没有带数字的符号
-        }
-    }
-
-    private var forwardSymbol: String {
-        switch Int(seekStep) {
-        case 10: return "goforward.10"
-        case 15: return "goforward.15"
-        case 30: return "goforward.30"
-        default: return "goforward"
-        }
-    }
-
-    private func rateText(_ value: Float) -> String {
-        if value == value.rounded() { return "\(Int(value))×" }
-        return String(format: "%g×", Double(value))
+        .animation(.easeInOut(duration: 0.15), value: progress.isBuffering)
+        .allowsHitTesting(false)
     }
 }
 
-/// 进度条那一行：自己观察进度，播放中每 0.25 秒只重绘这一条。
-private struct ScrubRow: View {
-    @ObservedObject var progress: PlaybackProgress
-    var onBegin: () -> Void
-    var onScrub: (Double) -> Void
-    var onCommit: () -> Void
+/// 续播提示：进页面时浮一下「已从 12:33 继续播放」
+struct PlayerToast: View {
+    let text: String
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text(Format.duration(progress.displayTime))
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
-                .foregroundStyle(.white.opacity(0.9))
-                .shadow(color: .black.opacity(0.4), radius: 3, y: 0.5)
-                .frame(width: 58, alignment: .leading)
-
-            ScrubBar(
-                value: progress.displayTime,
-                total: progress.duration,
-                isActive: progress.isSeeking,
-                onBegin: onBegin,
-                onScrub: onScrub,
-                onCommit: onCommit
-            )
-            .frame(height: 26)
-            .disabled(progress.duration <= 0)
-            .opacity(progress.duration > 0 ? 1 : 0.45)
-
-            HStack(spacing: 5) {
-                if progress.isBuffering {
-                    // 跳到未缓冲位置 / 网络跟不上时转圈：远端流要重新读一段数据，
-                    // 不给反馈的话用户只会觉得「点了没反应」
-                    ProgressView()
-                        .controlSize(.mini)
-                        .tint(.white)
-                }
-                Text(Format.duration(progress.duration))
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-            .frame(width: 58, alignment: .trailing)
-        }
+        Text(text)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(.black.opacity(0.66), in: Capsule(style: .continuous))
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
     }
 }
 
@@ -455,16 +358,16 @@ private extension PlayerHUDOverlay {
     func content(_ value: GestureHUD) -> some View {
         switch value {
         case let .seek(delta, target, total):
-            VStack(spacing: 5) {
+            VStack(spacing: 4) {
                 Text(deltaText(delta))
-                    .font(.system(size: 30, weight: .semibold, design: .rounded))
+                    .font(.system(size: 28, weight: .semibold, design: .rounded).monospacedDigit())
                 Text("\(Format.duration(target)) / \(Format.duration(total))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.7))
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.72))
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 24)
-            .padding(.vertical, 14)
+            .padding(.vertical, 13)
             .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
         case let .volume(level):
@@ -482,7 +385,7 @@ private extension PlayerHUDOverlay {
             )
 
         case let .speed(rate):
-            pill(icon: "forward.fill", text: rateText(rate) + " 倍速播放中")
+            pill(icon: "forward.fill", text: rateText(rate) + "× 加速中")
 
         case let .zoom(scale):
             pill(icon: "aspectratio", text: rateText(Float(scale)) + "×")
@@ -547,6 +450,73 @@ private extension PlayerHUDOverlay {
     }
 
     func rateText(_ rate: Float) -> String {
-        rate == rate.rounded() ? "\(Int(rate))" : String(format: "%.1f", rate)
+        rate == rate.rounded() ? "\(Int(rate))" : String(format: "%.2f", rate)
+    }
+}
+
+// MARK: - 双击涟漪
+
+/// 双击屏幕左右两侧时，那一下的视觉反馈。
+///
+/// 只放在「点的那一侧」，一条 96 pt 的圆扩散开、随即变淡 ——
+/// 抖音 / YouTube 的做法，比在正中间弹一个数字更容易看清「刚才点的是哪边」。
+struct SeekRippleOverlay: View {
+    @ObservedObject var bus: PlayerHUDBus
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                if let ripple = bus.ripple {
+                    RippleBubble(ripple: ripple)
+                        .position(
+                            x: geo.size.width * ripple.position,
+                            y: geo.size.height / 2
+                        )
+                        .id(ripple.id)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct RippleBubble: View {
+    let ripple: SeekRipple
+    @State private var expanded = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.white.opacity(expanded ? 0 : 0.18))
+                .frame(width: 96, height: 96)
+                .scaleEffect(expanded ? 1.5 : 0.7)
+
+            Circle()
+                .strokeBorder(Color.white.opacity(expanded ? 0 : 0.35), lineWidth: 1)
+                .frame(width: 96, height: 96)
+                .scaleEffect(expanded ? 1.5 : 0.7)
+
+            VStack(spacing: 4) {
+                HStack(spacing: 1) {
+                    if ripple.forward {
+                        Image(systemName: "chevron.right.2")
+                        Image(systemName: "chevron.right")
+                    } else {
+                        Image(systemName: "chevron.left")
+                        Image(systemName: "chevron.left.2")
+                    }
+                }
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white)
+
+                Text("\(ripple.seconds) 秒")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .opacity(expanded ? 0 : 1)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.55)) { expanded = true }
+        }
     }
 }

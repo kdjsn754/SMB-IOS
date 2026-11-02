@@ -9,6 +9,8 @@ struct ImagePreviewRequest: Identifiable {
 struct VideoPlayRequest: Identifiable {
     let id = UUID()
     let item: FileItem
+    /// 同目录的视频（按目录页当前排序）。播放页用它做「上一个 / 下一个」。
+    var playlist: [FileItem] = []
 }
 
 enum BrowserOverlay: Identifiable {

@@ -137,7 +137,8 @@ struct BrowserView: View {
                 VideoPlayerView(
                     item: request.item,
                     serverID: server.id,
-                    connection: app.connection(for: server)
+                    connection: app.connection(for: server),
+                    playlist: request.playlist
                 )
             }
         }
@@ -398,7 +399,9 @@ struct BrowserView: View {
             guard let index = images.firstIndex(where: { $0.id == item.id }) else { return }
             overlay = .images(ImagePreviewRequest(items: images, startIndex: index))
         case .video:
-            overlay = .video(VideoPlayRequest(item: item))
+            // 同目录的视频按当前排序带进去，播放页里可以「上一个 / 下一个」连着看
+            let videos = visibleItems.filter { $0.kind == .video }
+            overlay = .video(VideoPlayRequest(item: item, playlist: videos))
         case .folder, .other:
             break
         }

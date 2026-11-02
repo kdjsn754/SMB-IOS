@@ -8,7 +8,7 @@ import UIKit
 // MARK: - 画面填充方式
 
 /// 画面怎么铺在屏幕上。SMB 上的片子比例很杂（4:3、2.35:1、竖拍），
-/// 默认「适应」会留黑边，有些用户更想要「填满」——给一个开关，别让人去改文件。
+/// 默认「适应」会留黑边，有些用户更想要「填满」——给一个选择，别让人去改文件。
 enum VideoFit: String, CaseIterable, Identifiable {
     case aspect
     case fill
@@ -21,6 +21,14 @@ enum VideoFit: String, CaseIterable, Identifiable {
         case .aspect: return "适应屏幕"
         case .fill: return "填满屏幕"
         case .stretch: return "拉伸铺满"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .aspect: return "完整显示画面，多出来的地方留黑边"
+        case .fill: return "按屏幕裁掉多余部分，不留黑边"
+        case .stretch: return "把画面硬拉到屏幕比例，会变形"
         }
     }
 
@@ -37,14 +45,6 @@ enum VideoFit: String, CaseIterable, Identifiable {
         case .aspect: return .resizeAspect
         case .fill: return .resizeAspectFill
         case .stretch: return .resize
-        }
-    }
-
-    var next: VideoFit {
-        switch self {
-        case .aspect: return .fill
-        case .fill: return .stretch
-        case .stretch: return .aspect
         }
     }
 }
@@ -64,8 +64,10 @@ final class PlaybackProgress: ObservableObject {
     @Published fileprivate(set) var duration: Double = 0
     @Published fileprivate(set) var scrubTime: Double?
     @Published fileprivate(set) var isSeeking = false
-    /// 等待数据（seek 到未缓冲位置、或网络跟不上）：进度条上显示一个小转圈
+    /// 等待数据（seek 到未缓冲位置、或网络跟不上）：中间显示转圈
     @Published fileprivate(set) var isBuffering = false
+    /// 已缓冲到的秒数（进度条上那段浅色轨道）
+    @Published fileprivate(set) var buffered: Double = 0
 
     var isScrubbing: Bool { scrubTime != nil }
 
@@ -101,6 +103,11 @@ final class PlaybackProgress: ObservableObject {
         if isBuffering != value { isBuffering = value }
     }
 
+    fileprivate func setBuffered(_ value: Double) {
+        guard value.isFinite else { return }
+        if abs(value - buffered) > 1 { buffered = max(0, value) }
+    }
+
     /// 换片前清干净：否则上一部片的时长会短暂留在进度条上，滑块位置也是旧的
     fileprivate func reset() {
         currentTime = 0
@@ -108,7 +115,18 @@ final class PlaybackProgress: ObservableObject {
         scrubTime = nil
         isSeeking = false
         isBuffering = false
+        buffered = 0
     }
+}
+
+// MARK: - 字幕 / 音轨
+
+/// 一条可选轨道。`AVMediaSelectionOption` 不能直接进 `@Published` 数组
+/// （不 Equatable、也不稳定），这里只留展示需要的东西，选择时再按 id 映射回去。
+struct MediaTrack: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let detail: String?
 }
 
 // MARK: - 播放模型
@@ -125,24 +143,42 @@ final class VideoPlaybackModel: ObservableObject {
     /// 视频画面尺寸（已按旋转元数据摆正，宽 > 高就是横片）。
     /// 播放页拿它决定进页面时自动转横屏还是竖屏。
     @Published private(set) var videoSize: CGSize = .zero
+    @Published private(set) var playbackRate: Float = 1
+    @Published private(set) var fit: VideoFit = .aspect
+    @Published private(set) var isMuted = false
+    /// 播完了（停在最后一帧），页面显示「重播 / 下一个」
+    @Published private(set) var didReachEnd = false
+    @Published private(set) var currentItem: FileItem?
+    @Published private(set) var canPlayNext = false
+    @Published private(set) var canPlayPrevious = false
+    /// 进页面时从上次位置续播的提示，页面弹一次 toast 后清掉
+    @Published var resumeHint: String?
+    @Published private(set) var isLooping = false
+    @Published private(set) var sleepDeadline: Date?
+
+    @Published private(set) var subtitles: [MediaTrack] = []
+    @Published private(set) var audioTracks: [MediaTrack] = []
+    @Published private(set) var selectedSubtitle: String?
+    @Published private(set) var selectedAudio: String?
+
     /// 系统输出音量（0…1）。真正改声音的是 `SystemVolume`，这里只是记着状态。
     ///
     /// **故意不是 `@Published`**：拖音量时它每帧都在变，一发布就会让整个播放页重算
     /// （含手势层），拖动立刻发涩。界面要显示音量时由手势自己发 HUD，不读这里。
     private(set) var volume: Float = 1
-    /// 常速倍率（0.5×…2×）。长按加速只是「临时覆盖」，松手回到这个值。
-    @Published private(set) var playbackRate: Float = 1
-    @Published private(set) var fit: VideoFit = .aspect
-    @Published private(set) var isMuted = false
 
     private static let volumeKey = "settings.player.volume"
     private static let fitKey = "settings.player.fit"
+    private static let rateKey = "settings.player.rate"
+    private static let loopKey = "settings.player.loop"
 
     private var currentAsset: AVURLAsset?
     private var statusCancellable: AnyCancellable?
     private var sizeCancellable: AnyCancellable?
     private var endObserver: NSObjectProtocol?
     private var timeObserver: Any?
+    private var sleepTask: Task<Void, Never>?
+
     /// 长按加速前的播放状态，松开后要还原
     private var wasPlayingBeforeHold = false
     /// 长按加速进行中：这期间不许倍速按钮改 `rate`，否则按一下就把加速存下来了
@@ -150,10 +186,25 @@ final class VideoPlaybackModel: ObservableObject {
     /// seek 代号：只让最后一次 seek 的回调生效（连续 seek 会互相取消）
     private var seekToken = 0
 
+    private var serverID: UUID?
+    private var connection: SMBConnection?
+    private var playlist: [FileItem] = []
+    /// 元数据就绪后再跳：还没 ready 时 seek 有时会被丢掉
+    private var pendingResume: Double?
+    private var lastResumeSave: Date = .distantPast
+
+    private var subtitleGroup: AVMediaSelectionGroup?
+    private var audioGroup: AVMediaSelectionGroup?
+    private var subtitleOptions: [String: AVMediaSelectionOption] = [:]
+    private var audioOptions: [String: AVMediaSelectionOption] = [:]
+
     init() {
         let stored = UserDefaults.standard.object(forKey: Self.volumeKey) as? Double
         volume = Float(min(max(stored ?? 1, 0), 1))
         fit = VideoFit(rawValue: UserDefaults.standard.string(forKey: Self.fitKey) ?? "") ?? .aspect
+        let storedRate = UserDefaults.standard.object(forKey: Self.rateKey) as? Double
+        playbackRate = Float(min(max(storedRate ?? 1, 0.25), 3))
+        isLooping = UserDefaults.standard.bool(forKey: Self.loopKey)
         // App 内音量固定拉满：音量统一交给系统输出音量（见 setVolume），
         // 两边都调的话只会互相打折。
         player.volume = 1
@@ -164,19 +215,55 @@ final class VideoPlaybackModel: ObservableObject {
             forName: .AVPlayerItemDidPlayToEndTime,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.isPlaying = false
+                guard let self,
+                      let ended = note.object as? AVPlayerItem,
+                      ended === self.player.currentItem
+                else { return }
+                self.handleReachEnd()
             }
         }
     }
 
-    func start(item: FileItem, serverID: UUID, connection: SMBConnection) async {
+    // MARK: - 打开
+
+    func start(
+        item: FileItem,
+        serverID: UUID,
+        connection: SMBConnection,
+        playlist: [FileItem] = []
+    ) async {
+        self.serverID = serverID
+        self.connection = connection
+        self.playlist = playlist.isEmpty ? [item] : playlist
         configureAudioSession()
         // 不使用 AVKit 的播放器，也绝不注册「正在播放」信息，
         // 否则系统会在灵动岛弹一块媒体胶囊（用户明确要求去掉）。
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        await open(item: item)
+    }
+
+    /// 换到列表里的另一集：不退出播放页，直接换 `AVPlayerItem`。
+    func playNext() async {
+        guard let index = playlistIndex, index + 1 < playlist.count else { return }
+        await open(item: playlist[index + 1])
+    }
+
+    func playPrevious() async {
+        guard let index = playlistIndex, index > 0 else { return }
+        await open(item: playlist[index - 1])
+    }
+
+    private var playlistIndex: Int? {
+        guard let currentItem else { return nil }
+        return playlist.firstIndex(where: { $0.path == currentItem.path })
+    }
+
+    private func open(item: FileItem) async {
+        guard let connection else { return }
+        player.pause()
+        isPlaying = false
 
         var size = item.size
         if size <= 0 {
@@ -185,6 +272,12 @@ final class VideoPlaybackModel: ObservableObject {
         guard size > 0 else {
             errorMessage = "无法获取视频大小，文件可能为空或没有读取权限。"
             return
+        }
+
+        errorMessage = nil
+        if let previous = currentAsset {
+            MediaAssetFactory.shared.release(previous)
+            currentAsset = nil
         }
 
         let asset = MediaAssetFactory.shared.makeAsset(
@@ -197,15 +290,29 @@ final class VideoPlaybackModel: ObservableObject {
 
         let playerItem = AVPlayerItem(asset: asset)
         playerItem.preferredForwardBufferDuration = 5
-        observe(playerItem)
 
         resetPlaybackState()
+        currentItem = item
+        updateNeighbours()
+
+        // 续播：元数据就绪后再跳（见 status 回调里的 `pendingResume`）
+        if let position = PlaybackMemory.shared.position(for: resumeKey(for: item)) {
+            pendingResume = position
+            resumeHint = "已从 \(Format.duration(position)) 继续播放"
+        } else {
+            pendingResume = nil
+            resumeHint = nil
+        }
+
+        observe(playerItem)
         player.replaceCurrentItem(with: playerItem)
         applyMute()
+        player.defaultRate = playbackRate
         player.play()
         isPlaying = true
     }
 
+    /// 下载到本地再播：远端流因为容器/码率播不动时的兜底
     func downloadAndPlay(item: FileItem, serverID: UUID, connection: SMBConnection) async {
         guard !isDownloading else { return }
         isDownloading = true
@@ -225,6 +332,8 @@ final class VideoPlaybackModel: ObservableObject {
             let localItem = AVPlayerItem(url: url)
             observe(localItem)
             resetPlaybackState()
+            currentItem = item
+            updateNeighbours()
             player.replaceCurrentItem(with: localItem)
             applyMute()
             player.play()
@@ -238,17 +347,41 @@ final class VideoPlaybackModel: ObservableObject {
         isDownloading = false
     }
 
+    // MARK: - 播放 / 暂停
+
     func togglePlay() {
         if isPlaying {
-            player.pause()
-            isPlaying = false
+            pause()
         } else {
             // 播到最后再点播放就从头来
             if progress.duration > 0, progress.currentTime >= progress.duration - 0.3 {
                 seek(to: 0, tolerance: 0.1)
             }
+            if didReachEnd { seek(to: 0, tolerance: 0.1) }
+            didReachEnd = false
             player.play()
             isPlaying = true
+        }
+    }
+
+    func pause() {
+        player.pause()
+        isPlaying = false
+        saveResume(force: true)
+    }
+
+    /// 播完那一刻：循环就重播，否则停在最后一帧等用户选「重播 / 下一个」
+    private func handleReachEnd() {
+        isPlaying = false
+        if isLooping {
+            seek(to: 0, tolerance: 0.1)
+            player.play()
+            isPlaying = true
+            return
+        }
+        didReachEnd = true
+        if let currentItem {
+            PlaybackMemory.shared.clear(for: resumeKey(for: currentItem))
         }
     }
 
@@ -260,6 +393,16 @@ final class VideoPlaybackModel: ObservableObject {
         progress.reset()
         // 换片时先清尺寸：否则上一部的横竖判断会留在 `videoSize` 上
         videoSize = .zero
+        didReachEnd = false
+        subtitles = []
+        audioTracks = []
+        selectedSubtitle = nil
+        selectedAudio = nil
+        subtitleGroup = nil
+        audioGroup = nil
+        subtitleOptions = [:]
+        audioOptions = [:]
+        lastResumeSave = .distantPast
     }
 
     /// 手指按下进度条（或开始横向拖画面）：记下起点，之后界面只认 `scrubTime`。
@@ -304,6 +447,7 @@ final class VideoPlaybackModel: ObservableObject {
         progress.setSeeking(true)
         // 先把显示推到位：否则松手瞬间界面会回到旧位置，等 seek 完成才跳过来
         progress.setCurrentTime(target)
+        didReachEnd = false
 
         let time = CMTime(seconds: target, preferredTimescale: 600)
         let tol = CMTime(seconds: max(0, tolerance), preferredTimescale: 600)
@@ -362,11 +506,12 @@ final class VideoPlaybackModel: ObservableObject {
     /// `rate` 只影响「此刻正在播」的那一次，所以两个都要设。
     /// 长按加速期间不碰 `rate`：那时 2× 是临时的，改了就变成长期倍速了。
     func setPlaybackRate(_ value: Float) {
-        let clamped = min(max(value, 0.5), 2)
+        let clamped = min(max(value, 0.25), 3)
         guard abs(clamped - playbackRate) > 0.001 else { return }
         playbackRate = clamped
+        UserDefaults.standard.set(Double(clamped), forKey: Self.rateKey)
         player.defaultRate = clamped
-        if isPlaying, !holdActive { player.rate = clamped }
+        if isPlaying, !holdActive, !didReachEnd { player.rate = clamped }
     }
 
     /// 长按加速用：按住时把速率调高，松手还原。
@@ -393,23 +538,127 @@ final class VideoPlaybackModel: ObservableObject {
         wasPlayingBeforeHold = false
     }
 
-    func cycleFit() {
-        setFit(fit.next)
-    }
-
     func setFit(_ value: VideoFit) {
         guard value != fit else { return }
         fit = value
         UserDefaults.standard.set(value.rawValue, forKey: Self.fitKey)
     }
 
+    func toggleLoop() {
+        isLooping.toggle()
+        UserDefaults.standard.set(isLooping, forKey: Self.loopKey)
+    }
+
+    // MARK: - 字幕 / 音轨
+
+    func selectSubtitle(_ id: String?) {
+        guard let group = subtitleGroup, let item = player.currentItem else { return }
+        let option = id.flatMap { subtitleOptions[$0] }
+        item.select(option, in: group)
+        selectedSubtitle = option == nil ? nil : id
+    }
+
+    func selectAudio(_ id: String?) {
+        guard let group = audioGroup, let item = player.currentItem else { return }
+        let option = id.flatMap { audioOptions[$0] }
+        item.select(option, in: group)
+        selectedAudio = id
+    }
+
+    private func loadTracks(for item: AVPlayerItem) {
+        let asset = item.asset
+
+        if let group = asset.mediaSelectionGroup(for: .legible) {
+            subtitleGroup = group
+            var list: [MediaTrack] = []
+            var map: [String: AVMediaSelectionOption] = [:]
+            for (index, option) in group.options.enumerated() {
+                let id = "s\(index)"
+                list.append(
+                    MediaTrack(
+                        id: id,
+                        name: option.displayName,
+                        detail: nil
+                    )
+                )
+                map[id] = option
+            }
+            subtitleOptions = map
+            subtitles = list
+            if let current = item.currentMediaSelection.selectedMediaOption(in: group) {
+                selectedSubtitle = list.first(where: { map[$0.id] === current })?.id
+            } else {
+                selectedSubtitle = nil
+            }
+        } else {
+            subtitleGroup = nil
+            subtitleOptions = [:]
+            subtitles = []
+            selectedSubtitle = nil
+        }
+
+        if let group = asset.mediaSelectionGroup(for: .audible) {
+            audioGroup = group
+            var list: [MediaTrack] = []
+            var map: [String: AVMediaSelectionOption] = [:]
+            for (index, option) in group.options.enumerated() {
+                let id = "a\(index)"
+                list.append(
+                    MediaTrack(
+                        id: id,
+                        name: option.displayName,
+                        detail: nil
+                    )
+                )
+                map[id] = option
+            }
+            audioOptions = map
+            audioTracks = list
+            selectedAudio = item.currentMediaSelection
+                .selectedMediaOption(in: group)
+                .flatMap { current in list.first(where: { map[$0.id] === current })?.id }
+        } else {
+            audioGroup = nil
+            audioOptions = [:]
+            audioTracks = []
+            selectedAudio = nil
+        }
+    }
+
+    // MARK: - 定时关闭
+
+    /// 到点自动暂停。`minutes == nil` 关掉。
+    func setSleepTimer(minutes: Int?) {
+        sleepTask?.cancel()
+        sleepTask = nil
+        guard let minutes else {
+            sleepDeadline = nil
+            return
+        }
+        sleepDeadline = Date().addingTimeInterval(Double(minutes) * 60)
+        sleepTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Double(minutes) * 60 * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.pause()
+            self.sleepDeadline = nil
+            self.sleepTask = nil
+        }
+    }
+
+    // MARK: - 收尾
+
     func stop() {
+        saveResume(force: true)
+        sleepTask?.cancel()
+        sleepTask = nil
+        sleepDeadline = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         statusCancellable = nil
         sizeCancellable = nil
         videoSize = .zero
         isPlaying = false
+        didReachEnd = false
         progress.setScrubTime(nil)
         progress.setSeeking(false)
         progress.setBuffering(false)
@@ -431,6 +680,24 @@ final class VideoPlaybackModel: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
+    // MARK: - 续播
+
+    private func resumeKey(for item: FileItem) -> String {
+        "\(serverID?.uuidString ?? "-")|\(item.path)"
+    }
+
+    /// 每 5 秒落一次盘：写得比这勤会让 `UserDefaults` 一直在写文件，
+    /// 退到后台被系统杀掉时最多丢 5 秒，可接受。
+    private func saveResume(force: Bool) {
+        guard let currentItem, !didReachEnd else { return }
+        let time = progress.currentTime
+        guard time >= 5, time.isFinite else { return }
+        let now = Date()
+        guard force || now.timeIntervalSince(lastResumeSave) > 5 else { return }
+        lastResumeSave = now
+        PlaybackMemory.shared.set(time, duration: progress.duration, for: resumeKey(for: currentItem))
+    }
+
     // MARK: - 观察
 
     private func installTimeObserver() {
@@ -447,13 +714,20 @@ final class VideoPlaybackModel: ObservableObject {
                 // 拖动中 / seek 在途：绝不覆盖界面，否则滑块会被播放器时间拽回旧位置
                 guard !self.progress.isScrubbing, !self.progress.isSeeking else { return }
                 self.progress.setCurrentTime(time.seconds)
-                if let seconds = self.player.currentItem?.duration.seconds, seconds.isFinite, seconds > 0 {
-                    self.progress.setDuration(seconds)
+                if let item = self.player.currentItem {
+                    let seconds = item.duration.seconds
+                    if seconds.isFinite, seconds > 0 {
+                        self.progress.setDuration(seconds)
+                    }
+                    if let range = item.loadedTimeRanges.last?.timeRangeValue {
+                        self.progress.setBuffered(range.start.seconds + range.duration.seconds)
+                    }
                 }
                 // 只在真的变化时赋值：`@Published` 每次 set 都会让整个播放页重算。
                 // 缓冲中也算「在播」，否则 seek 到未缓冲位置时按钮会闪成播放图标。
                 let playing = status == .playing || status == .waitingToPlayAtSpecifiedRate
                 if playing != self.isPlaying { self.isPlaying = playing }
+                self.saveResume(force: false)
             }
         }
     }
@@ -462,13 +736,19 @@ final class VideoPlaybackModel: ObservableObject {
         statusCancellable = item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak item] status in
-                guard let self else { return }
-                // 兜底：有些流 ready 那一刻 KVO 还没把尺寸推过来，这里补读一次
-                if status == .readyToPlay, let size = item?.presentationSize {
-                    self.adopt(size)
+                guard let self, let item else { return }
+                if status == .readyToPlay {
+                    // 兜底：有些流 ready 那一刻 KVO 还没把尺寸推过来，这里补读一次
+                    self.adopt(item.presentationSize)
+                    // 元数据已经解析完，这里读轨道组不会再触发远端 I/O
+                    self.loadTracks(for: item)
+                    if let pending = self.pendingResume {
+                        self.pendingResume = nil
+                        self.seek(to: pending, tolerance: 1.0)
+                    }
                 }
                 guard status == .failed else { return }
-                let reason = item?.error?.localizedDescription ?? "编码格式不受支持或网络中断"
+                let reason = item.error?.localizedDescription ?? "编码格式不受支持或网络中断"
                 // 失败时把播放键还原成「播放」，否则它会一直停在暂停图标上
                 self.isPlaying = false
                 self.errorMessage = "无法播放：\(reason)"
@@ -488,6 +768,16 @@ final class VideoPlaybackModel: ObservableObject {
     private func adopt(_ size: CGSize) {
         guard size.width > 0, size.height > 0, size != videoSize else { return }
         videoSize = size
+    }
+
+    private func updateNeighbours() {
+        guard let index = playlistIndex else {
+            canPlayNext = false
+            canPlayPrevious = false
+            return
+        }
+        canPlayPrevious = index > 0
+        canPlayNext = index + 1 < playlist.count
     }
 
     private func configureAudioSession() {

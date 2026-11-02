@@ -16,12 +16,24 @@ enum GestureHUD: Equatable {
     case playPause(Bool)
 }
 
+/// 双击左右两侧的反馈：一段涟漪 + 箭头 + 秒数。
+/// 单独一条，因为它是一次性动画，不该占据 `GestureHUD` 的「当前值」。
+struct SeekRipple: Equatable, Identifiable {
+    let id = UUID()
+    let forward: Bool
+    let seconds: Int
+    /// 0…1，涟漪出现在屏幕的哪个横向位置（左三分之一 / 右三分之一）
+    let position: CGFloat
+}
+
 /// HUD 单独一条总线：拖动时它每帧都在变，挂到页面上会把整页带着重算。
 @MainActor
 final class PlayerHUDBus: ObservableObject {
     @Published private(set) var value: GestureHUD?
+    @Published private(set) var ripple: SeekRipple?
 
     private var hideTask: Task<Void, Never>?
+    private var rippleTask: Task<Void, Never>?
 
     /// 显示一条反馈。数值型（音量/亮度/进度）不自动隐藏，由手势结束时收。
     func show(_ value: GestureHUD, autoHideAfter seconds: Double? = nil) {
@@ -29,6 +41,17 @@ final class PlayerHUDBus: ObservableObject {
         hideTask = nil
         if self.value != value { self.value = value }
         if let seconds { hideLater(seconds) }
+    }
+
+    func showRipple(_ ripple: SeekRipple) {
+        rippleTask?.cancel()
+        // 换一个 id，视图才能重新播动画
+        self.ripple = ripple
+        rippleTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard !Task.isCancelled else { return }
+            self?.ripple = nil
+        }
     }
 
     func hideLater(_ seconds: Double) {
@@ -74,9 +97,9 @@ enum PlayerGestureOutcome {
 ///    页面在拖动过程中一次都不重算；只有 `hud` 和 `visual` 两个小对象在动。
 /// 2. **按下即记录基准**（`anchorTime` / `startVolume` / `startBrightness`），
 ///    拖动过程中播放继续也不会让进度基准漂移。
-/// 3. **横向灵敏度自适应**：整屏滑动对应「总时长的一半」，但夹在 45 秒 ~ 15 分钟之间。
+/// 3. **横向灵敏度自适应**：整屏滑动对应「总时长的一半多」，但夹在 60 秒 ~ 20 分钟之间。
 ///    整屏 = 全长的映射在 2 小时的片子上一点就飞，在 1 分钟的片子上又完全拖不动。
-/// 4. **纵向整屏 = 满量程**。旧版是 0.6 屏高走完 0~100%，稍动就爆音/全黑，这是「手感差」的另一个来源。
+/// 4. **纵向整屏 = 满量程**。旧版是 0.6 屏高走完 0~100%，稍动就爆音/全黑。
 @MainActor
 final class PlayerGestureEngine {
     let hud = PlayerHUDBus()
@@ -147,8 +170,8 @@ final class PlayerGestureEngine {
         let dy = value.translation.height
 
         if mode == .idle {
-            // 阈值放到 6 pt：再大一点就会有「明明划了却没反应」的感觉
-            guard max(abs(dx), abs(dy)) > 6 else { return }
+            // 阈值 8 pt：再大一点就会有「明明划了却没反应」的感觉
+            guard max(abs(dx), abs(dy)) > 8 else { return }
             holdTask?.cancel()
             moved = true
 
@@ -177,7 +200,7 @@ final class PlayerGestureEngine {
         case .seek:
             let duration = model?.progress.duration ?? 0
             guard duration > 0, size.width > 0 else { return }
-            let span = min(max(duration * 0.6, 45), 900)
+            let span = min(max(duration * 0.55, 60), 1200)
             let delta = Double(dx / size.width) * span
             let target = min(max(anchorTime + delta, 0), duration)
             // 只写本地显示值，一次都不碰播放器（松手才 seek）
@@ -231,7 +254,7 @@ final class PlayerGestureEngine {
             switch mode {
             case .seek:
                 model?.commitScrub()
-                hud.hideLater(0.7)
+                hud.hideLater(0.5)
             case .volume, .brightness:
                 hud.hideLater(0.45)
             default:
@@ -355,6 +378,7 @@ final class PlayerGestureEngine {
         holding = true
         model.beginHold(rate: settings.longPress.rate)
         hud.show(.speed(settings.longPress.rate))
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     private func endHold() {
@@ -366,6 +390,7 @@ final class PlayerGestureEngine {
 
     private func handleDoubleTap(at point: CGPoint, in size: CGSize) {
         guard settings.isEnabled, let model else { return }
+        let ratio = size.width > 0 ? max(0, min(1, point.x / size.width)) : 0.5
 
         switch settings.doubleTap {
         case .none:
@@ -374,15 +399,14 @@ final class PlayerGestureEngine {
             model.togglePlay()
             hud.show(.playPause(model.isPlaying), autoHideAfter: 0.6)
         case .forward:
-            jump(by: settings.seekStep)
+            jump(by: settings.seekStep, position: ratio)
         case .backward:
-            jump(by: -settings.seekStep)
+            jump(by: -settings.seekStep, position: ratio)
         case .sides:
-            let ratio = size.width > 0 ? point.x / size.width : 0.5
             if ratio < 1.0 / 3.0 {
-                jump(by: -settings.seekStep)
+                jump(by: -settings.seekStep, position: 0.16)
             } else if ratio > 2.0 / 3.0 {
-                jump(by: settings.seekStep)
+                jump(by: settings.seekStep, position: 0.84)
             } else {
                 model.togglePlay()
                 hud.show(.playPause(model.isPlaying), autoHideAfter: 0.6)
@@ -390,7 +414,7 @@ final class PlayerGestureEngine {
         }
     }
 
-    private func jump(by delta: Double) {
+    private func jump(by delta: Double, position: CGFloat) {
         guard let model else { return }
         let duration = model.progress.duration
         guard duration > 0 else { return }
@@ -402,6 +426,10 @@ final class PlayerGestureEngine {
             .seek(delta: target - from, target: target, total: duration),
             autoHideAfter: 0.7
         )
+        hud.showRipple(
+            SeekRipple(forward: delta >= 0, seconds: Int(abs(delta).rounded()), position: position)
+        )
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     private func quantize(_ value: Double) -> Double {
