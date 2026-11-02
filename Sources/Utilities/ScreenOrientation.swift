@@ -29,6 +29,9 @@ enum OrientationGate {
     static var mask: UIInterfaceOrientationMask = .allButUpsideDown
     /// 当前被锁住的形态；nil = 没锁（播放页之外）
     static var locked: ScreenMode?
+    /// 锁的代次。每次 `lock()` 自增，用来作废「延迟放开」的旧任务：
+    /// 关掉播放页又立刻点开下一个视频时，上一个任务不许把新的锁清掉。
+    static var generation = 0
 }
 
 /// 播放页的横竖屏切换。
@@ -41,6 +44,7 @@ enum ScreenOrientationController {
 
     /// 锁到指定形态并转过去
     static func lock(_ mode: ScreenMode) {
+        OrientationGate.generation &+= 1
         OrientationGate.mask = mode.mask
         OrientationGate.locked = mode
 
@@ -53,14 +57,31 @@ enum ScreenOrientationController {
         }
     }
 
-    /// 离开播放页：放开方向，按机身当前的姿态落回去（不是硬掰成竖屏）。
-    static func release() {
+    /// 离开播放页：先转回**进播放页之前**的形态，再放开方向锁。
+    ///
+    /// 为什么不能「只放开锁、按机身姿态落回去」：横屏看完直接退出时，人会横着
+    /// 拿手机，于是浏览器停在那个人躺着的横屏里（1.3.38 的行为，用户明确否掉）。
+    /// 主流播放器也是这个逻辑——YouTube / Netflix 退出全屏就是回到进入前的形态，
+    /// 视频放完自动转回竖屏。
+    ///
+    /// 顺序不能反：先 `lock(mode)` 把 mask 收窄成目标形态，几何请求才会被接受；
+    /// 转完再把 mask 放开。放开时当前形态仍在支持列表里，系统不会自己再转一次，
+    /// 之后只有用户真的转动手机才会跟着转。
+    static func restore(to mode: ScreenMode) {
         guard OrientationGate.locked != nil else { return }
-        OrientationGate.mask = .allButUpsideDown
-        OrientationGate.locked = nil
+        lock(mode)
+        let token = OrientationGate.generation
 
-        guard let scene = activeScene() else { return }
-        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        Task { @MainActor in
+            // 等几何动画走完再放开，避免旋转到一半 mask 变宽被系统重算
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            // 期间若又进了播放页（连续点开），别把新的锁清掉
+            guard token == OrientationGate.generation else { return }
+            OrientationGate.mask = .allButUpsideDown
+            OrientationGate.locked = nil
+            activeScene()?.keyWindow?.rootViewController?
+                .setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
     }
 
     /// 当前界面方向。读 `windowScene.interfaceOrientation`，不要读 `UIDevice` 的——

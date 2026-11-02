@@ -82,6 +82,8 @@ final class VideoPlaybackModel: ObservableObject {
     @Published private(set) var videoSize: CGSize = .zero
     /// 播放器音量（0…1），右上角音量面板与上下拖动手势共用同一份，退出重进也记得
     @Published fileprivate(set) var volume: Float = 1
+    /// 常速倍率（0.5×…2×）。长按加速只是「临时覆盖」，松手回到这个值。
+    @Published fileprivate(set) var playbackRate: Float = 1
 
     private static let volumeKey = "settings.player.volume"
 
@@ -92,6 +94,8 @@ final class VideoPlaybackModel: ObservableObject {
     private var timeObserver: Any?
     /// 长按加速前的播放状态，松开后要还原
     private var wasPlayingBeforeHold = false
+    /// 长按加速进行中：这期间不许倍速按钮改 `rate`，否则按一下就把加速存下来了
+    private var holdActive = false
     /// seek 代号：只让最后一次 seek 的回调生效（连续 seek 会互相取消）
     private var seekToken = 0
 
@@ -276,10 +280,24 @@ final class VideoPlaybackModel: ObservableObject {
         UserDefaults.standard.set(Double(clamped), forKey: Self.volumeKey)
     }
 
+    /// 倍速。
+    ///
+    /// `defaultRate` 决定之后每次 `play()` 用哪个速率（seek 完自动续播、从头重播都算），
+    /// `rate` 只影响「此刻正在播」的那一次，所以两个都要设。
+    /// 长按加速期间不碰 `rate`：那时 2× 是临时的，改了就变成长期倍速了。
+    func setPlaybackRate(_ value: Float) {
+        let clamped = min(max(value, 0.5), 2)
+        guard abs(clamped - playbackRate) > 0.001 else { return }
+        playbackRate = clamped
+        player.defaultRate = clamped
+        if isPlaying, !holdActive { player.rate = clamped }
+    }
+
     /// 长按加速用：按住时把速率调高，松手还原。
     /// 按住前是暂停的话，松手后回到暂停（和主流播放器一致）。
     func beginHold(rate: Float) {
         guard rate > 1, player.currentItem != nil else { return }
+        holdActive = true
         wasPlayingBeforeHold = player.timeControlStatus == .playing || player.rate > 0
         player.rate = rate
         isPlaying = true
@@ -287,8 +305,10 @@ final class VideoPlaybackModel: ObservableObject {
 
     func endHold() {
         guard player.currentItem != nil else { return }
+        holdActive = false
         if wasPlayingBeforeHold {
-            player.rate = 1
+            // 回到用户的常速设置，而不是硬写 1（可能是 1.5× 在看）
+            player.rate = playbackRate
             isPlaying = true
         } else {
             player.pause()
@@ -483,6 +503,9 @@ struct VideoPlayerView: View {
     /// 当前是不是横屏。跟着真实布局尺寸算，旋转完成后由 SwiftUI 自己回调过来，
     /// 比监听 `UIDevice.orientationDidChangeNotification` 准（那个在锁屏/分屏下会骗人）。
     @State private var isLandscape = false
+    /// 进播放页那一刻的形态。退出时转回它——「回到手机原本的状态」，
+    /// 而不是「按你躺着的姿态决定」。
+    @State private var entryMode: ScreenMode = ScreenOrientationController.current
     /// 用户手动切过之后就不再按视频比例自动转，尊重手动选择
     @State private var manualMode: ScreenMode?
     /// 自动转只做一次，否则回调重入会把用户后来的手动选择抢回去
@@ -546,14 +569,9 @@ struct VideoPlayerView: View {
                 PlayerHUDOverlay(state: hud, duration: model.progress.duration)
 
                 if chromeVisible {
-                    // 顶部栏（关闭 / 标题 / ⋯）和底部控件一起显隐，播放 4 秒后一起收起
-                    VStack(spacing: 0) {
-                        topBar
-                        Spacer(minLength: 0)
-                    }
-                    .transition(.opacity)
-
-                    controls
+                    // 顶部栏（关闭 / 标题 / 切方向 / ⋯）和底部控件是一整层，
+                    // 播放 4 秒后一起收起
+                    chromeLayer
                         .transition(.opacity)
                 }
 
@@ -617,8 +635,9 @@ struct VideoPlayerView: View {
             holdStartTask?.cancel()
             singleTapTask?.cancel()
             model.stop()
-            // 放开方向锁，交给系统按机身姿态落回去（不是硬掰成竖屏）
-            ScreenOrientationController.release()
+            // 兜底：正常关闭走 `close()`，那里已经把方向转回去了；
+            // 这里是防止有别的退出路径（比如被上层直接 remove）时锁留在横屏。
+            ScreenOrientationController.restore(to: entryMode)
         }
     }
 
@@ -639,6 +658,19 @@ struct VideoPlayerView: View {
         manualMode = target
         ScreenOrientationController.lock(target)
         scheduleHide()
+    }
+
+    /// 关闭播放页：先把方向转回「进页面之前」的形态，再退出。
+    ///
+    /// 反过来（先 dismiss 再转）的话，退出去那一帧下面还是横着的浏览器，
+    /// 随后再被掰回竖屏，看起来就是「页面先横着闪一下」。
+    private func close() {
+        ScreenOrientationController.restore(to: entryMode)
+        Task {
+            // 等几何动画（约 0.25 s）走完再退
+            try? await Task.sleep(nanoseconds: 260_000_000)
+            dismiss()
+        }
     }
 
     /// 菜单里「手势说明」显示的内容，按当前设置动态生成，避免说明和实际不一致
@@ -1021,122 +1053,174 @@ struct VideoPlayerView: View {
 
     // MARK: - 控件
 
-    /// 顶部栏：自己做，跟着 `chromeVisible` 一起淡出（系统导航栏不参与自动隐藏）
-    private var topBar: some View {
-        HStack(spacing: 12) {
-            // 和右边 ⋯ 完全同一套外观：白图标 + 36pt 黑色圆底（1.3.31）
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(.black.opacity(0.45), in: Circle())
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("关闭")
+    /// 控件整层：上下压暗 + 顶部栏 + 中央播放键 + 底部控件。
+    ///
+    /// 四层各自贴自己那一侧铺在 ZStack 里。上一版把「关闭 / 标题 / 切方向 / ⋯」
+    /// 排在一条 HStack 上，右边有两个按钮，标题就被压得偏左；现在标题单独居中。
+    private var chromeLayer: some View {
+        ZStack {
+            // 上下两条压暗，用渐变而不是整块黑条：中间画面完全不受影响。
+            // 图上叠白图标，遇到亮画面（白底 PPT、雪景）不加这层就看不见了。
+            VStack(spacing: 0) {
+                LinearGradient(
+                    colors: [.black.opacity(0.62), .black.opacity(0.22), .clear],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 150)
 
+                Spacer(minLength: 0)
+
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.28), .black.opacity(0.72)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 180)
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+
+            VStack(spacing: 0) {
+                topBar
+                Spacer(minLength: 0)
+            }
+
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                bottomBar
+            }
+
+            centerPlayButton
+        }
+    }
+
+    /// 顶部：关闭 / 标题 / 切方向 / 更多
+    private var topBar: some View {
+        ZStack {
             Text(item.name)
-                .font(.headline)
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
-                .frame(maxWidth: .infinity)
+                .truncationMode(.middle)
+                .shadow(color: .black.opacity(0.55), radius: 8, y: 1)
+                // 两边各留出两个 36pt 按钮的位置，长文件名也不会钻到按钮底下
+                .padding(.horizontal, 108)
 
-            // 手动切横竖屏。图标画的是「点下去会变成的方向」，不是当前方向。
-            Button {
-                toggleOrientation()
-            } label: {
-                Image(systemName: isLandscape ? "rectangle.portrait" : "rectangle.landscape")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(.black.opacity(0.45), in: Circle())
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isLandscape ? "切换到竖屏" : "切换到横屏")
+            HStack(spacing: 10) {
+                PlayerGlassButton(symbol: "chevron.left", label: "关闭") {
+                    close()
+                }
 
-            Menu {
-                if zoom > 1.01 {
-                    Button {
-                        setZoom(1)
-                    } label: {
-                        Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
-                    }
-                    Divider()
+                Spacer(minLength: 0)
+
+                // 图标画的是「点下去会变成的方向」，不是当前方向
+                PlayerGlassButton(
+                    symbol: isLandscape ? "rectangle.portrait" : "rectangle.landscape",
+                    label: isLandscape ? "切换到竖屏" : "切换到横屏"
+                ) {
+                    toggleOrientation()
                 }
-                Button {
-                    showGestureSettings = true
-                    scheduleHide()
-                } label: {
-                    Label("播放手势设置", systemImage: "hand.draw")
-                }
-                Button {
-                    showGestureHelp = true
-                    scheduleHide()
-                } label: {
-                    Label("手势说明", systemImage: "questionmark.circle")
-                }
-                Divider()
-                Button {
-                    Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
-                } label: {
-                    Label("下载到本地播放", systemImage: "arrow.down.circle")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(.black.opacity(0.45), in: Circle())
+
+                moreMenu
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .background(
-            LinearGradient(
-                colors: [.black.opacity(0.55), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea(edges: .top)
-        )
+        .padding(.top, 2)
+        .padding(.bottom, 14)
     }
 
-    private var controls: some View {
-        ZStack {
+    private var moreMenu: some View {
+        Menu {
             Button {
-                model.togglePlay()
+                Task { await model.downloadAndPlay(item: item, serverID: serverID, connection: connection) }
+            } label: {
+                Label("下载到本地播放", systemImage: "arrow.down.circle")
+            }
+            Divider()
+            Button {
+                showGestureSettings = true
                 scheduleHide()
             } label: {
-                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 62, height: 62)
-                    .background(.black.opacity(0.45), in: Circle())
+                Label("播放手势设置", systemImage: "hand.draw")
             }
-            .buttonStyle(.plain)
-
-            VStack {
-                Spacer()
-                // 进度条自己观察 `progress`：每 0.25 秒的时间刷新只重绘它，
-                // 不会把整页（含 AVPlayerLayer）一起重算
-                PlayerProgressBar(
-                    progress: model.progress,
-                    onScrub: { model.scrub(to: $0) },
-                    onBegin: {
-                        hideTask?.cancel()
-                        model.beginScrub()
-                    },
-                    onCommit: {
-                        model.commitScrub()
-                        scheduleHide()
-                    }
-                )
+            Button {
+                showGestureHelp = true
+                scheduleHide()
+            } label: {
+                Label("手势说明", systemImage: "questionmark.circle")
+            }
+            if zoom > 1.01 {
+                Divider()
+                Button {
+                    setZoom(1)
+                } label: {
+                    Label("还原画面缩放", systemImage: "arrow.down.right.and.arrow.up.left")
+                }
+            }
+        } label: {
+            PlayerGlassCircle {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
             }
         }
+        .accessibilityLabel("更多")
+    }
+
+    /// 中央播放键：这一块是「点一下继续看」的主要落点，
+    /// 别的区域都留给手势层（单击显隐、双击跳转、拖动调进度）。
+    private var centerPlayButton: some View {
+        Button {
+            model.togglePlay()
+            scheduleHide()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(.black.opacity(0.40))
+                    .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 0.5))
+                    .frame(width: 66, height: 66)
+
+                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
+                    .animation(.snappy(duration: 0.2), value: model.isPlaying)
+            }
+        }
+        .buttonStyle(PlayerPressStyle())
+        .accessibilityLabel(model.isPlaying ? "暂停" : "播放")
+    }
+
+    private var bottomBar: some View {
+        PlayerBottomBar(
+            progress: model.progress,
+            rate: model.playbackRate,
+            seekStep: gestures.seekStep,
+            isLandscape: isLandscape,
+            onBackward: {
+                jump(by: -gestures.seekStep)
+                scheduleHide()
+            },
+            onForward: {
+                jump(by: gestures.seekStep)
+                scheduleHide()
+            },
+            onRate: { value in
+                model.setPlaybackRate(value)
+                showHUD(.speed(value))
+                scheduleHide()
+            },
+            onBegin: {
+                hideTask?.cancel()
+                model.beginScrub()
+            },
+            onScrub: { model.scrub(to: $0) },
+            onCommit: {
+                model.commitScrub()
+                scheduleHide()
+            }
+        )
     }
 
     private func scheduleHide() {
@@ -1177,59 +1261,204 @@ struct VideoPlayerView: View {
     }
 }
 
-// MARK: - 进度条
+// MARK: - 底部控件
 
-/// 只观察 `PlaybackProgress`，拖动时每帧重算的代价被限制在这一小块里。
+/// 只观察 `PlaybackProgress`：播放中每 0.25 秒的时间刷新只重绘这一条，
+/// 不会把整页（含 `AVPlayerLayer`）带着重算。
 @MainActor
-private struct PlayerProgressBar: View {
+private struct PlayerBottomBar: View {
     @ObservedObject var progress: PlaybackProgress
-    var onScrub: (Double) -> Void
+    var rate: Float
+    var seekStep: Double
+    var isLandscape: Bool
+    var onBackward: () -> Void
+    var onForward: () -> Void
+    var onRate: (Float) -> Void
     var onBegin: () -> Void
+    var onScrub: (Double) -> Void
     var onCommit: () -> Void
 
-    var body: some View {
-        VStack(spacing: 6) {
-            // 自绘进度条：整条 26pt 都是热区，**点哪儿就跳哪儿**（系统 Slider 只认拖、点不动）
-            ScrubBar(
-                value: progress.displayTime,
-                total: progress.duration,
-                isActive: progress.isSeeking,
-                onBegin: onBegin,
-                onScrub: onScrub,
-                onCommit: onCommit
-            )
-            .frame(height: 26)
-            .disabled(progress.duration <= 0)
-            .opacity(progress.duration > 0 ? 1 : 0.5)
+    private static let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2]
 
-            HStack(spacing: 6) {
-                Text(Format.duration(progress.displayTime))
-                Text("/")
-                    .foregroundStyle(.white.opacity(0.5))
-                Text(Format.duration(progress.duration))
+    var body: some View {
+        VStack(spacing: isLandscape ? 2 : 6) {
+            // 时间夹在进度条两端：一眼看到「现在到哪 / 一共多长」，
+            // 又不用像上一版那样单独占一行还带个斜杠
+            HStack(spacing: 12) {
+                timeText(progress.displayTime)
+
+                // 自绘进度条：整条 26pt 都是热区，点哪儿就跳哪儿
+                ScrubBar(
+                    value: progress.displayTime,
+                    total: progress.duration,
+                    isActive: progress.isSeeking,
+                    onBegin: onBegin,
+                    onScrub: onScrub,
+                    onCommit: onCommit
+                )
+                .frame(height: 26)
+                .disabled(progress.duration <= 0)
+                .opacity(progress.duration > 0 ? 1 : 0.45)
+
+                timeText(progress.duration)
+            }
+
+            HStack(spacing: 10) {
+                PlayerGlassButton(
+                    symbol: backSymbol,
+                    size: 34,
+                    label: "后退 \(Int(seekStep)) 秒"
+                ) {
+                    onBackward()
+                }
+
+                PlayerGlassButton(
+                    symbol: forwardSymbol,
+                    size: 34,
+                    label: "前进 \(Int(seekStep)) 秒"
+                ) {
+                    onForward()
+                }
+
                 if progress.isBuffering {
-                    // 跳转到未缓冲位置时这里转圈：远端流要重新读一段数据，
+                    // 跳到未缓冲位置 / 网络跟不上时转圈：远端流要重新读一段数据，
                     // 不给反馈的话用户只会觉得「点了没反应」
                     ProgressView()
                         .controlSize(.mini)
                         .tint(.white)
+                        .padding(.leading, 2)
                 }
-                Spacer()
+
+                Spacer(minLength: 8)
+
+                speedMenu
             }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.white)
         }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 28)
-        .padding(.top, 10)
-        .background(
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.65)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea(edges: .bottom)
-        )
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .padding(.bottom, isLandscape ? 10 : 20)
+    }
+
+    private func timeText(_ seconds: Double) -> some View {
+        Text(Format.duration(seconds))
+            .font(.system(size: 12, weight: .medium).monospacedDigit())
+            .foregroundStyle(.white.opacity(0.85))
+            .shadow(color: .black.opacity(0.35), radius: 3, y: 0.5)
+    }
+
+    /// 图标跟着「快进跨度」走：按钮上写的数字就是实际会跳的秒数，
+    /// 设置里改成 30 秒，这里也跟着变成 30。
+    private var backSymbol: String {
+        switch Int(seekStep) {
+        case 10: return "gobackward.10"
+        case 15: return "gobackward.15"
+        case 30: return "gobackward.30"
+        default: return "gobackward"   // 5 秒没有带数字的符号
+        }
+    }
+
+    private var forwardSymbol: String {
+        switch Int(seekStep) {
+        case 10: return "goforward.10"
+        case 15: return "goforward.15"
+        case 30: return "goforward.30"
+        default: return "goforward"
+        }
+    }
+
+    private var speedMenu: some View {
+        Menu {
+            ForEach(Self.rates, id: \.self) { value in
+                Button {
+                    onRate(value)
+                } label: {
+                    if abs(rate - value) < 0.01 {
+                        Label(rateText(value), systemImage: "checkmark")
+                    } else {
+                        Text(rateText(value))
+                    }
+                }
+            }
+        } label: {
+            Text(rateText(rate))
+                .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
+                // 非 1× 时用强调色，提醒「现在不是常速」
+                .foregroundStyle(rate == 1 ? Color.white : Color.accentColor)
+                .frame(height: 34)
+                .padding(.horizontal, 13)
+                .background {
+                    Capsule(style: .continuous)
+                        .fill(.black.opacity(0.38))
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(.white.opacity(0.15), lineWidth: 0.5)
+                        )
+                }
+                .contentShape(Capsule(style: .continuous))
+        }
+        .accessibilityLabel("播放速度")
+    }
+
+    private func rateText(_ value: Float) -> String {
+        if value == value.rounded() { return "\(Int(value))×" }
+        return String(format: "%g×", Double(value))
+    }
+}
+
+// MARK: - 控件零件
+
+/// 圆形玻璃底 + 内容的容器。
+/// `Menu` 的 label 用不了 `Button` 那套，所以玻璃底单独抽一层共用。
+@MainActor
+private struct PlayerGlassCircle<Content: View>: View {
+    var size: CGFloat = 36
+    let content: Content
+
+    init(size: CGFloat = 36, @ViewBuilder content: () -> Content) {
+        self.size = size
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .frame(width: size, height: size)
+            .background {
+                Circle()
+                    .fill(.black.opacity(0.38))
+                    .overlay(Circle().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
+            }
+            .contentShape(Circle())
+    }
+}
+
+/// 播放页统一的圆形图标按钮
+@MainActor
+private struct PlayerGlassButton: View {
+    let symbol: String
+    var size: CGFloat = 36
+    var label: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            PlayerGlassCircle(size: size) {
+                Image(systemName: symbol)
+                    .font(.system(size: size * 0.42, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .buttonStyle(PlayerPressStyle())
+        .accessibilityLabel(label)
+    }
+}
+
+/// 按下缩一点、暗一点：这些按钮都浮在画面上，需要一点实体感
+private struct PlayerPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .animation(.snappy(duration: 0.16), value: configuration.isPressed)
     }
 }
 
