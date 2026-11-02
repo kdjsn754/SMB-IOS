@@ -34,9 +34,13 @@ struct VideoPlayerView: View {
     /// 单击「隐藏控件」延迟 0.26 秒执行：双击时会被取消，避免控件闪一下
     @State private var tapHideTask: Task<Void, Never>?
 
-    @State private var panel: PlayerPanel?
-    /// 面板的返回栈：「更多 → 屏幕方向」时记下 `.more`，二级面板左上角就能退回上一级
-    @State private var panelHistory: [PlayerPanel] = []
+    @State private var panelPath: [PlayerPanel] = []
+    /// 面板路径：「更多 → 屏幕方向」时是 `[.more, .orientation]`，
+    /// 二级页左上角就能退回上一级；根页就是只含一个元素的路径
+    /// 当前显示的那一页 = 路径最后一项。**只有这一个口径**，
+    /// 不再有「panel + 另一个 history 数组」两份状态对不上、
+    /// 返回时 history 已经空了于是把整个面板关掉的问题。
+    private var panel: PlayerPanel? { panelPath.last }
     @State private var toast: String?
     @State private var toastTask: Task<Void, Never>?
     @State private var showGestureHelp = false
@@ -295,7 +299,7 @@ struct VideoPlayerView: View {
     private func close() {
         engine.setLocked(false)
         chrome.locked = false
-        panel = nil
+        panelPath.removeAll()
 
         guard ScreenOrientationController.current != entryMode else {
             ScreenOrientationController.restore(to: entryMode)
@@ -444,7 +448,7 @@ struct VideoPlayerView: View {
         engine.setLocked(next)
         tapHideTask?.cancel()
         hideTask?.cancel()
-        if next { panel = nil }
+        if next { panelPath.removeAll() }
         withAnimation(.easeInOut(duration: 0.2)) {
             chrome.visible = !next
         }
@@ -472,39 +476,39 @@ struct VideoPlayerView: View {
 
     // MARK: - 面板
 
-    /// 打开一个面板。已经有一个开着（从「更多」点进二级）时，把当前这个压栈，
-    /// 二级面板左上角就有了「返回」。
-    private func open(_ panel: PlayerPanel) {
+    /// 打开一个面板：往路径尾巴上追加一层。
+    ///
+    /// 路径是**唯一**的当前页来源（`panel` 就是它的 `last`），所以「更多 → 屏幕方向」
+    /// 之后再返回，一定回到「更多」；不会出现两份状态不同步、返回直接关掉面板的情况。
+    private func open(_ next: PlayerPanel) {
         hideTask?.cancel()
         tapHideTask?.cancel()
         chrome.panelOpen = true
         if !chrome.visible, !chrome.locked {
             withAnimation(.easeOut(duration: 0.16)) { chrome.visible = true }
         }
-        if let current = self.panel, current != panel {
-            panelHistory.append(current)
-        }
+        // 同一个面板重复点（连点两次「屏幕方向」）不要再压一层栈
+        guard panelPath.last != next else { return }
         withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
-            self.panel = panel
+            panelPath.append(next)
         }
     }
 
-    /// 二级面板左上角的返回：退回上一级；没有上一级就整个关掉。
+    /// 二级面板左上角的返回：出栈回上一级。
+    ///
+    /// **栈空时什么都不做**，绝不顺手把整个面板关掉 —— 点「返回」的预期是
+    /// 「回到上一页」，整块关掉是另一个动作（右上角 ×）。
     private func goBackPanel() {
-        guard let previous = panelHistory.popLast() else {
-            closePanel()
-            return
-        }
+        guard panelPath.count > 1 else { return }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-            panel = previous
+            panelPath.removeLast()
         }
     }
 
     private func closePanel() {
         chrome.panelOpen = false
-        panelHistory.removeAll()
         withAnimation(.easeOut(duration: 0.22)) {
-            panel = nil
+            panelPath.removeAll()
         }
         scheduleHide()
     }
@@ -519,7 +523,7 @@ struct VideoPlayerView: View {
                 panel: panel,
                 model: model,
                 isLocked: chrome.locked,
-                canGoBack: !panelHistory.isEmpty,
+                canGoBack: panelPath.count > 1,
                 onClose: closePanel,
                 onBack: goBackPanel,
                 onShow: { next in open(next) },

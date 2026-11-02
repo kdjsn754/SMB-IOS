@@ -79,15 +79,15 @@ struct PlayerPanelSheet: View {
     var orientationMode: PlaybackOrientationMode
     var onSelectOrientation: (PlaybackOrientationMode) -> Void
 
-    /// 每个面板各自的滚动位置。
+    /// 每个面板各自的滚动位置 + 那个 `UIScrollView` 的句柄。
     ///
     /// 面板全是同一个 `ScrollView` 换内容：从「更多」（已经滚到工具那一组）点进「屏幕方向」，
     /// 内容一下变短，系统把偏移夹回 0，退回「更多」就停在顶部了 —— 用户要接着看下面的设置，
     /// 只能重新往下滑（2026-11-02 反馈）。所以按面板各记一份偏移，换回来时写回去。
-    @State private var scrollPosition = ScrollPosition()
-    @State private var storedOffsets: [String: CGFloat] = [:]
-    /// 恢复偏移的过程中别把中间值记下来（见 `restoreScroll`）
-    @State private var isRestoringScroll = false
+    ///
+    /// 偏移记在 `PanelScrollBox` 里而不是 `@State`：滚动时每帧都在变，
+    /// 每帧改一次状态会把整块面板重绘，滚起来会卡。
+    @State private var scrollBox = PanelScrollBox()
 
     private static let rates: [Float] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
     private static let timerChoices = [15, 30, 45, 60]
@@ -106,18 +106,17 @@ struct PlayerPanelSheet: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
                     .padding(.bottom, 18)
+                    .background(
+                        PanelScrollProbe(box: scrollBox) { y in
+                            guard !scrollBox.isRestoring else { return }
+                            scrollBox.offsets[panel.rawValue] = y
+                        }
+                    )
             }
             .scrollBounceBehavior(.basedOnSize)
             .frame(maxHeight: 420)
-            .scrollPosition($scrollPosition)
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y
-            } action: { _, offset in
-                guard !isRestoringScroll else { return }
-                storedOffsets[panel.rawValue] = offset
-            }
             .onChange(of: panel) { _, newPanel in
-                restoreScroll(for: newPanel)
+                restoreScroll(to: newPanel)
             }
         }
         .background {
@@ -617,26 +616,41 @@ struct PlayerPanelSheet: View {
 
     // MARK: - 滚动位置
 
-    /// 换面板时把上一次滚到的地方写回去。
+    /// 换页后把这一页上次的位置写回去。
     ///
-    /// 三件事必须一起做，少一件就会出错：
-    /// 1. `isRestoringScroll` 一进来就置上 —— 换内容后系统会把偏移夹回 0，
-    ///    那一拍的回调如果被记下来，正好把「旧面板记住的位置」覆盖成 0；
-    /// 2. 只在**旧位置真的大于 0** 时才滚（短面板本来就没得滚）；
-    /// 3. 分两拍写，第二拍多写 0.5pt —— `scrollTo` 只在值变化时才动，
-    ///    第一拍时新内容可能还没量出高度、被夹在内容底部，同一个值再写一次是空操作。
-    private func restoreScroll(for panel: PlayerPanel) {
-        let target = storedOffsets[panel.rawValue] ?? 0
-        isRestoringScroll = true
-        Task { @MainActor in
-            if target > 0.5 {
-                scrollPosition.scrollTo(y: target)
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                scrollPosition.scrollTo(y: target + 0.5)
-            }
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            isRestoringScroll = false
+    /// 换内容时 `UIScrollView` 会立刻把偏移夹回 0（内容变短了），而面板高度是带弹簧
+    /// 动画变的，所以一次写不牢：先等新内容布局，写完在动画期间再补几拍。
+    /// 写入期间置 `box.isRestoring`，别把中间值当成用户滚到的新位置记下来。
+    private func restoreScroll(to panel: PlayerPanel) {
+        let box = scrollBox
+        let target = box.offsets[panel.rawValue] ?? 0
+        guard target > 0.5 else {
+            box.isRestoring = false
+            return
         }
+        box.isRestoring = true
+        Task { @MainActor in
+            for delay in [20, 110, 190, 260] {
+                try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+                writeScrollOffset(target)
+            }
+            // 弹簧动画（0.3 s）跑完系统还会再压一次，最后补一拍
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            writeScrollOffset(target)
+            box.isRestoring = false
+        }
+    }
+
+    /// 直接写 `contentOffset` —— 这是唯一确定生效的方式
+    /// （`ScrollPosition.scrollTo(y:)` 在内容刚换的时候会被一起夹掉，见 `PanelScrollProbe`）。
+    /// 内容比目标短时 UIKit 只会滚到能滚的最大值，所以每拍都重算上限，不硬写。
+    private func writeScrollOffset(_ target: CGFloat) {
+        guard let scroll = scrollBox.scrollView else { return }
+        scroll.layoutIfNeeded()
+        let maxY = max(0, scroll.contentSize.height + scroll.adjustedContentInset.bottom - scroll.bounds.height)
+        let y = min(target, maxY)
+        guard abs(scroll.contentOffset.y - y) > 0.5 else { return }
+        scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: y), animated: false)
     }
 
     private var timerValue: String? {
