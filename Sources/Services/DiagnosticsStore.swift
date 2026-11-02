@@ -95,7 +95,10 @@ final class DiagnosticsStore: @unchecked Sendable {
     private var started = false
 
     private init() {
-        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        // **放 Caches，不放 Documents**（1.4.6 起）：Documents 会被「文件」App
+        // 直接展示成 App 目录（用户截图里的「SMB 播放器 → Diagnostics」），
+        // 而这里存的只是崩溃 / 退出轨迹，属于派生数据，不该长在用户眼皮底下。
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         directory = base.appendingPathComponent("Diagnostics", isDirectory: true)
     }
@@ -118,11 +121,31 @@ final class DiagnosticsStore: @unchecked Sendable {
     func start() {
         guard !started else { return }
         started = true
+        removeLegacyDocumentsDirectory()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         crashPath = strdup(crashURL.path)
         installHandlers()
         readPreviousExit()
         beginSession()
+    }
+
+    /// 删掉老版本留在 `Documents/Diagnostics` 的那一份（1.4.6 之前的位置）。
+    ///
+    /// 只认这一个目录名，`Documents` 里别的东西一律不碰；删完顺手把空的 `Documents`
+    /// 也收掉 —— App 本身不往那里存任何东西，它唯一的作用就是被「文件」App 展示成
+    /// 一个空的「SMB 播放器」文件夹（用户 2026-11-02 明确要求去掉）。
+    private func removeLegacyDocumentsDirectory() {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        let legacy = documents.appendingPathComponent("Diagnostics", isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacy.path) {
+            try? FileManager.default.removeItem(at: legacy)
+        }
+        // 只剩空壳才删：万一以后真有东西存进去，这里会安静地什么都不做
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: documents.path)) ?? []
+        if contents.isEmpty {
+            try? FileManager.default.removeItem(at: documents)
+        }
     }
 
     /// 正常终止时调用（`willTerminate`）：抹掉标记，下次启动就不会误报

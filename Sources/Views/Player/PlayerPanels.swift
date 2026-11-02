@@ -27,12 +27,19 @@ enum PlayerPanel: String, Identifiable {
     }
 }
 
+/// 面板本体。
+///
+/// **二级面板要能退回来**：从「更多」点进「屏幕方向 / 画面 / 字幕…」时，左上角出现返回箭头，
+/// 退回上一级；右上角的 × 才是把整个面板关掉。所以这层需要 `canGoBack` / `onBack`，
+/// 由页面用一个栈来维护（见 `VideoPlayerView.open(_:)` / `goBackPanel()`）。
 struct PlayerPanelSheet: View {
     let panel: PlayerPanel
     @ObservedObject var model: VideoPlaybackModel
 
     var isLocked: Bool
+    var canGoBack: Bool
     var onClose: () -> Void
+    var onBack: () -> Void
     var onShow: (PlayerPanel) -> Void
     var onToggleLock: () -> Void
     var onDownload: () -> Void
@@ -51,29 +58,12 @@ struct PlayerPanelSheet: View {
                 .frame(width: 34, height: 4)
                 .padding(.top, 8)
 
-            HStack {
-                Text(panel.title)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(.white.opacity(0.1)))
-                }
-                .buttonStyle(PlayerPressStyle())
-                .accessibilityLabel("关闭面板")
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
+            header
 
             ScrollView {
                 content
                     .padding(.horizontal, 16)
-                    .padding(.top, 4)
+                    .padding(.top, 6)
                     .padding(.bottom, 18)
             }
             .scrollBounceBehavior(.basedOnSize)
@@ -94,6 +84,25 @@ struct PlayerPanelSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: .black.opacity(0.4), radius: 24, y: 8)
         .padding(.horizontal, 10)
+        .padding(.bottom, 8)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            if canGoBack {
+                SheetCircleButton(symbol: "chevron.left", label: "返回", action: onBack)
+            }
+
+            Text(panel.title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.white)
+
+            Spacer(minLength: 8)
+
+            SheetCircleButton(symbol: "xmark", label: "关闭", action: onClose)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
         .padding(.bottom, 8)
     }
 
@@ -162,24 +171,13 @@ struct PlayerPanelSheet: View {
     // MARK: - 画面
 
     private var fitList: some View {
-        VStack(spacing: 0) {
-            // 屏幕方向也放一份入口：从底栏「画面」胶囊进来就能顺手改，
-            // 不用绕回「更多」。真正的内容在 `.orientation` 面板里。
-            PanelRow(
-                icon: "arrow.triangle.2.circlepath",
-                title: "屏幕方向",
-                detail: orientationMode.title,
-                selected: false
-            ) {
-                onShow(.orientation)
-            }
-
+        card {
             ForEach(VideoFit.allCases) { option in
                 PanelRow(
                     icon: fitIcon(option),
                     title: option.title,
-                    detail: option.detail,
-                    selected: model.fit == option
+                    checked: model.fit == option,
+                    chevron: false
                 ) {
                     model.setFit(option)
                     onClose()
@@ -201,9 +199,9 @@ struct PlayerPanelSheet: View {
     /// 三选一：自动识别 / 强制竖屏 / 强制横屏。
     ///
     /// 选中即生效、并且**记进 UserDefaults**——退出播放器重新打开还是这个方向。
-    /// 以前只有一个「切换横竖屏」开关，只在本次播放有效，退出再进又被视频比例掰回去。
+    /// 只写选项名，不写解释：这三行的意思一看就懂，再多两行小字只会让面板变糊。
     private var orientationList: some View {
-        VStack(spacing: 0) {
+        card {
             ForEach(PlaybackOrientationMode.allCases) { option in
                 OrientationRow(
                     option: option,
@@ -212,13 +210,6 @@ struct PlayerPanelSheet: View {
                     onSelectOrientation(option)
                 }
             }
-
-            Text("选择会被记住，下次打开播放器仍按这个方向；退出播放器时浏览器页面回到进入前的方向。")
-                .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.5))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 4)
-                .padding(.top, 12)
         }
     }
 
@@ -231,13 +222,13 @@ struct PlayerPanelSheet: View {
         emptyText: String,
         onSelect: @escaping (String?) -> Void
     ) -> some View {
-        VStack(spacing: 0) {
+        card {
             if allowsOff {
                 PanelRow(
                     icon: "captions.bubble",
                     title: "关闭字幕",
-                    detail: nil,
-                    selected: selected == nil
+                    checked: selected == nil,
+                    chevron: false
                 ) {
                     onSelect(nil)
                 }
@@ -247,27 +238,21 @@ struct PlayerPanelSheet: View {
                 PanelRow(
                     icon: allowsOff ? "text.bubble" : "waveform",
                     title: track.name,
-                    detail: track.detail,
-                    selected: track.id == selected
+                    value: track.detail,
+                    checked: track.id == selected,
+                    chevron: false
                 ) {
                     onSelect(track.id)
                 }
             }
 
-            if tracks.isEmpty && !allowsOff {
+            if tracks.isEmpty {
                 Text(emptyText)
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.55))
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
                     .padding(.vertical, 16)
-                    .padding(.horizontal, 4)
-            } else if tracks.isEmpty && allowsOff {
-                Text(emptyText)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 14)
-                    .padding(.horizontal, 4)
             }
         }
     }
@@ -275,12 +260,12 @@ struct PlayerPanelSheet: View {
     // MARK: - 定时
 
     private var timerList: some View {
-        VStack(spacing: 0) {
+        card {
             PanelRow(
                 icon: "moon.zzz",
                 title: "关闭定时",
-                detail: nil,
-                selected: model.sleepDeadline == nil
+                checked: model.sleepDeadline == nil,
+                chevron: false
             ) {
                 model.setSleepTimer(minutes: nil)
                 onClose()
@@ -289,9 +274,7 @@ struct PlayerPanelSheet: View {
             ForEach(Self.timerChoices, id: \.self) { minutes in
                 PanelRow(
                     icon: "timer",
-                    title: "\(minutes) 分钟后",
-                    detail: nil,
-                    selected: false
+                    title: "\(minutes) 分钟"
                 ) {
                     model.setSleepTimer(minutes: minutes)
                     onClose()
@@ -302,127 +285,116 @@ struct PlayerPanelSheet: View {
 
     // MARK: - 更多
 
+    /// 分三组，每行只有「图标 + 名字 + 右侧状态」。
+    ///
+    /// 之前是十行平铺、每行下面挂一句灰色说明，整块看上去全是小字（用户反馈「太乱」）。
+    /// 状态类的东西放右侧值或勾，解释留给「手势说明」那一页。
     private var moreList: some View {
-        VStack(spacing: 0) {
-            PanelRow(
-                icon: isLocked ? "lock.fill" : "lock.open",
-                title: isLocked ? "解锁控件" : "锁定控件",
-                detail: "锁上之后画面上的手势全部失效，防止误触",
-                selected: false,
-                showChevron: false,
-                action: onToggleLock
-            )
-
-            PanelRow(
-                icon: "arrow.triangle.2.circlepath",
-                title: "屏幕方向",
-                detail: "\(orientationMode.title)（\(orientationMode.shortTitle)）",
-                selected: false
-            ) {
-                onShow(.orientation)
-            }
-
-            PanelRow(
-                icon: "rectangle.arrowtriangle.2.inward",
-                title: "画面",
-                detail: model.fit.title,
-                selected: false
-            ) {
-                onShow(.fit)
-            }
-
-            if !model.subtitles.isEmpty {
+        VStack(spacing: 14) {
+            PanelSection(title: "播放") {
                 PanelRow(
-                    icon: "captions.bubble",
-                    title: "字幕",
-                    detail: subtitleDetail,
-                    selected: false
+                    icon: isLocked ? "lock.fill" : "lock.open",
+                    title: "锁定控件",
+                    checked: isLocked,
+                    chevron: false,
+                    action: onToggleLock
+                )
+
+                PanelRow(
+                    icon: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                    title: "静音",
+                    checked: model.isMuted,
+                    chevron: false
                 ) {
-                    onShow(.subtitle)
+                    model.toggleMute()
+                }
+
+                PanelRow(
+                    icon: "repeat",
+                    title: "循环播放",
+                    checked: model.isLooping,
+                    chevron: false
+                ) {
+                    model.toggleLoop()
+                }
+
+                PanelRow(
+                    icon: "timer",
+                    title: "定时关闭",
+                    value: timerValue
+                ) {
+                    onShow(.timer)
                 }
             }
 
-            if model.audioTracks.count > 1 {
+            PanelSection(title: "画面") {
                 PanelRow(
-                    icon: "waveform",
-                    title: "音轨",
-                    detail: audioDetail,
-                    selected: false
+                    icon: "arrow.triangle.2.circlepath",
+                    title: "屏幕方向",
+                    value: orientationMode.shortTitle
                 ) {
-                    onShow(.audio)
+                    onShow(.orientation)
+                }
+
+                PanelRow(
+                    icon: "rectangle.arrowtriangle.2.inward",
+                    title: "画面适配",
+                    value: model.fit.shortTitle
+                ) {
+                    onShow(.fit)
+                }
+
+                if !model.subtitles.isEmpty {
+                    PanelRow(
+                        icon: "captions.bubble",
+                        title: "字幕",
+                        value: subtitleValue
+                    ) {
+                        onShow(.subtitle)
+                    }
+                }
+
+                if model.audioTracks.count > 1 {
+                    PanelRow(
+                        icon: "waveform",
+                        title: "音轨",
+                        value: audioValue
+                    ) {
+                        onShow(.audio)
+                    }
                 }
             }
 
-            PanelRow(
-                icon: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                title: model.isMuted ? "取消静音" : "静音",
-                detail: "只影响本 App，不动系统音量",
-                selected: model.isMuted,
-                showChevron: false
-            ) {
-                model.toggleMute()
-            }
+            PanelSection(title: "工具") {
+                PanelRow(
+                    icon: "arrow.down.circle",
+                    title: "下载到本地",
+                    chevron: false,
+                    action: onDownload
+                )
 
-            PanelRow(
-                icon: "timer",
-                title: "定时关闭",
-                detail: timerDetail,
-                selected: false
-            ) {
-                onShow(.timer)
-            }
+                PanelRow(icon: "hand.draw", title: "播放手势") {
+                    onGestureSettings()
+                }
 
-            PanelRow(
-                icon: "repeat",
-                title: "循环播放",
-                detail: "播完自动从头再来",
-                selected: model.isLooping,
-                showChevron: false
-            ) {
-                model.toggleLoop()
-            }
-
-            PanelRow(
-                icon: "arrow.down.circle",
-                title: "下载到本地播放",
-                detail: "远端流播不动时用这个兜底",
-                selected: false,
-                showChevron: false,
-                action: onDownload
-            )
-
-            PanelRow(
-                icon: "hand.draw",
-                title: "播放手势设置",
-                detail: nil,
-                selected: false
-            ) {
-                onGestureSettings()
-            }
-
-            PanelRow(
-                icon: "questionmark.circle",
-                title: "手势说明",
-                detail: nil,
-                selected: false
-            ) {
-                onGestureHelp()
+                PanelRow(icon: "questionmark.circle", title: "手势说明") {
+                    onGestureHelp()
+                }
             }
         }
     }
 
-    private var timerDetail: String? {
+    private var timerValue: String? {
         guard let deadline = model.sleepDeadline else { return nil }
-        let minutes = max(1, Int(deadline.timeIntervalSinceNow / 60))
-        return "还有约 \(minutes) 分钟"
+        return "\(max(1, Int(deadline.timeIntervalSinceNow / 60))) 分"
     }
 
-    private var subtitleDetail: String? {
-        guard let id = model.selectedSubtitle else { return "已关闭" }
-        return model.subtitles.first(where: { $0.id == id })?.name ?? "已开启"
+    private var subtitleValue: String? {
+        guard let id = model.selectedSubtitle else { return "关闭" }
+        return model.subtitles.first(where: { $0.id == id })?.name ?? "开启"
     }
 
-    private var audioDetail: String? {
+    private var audioValue: String? {
         guard let id = model.selectedAudio else { return model.audioTracks.first?.name }
         return model.audioTracks.first(where: { $0.id == id })?.name
     }
@@ -433,7 +405,106 @@ struct PlayerPanelSheet: View {
     }
 }
 
-// MARK: - 行
+// MARK: - 零件
+
+/// 面板里的圆角卡片容器。行与行之间不画分隔线，靠留白分组，看起来更干净。
+private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+    VStack(spacing: 0) {
+        content()
+    }
+    .background(
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(.white.opacity(0.07))
+    )
+}
+
+/// 分组标题 + 一张卡片
+private struct PanelSection<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.42))
+                .padding(.leading, 10)
+
+            card { content }
+        }
+    }
+}
+
+/// 面板标题栏上那颗圆形按钮（返回 / 关闭）
+private struct SheetCircleButton: View {
+    let symbol: String
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white.opacity(0.8))
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(.white.opacity(0.1)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(PlayerPressStyle())
+        .accessibilityLabel(label)
+    }
+}
+
+/// 面板里的一行：图标 + 名字 +（右侧）短值 / 勾 / 箭头。
+///
+/// **不再有第二行小字说明**（用户 2026-11-02 明确要求）：说明越细，整块看上去越糊。
+/// 需要解释的只有「手势说明」那一页。
+private struct PanelRow: View {
+    let icon: String
+    let title: String
+    var value: String?
+    var checked = false
+    var chevron = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .frame(width: 22)
+
+                Text(title)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white)
+
+                Spacer(minLength: 8)
+
+                if let value {
+                    Text(value)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .lineLimit(1)
+                }
+
+                if checked {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                } else if chevron {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.3))
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 47)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlayerRowPressStyle())
+    }
+}
 
 /// 屏幕方向的一行。
 ///
@@ -449,18 +520,12 @@ private struct OrientationRow: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 icon
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(.white.opacity(0.82))
                     .frame(width: 22)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(option.title)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white)
-                    Text(option.detail)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(2)
-                }
+                Text(option.title)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white)
 
                 Spacer(minLength: 8)
 
@@ -470,8 +535,8 @@ private struct OrientationRow: View {
                         .foregroundStyle(Color.accentColor)
                 }
             }
-            .padding(.horizontal, 8)
-            .frame(minHeight: 50)
+            .padding(.horizontal, 12)
+            .frame(height: 47)
             .contentShape(Rectangle())
         }
         .buttonStyle(PlayerRowPressStyle())
@@ -488,54 +553,6 @@ private struct OrientationRow: View {
         case .landscape:
             OrientationGlyph(landscape: true, lineWidth: 1.6)
         }
-    }
-}
-
-private struct PanelRow: View {
-    let icon: String
-    let title: String
-    let detail: String?
-    let selected: Bool
-    var showChevron = true
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 22)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white)
-                    if let detail {
-                        Text(detail)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .lineLimit(2)
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                if selected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color.accentColor)
-                } else if showChevron {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.3))
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(minHeight: 46)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PlayerRowPressStyle())
     }
 }
 

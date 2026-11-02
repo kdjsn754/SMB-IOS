@@ -35,6 +35,8 @@ struct VideoPlayerView: View {
     @State private var tapHideTask: Task<Void, Never>?
 
     @State private var panel: PlayerPanel?
+    /// 面板的返回栈：「更多 → 屏幕方向」时记下 `.more`，二级面板左上角就能退回上一级
+    @State private var panelHistory: [PlayerPanel] = []
     @State private var toast: String?
     @State private var toastTask: Task<Void, Never>?
     @State private var showGestureHelp = false
@@ -474,6 +476,8 @@ struct VideoPlayerView: View {
 
     // MARK: - 面板
 
+    /// 打开一个面板。已经有一个开着（从「更多」点进二级）时，把当前这个压栈，
+    /// 二级面板左上角就有了「返回」。
     private func open(_ panel: PlayerPanel) {
         hideTask?.cancel()
         tapHideTask?.cancel()
@@ -481,13 +485,28 @@ struct VideoPlayerView: View {
         if !chrome.visible, !chrome.locked {
             withAnimation(.easeOut(duration: 0.16)) { chrome.visible = true }
         }
+        if let current = self.panel, current != panel {
+            panelHistory.append(current)
+        }
         withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
             self.panel = panel
         }
     }
 
+    /// 二级面板左上角的返回：退回上一级；没有上一级就整个关掉。
+    private func goBackPanel() {
+        guard let previous = panelHistory.popLast() else {
+            closePanel()
+            return
+        }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+            panel = previous
+        }
+    }
+
     private func closePanel() {
         chrome.panelOpen = false
+        panelHistory.removeAll()
         withAnimation(.easeOut(duration: 0.22)) {
             panel = nil
         }
@@ -504,12 +523,10 @@ struct VideoPlayerView: View {
                 panel: panel,
                 model: model,
                 isLocked: chrome.locked,
+                canGoBack: !panelHistory.isEmpty,
                 onClose: closePanel,
-                onShow: { next in
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                        self.panel = next
-                    }
-                },
+                onBack: goBackPanel,
+                onShow: { next in open(next) },
                 onToggleLock: {
                     closePanel()
                     toggleLock()
