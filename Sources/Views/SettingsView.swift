@@ -1,91 +1,131 @@
 import SwiftUI
+import UIKit
 
-/// 设置首页：外观直接展开在最上面（不再点进二级页），
-/// 其余分类每行右侧显示当前值，点进去是二级页。
+/// 设置首页。
+///
+/// 布局与首页（`ServerListView`）统一：**不用系统大标题导航栏**，自绘「设置」38 pt 粗体、
+/// 与「资源库」同一条 24 pt 竖线；导航栏整体隐藏，进二级页时由 `SettingsDetail`
+/// 的 `.toolbar(.visible, for: .navigationBar)` 把返回按钮要回来。
+///
+/// 1.3.34 全页重设计（用户要求「显示文本和布局都要」）：
+/// - 每项从单行名词改成「图标 + 标题 + 一行灰字说明」，设置页本身就能读懂每个入口是什么；
+/// - 分组按「外观 / 浏览 / 播放 / 关于」重排，去掉了和浏览页工具栏重复的「网格视图」开关；
+/// - 图标块换成淡色底 + 实色符号（`SettingsIcon`），和首页服务器卡片同一套语言。
 @MainActor
 struct SettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
     @ObservedObject private var gestures = PlayerGestureSettings.shared
 
     @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.light.rawValue
-    @AppStorage(SettingsKey.gridLayout) private var useGrid: Bool = true
     @AppStorage(SettingsKey.thumbnailsEnabled) private var thumbnailsEnabled: Bool = true
     @AppStorage(SettingsKey.videoThumbnails) private var videoThumbnails: Bool = true
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    ThemePicker(selection: $themeRaw)
-                        .padding(.vertical, 6)
-                        // 行背景留空，让两块玻璃浮在分组背景上（叠在白色卡片上几乎看不出边界）
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+            VStack(spacing: 0) {
+                header
 
-                    Toggle("网格视图", isOn: $useGrid)
-                } header: {
-                    Text("外观")
-                }
-
-                Section {
-                    NavigationLink {
-                        GestureSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "hand.draw.fill",
-                            tint: .orange,
-                            title: "播放手势",
-                            value: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭"
-                        )
-                    }
-                } header: {
-                    Text("播放")
-                }
-
-                Section {
-                    NavigationLink {
-                        ThumbnailSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "photo.on.rectangle.angled",
-                            tint: .pink,
-                            title: "缩略图",
-                            value: thumbnailSummary
-                        )
+                List {
+                    Section {
+                        ThemePicker(selection: $themeRaw)
+                            .padding(.vertical, 6)
+                            // 行背景留空，让两块玻璃浮在分组背景上（叠在白色卡片上几乎看不出边界）
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    } header: {
+                        SettingsSectionTitle("外观")
+                    } footer: {
+                        Text("主题会立刻应用到整个 App，不需要重启。")
                     }
 
-                    NavigationLink {
-                        CacheSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "internaldrive.fill",
-                            tint: .green,
-                            title: "缓存",
-                            value: Format.bytes(cache.totalBytes)
-                        )
-                    }
-                }
+                    Section {
+                        NavigationLink {
+                            ThumbnailSettingsView()
+                        } label: {
+                            SettingsRow(
+                                icon: "photo.on.rectangle.angled",
+                                tint: .pink,
+                                title: "缩略图与封面",
+                                subtitle: "网格里的图片预览、视频首帧",
+                                value: thumbnailSummary
+                            )
+                        }
 
-                Section {
-                    NavigationLink {
-                        AboutSettingsView()
-                    } label: {
-                        SettingsRow(
-                            icon: "info.circle.fill",
-                            tint: .gray,
-                            title: "关于",
-                            value: AppInfo.version
-                        )
+                        NavigationLink {
+                            CacheSettingsView()
+                        } label: {
+                            SettingsRow(
+                                icon: "internaldrive.fill",
+                                tint: .green,
+                                title: "存储空间",
+                                subtitle: "缩略图与已缓存的媒体文件",
+                                value: Format.bytes(cache.totalBytes)
+                            )
+                        }
+                    } header: {
+                        SettingsSectionTitle("浏览")
+                    } footer: {
+                        Text("缓存只存在这台设备上，不会改动服务器里的文件。")
+                    }
+
+                    Section {
+                        NavigationLink {
+                            GestureSettingsView()
+                        } label: {
+                            SettingsRow(
+                                icon: "hand.draw.fill",
+                                tint: .orange,
+                                title: "播放手势",
+                                subtitle: "双击、拖动、长按分别做什么",
+                                value: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭"
+                            )
+                        }
+                    } header: {
+                        SettingsSectionTitle("播放")
+                    } footer: {
+                        Text("手势只在播放页生效，改完立即应用。")
+                    }
+
+                    Section {
+                        NavigationLink {
+                            AboutSettingsView()
+                        } label: {
+                            SettingsRow(
+                                icon: "info.circle.fill",
+                                tint: .gray,
+                                title: "关于 SMBViewer",
+                                subtitle: "版本、连接协议与开源许可",
+                                value: AppInfo.version
+                            )
+                        }
+                    } header: {
+                        SettingsSectionTitle("关于")
                     }
                 }
+                .listStyle(.insetGrouped)
+                .scrollContentBackground(.hidden)
             }
-            .navigationTitle("设置")
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
             .onAppear { cache.refresh() }
         }
     }
 
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text("设置")
+                .font(.system(size: 38, weight: .bold))
+                .foregroundStyle(.primary)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+    }
+
     private var thumbnailSummary: String {
         guard thumbnailsEnabled else { return "已关闭" }
-        return videoThumbnails ? "图片 + 视频" : "仅图片"
+        return videoThumbnails ? "图片与视频" : "仅图片"
     }
 }
