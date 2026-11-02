@@ -298,7 +298,7 @@ final class PhotoPageView: UIView, UIScrollViewDelegate {
         zoomView.backgroundColor = .clear
         placeholderView.contentMode = .scaleAspectFit
         placeholderView.backgroundColor = .clear
-        // 缩略图**全程不透明**：原图淡入时只是把它盖住。
+        // 缩略图**全程不淡出**：原图在它上面淡入，它只是被盖住。
         // 两层同时半透明叠黑底，中间那刻合成覆盖率不够，画面会先暗一下再亮回来（「闪一下」）。
         placeholderView.isOpaque = false
         imageView.contentMode = .scaleAspectFit
