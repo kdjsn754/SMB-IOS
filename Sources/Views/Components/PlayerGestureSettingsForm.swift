@@ -64,8 +64,6 @@ struct PlayerGestureSettingsSections: View {
                 }
             }
             .disabled(!gestures.isEnabled)
-
-            Toggle("显示手势诊断", isOn: $gestures.showDiagnostics)
         } header: {
             if let header {
                 Text(header)
