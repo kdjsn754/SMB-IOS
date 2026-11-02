@@ -27,6 +27,8 @@ struct VideoPlayerView: View {
     @State private var engine = PlayerGestureEngine()
     @StateObject private var chrome = ChromeVisibility()
     @ObservedObject private var gestures = PlayerGestureSettings.shared
+    /// 横竖屏策略（自动 / 强制竖 / 强制横），持久化在 UserDefaults
+    @ObservedObject private var display = PlayerDisplaySettings.shared
 
     @State private var hideTask: Task<Void, Never>?
     /// 单击「隐藏控件」延迟 0.26 秒执行：双击时会被取消，避免控件闪一下
@@ -42,9 +44,7 @@ struct VideoPlayerView: View {
     /// 进播放页那一刻的形态。退出时转回它——「回到手机原本的状态」，
     /// 而不是「按你躺着的姿态决定」。
     @State private var entryMode: ScreenMode = ScreenOrientationController.current
-    /// 用户手动切过之后就不再按视频比例自动转，尊重手动选择
-    @State private var manualMode: ScreenMode?
-    /// 自动转只做一次，否则回调重入会把用户后来的手动选择抢回去
+    /// 自动识别每个片子只判一次；连播换片时重置（见 `onChange(of: currentItem)`）
     @State private var didAutoOrient = false
 
     var body: some View {
@@ -148,6 +148,10 @@ struct VideoPlayerView: View {
         .onChange(of: model.videoSize) { _, size in
             applyAutoOrientation(for: size)
         }
+        // 连播换了片子：自动识别要按新的比例重新判一次
+        .onChange(of: model.currentItem?.path) { _, _ in
+            didAutoOrient = false
+        }
         .onChange(of: model.didReachEnd) { _, ended in
             guard ended else { return }
             tapHideTask?.cancel()
@@ -170,6 +174,19 @@ struct VideoPlayerView: View {
             // 进页面还没转屏之前，按钮就要显示对：横着进来的（浏览器里横屏点开）
             // 得马上是「竖屏」文案 + 竖条，否则第一眼又是反的。
             chrome.isLandscape = (entryMode == .landscape)
+            // 按记住的策略先摆好方向（强制横屏的竖片，一进来就该是横的）
+            applyStoredOrientation()
+
+            // 强制方向要再补一次：覆盖层弹出的那 0.35 秒里，`requestGeometryUpdate`
+            // 有可能被系统直接忽略，只请求一次就会停在进入时的形态上（竖屏策略下看不出来，
+            // 强制横屏的竖片最明显——明明选了横屏却还是竖的）。
+            if display.orientationMode != .auto {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 420_000_000)
+                    guard display.orientationMode != .auto else { return }
+                    applyStoredOrientation()
+                }
+            }
         }
         .task {
             await model.start(
@@ -218,21 +235,49 @@ struct VideoPlayerView: View {
 
     // MARK: - 横竖屏
 
+    /// 当前策略。面板里三选一，选择会记住。
+    private var orientationMode: PlaybackOrientationMode { display.orientationMode }
+
+    /// 进页面时按「记住的策略」落一次方向。
+    ///
+    /// 这一步就是「强制横屏之后，退出再打开还是横屏」的全部实现：
+    /// 策略存在 UserDefaults 里，跟视频比例无关，所以竖片也会被摆成横屏。
+    /// 自动识别这时尺寸还没读到，交给 `onChange(of: videoSize)` 那一路。
+    private func applyStoredOrientation() {
+        switch display.orientationMode {
+        case .portrait: applyOrientation(.portrait)
+        case .landscape: applyOrientation(.landscape)
+        case .auto: applyAutoOrientation(for: model.videoSize)
+        }
+    }
+
     /// 按视频比例自动转：宽/高 ≥ 1.15 当横片（4:3、16:9 都算），
-    /// 1.15 以下留在竖屏（竖拍、方形）。只自动一次。
+    /// 1.15 以下留在竖屏（竖拍、方形）。只自动一次，且只在「自动识别」策略下生效。
     private func applyAutoOrientation(for size: CGSize) {
-        guard manualMode == nil, !didAutoOrient,
+        guard display.orientationMode == .auto, !didAutoOrient,
               size.width > 0, size.height > 0 else { return }
         didAutoOrient = true
         applyOrientation(size.width / size.height >= 1.15 ? .landscape : .portrait)
     }
 
-    /// 顶部按钮：手动切横竖屏（现在在「更多」面板里）
-    private func toggleOrientation() {
-        let target: ScreenMode = chrome.isLandscape ? .portrait : .landscape
-        manualMode = target
-        applyOrientation(target)
+    /// 面板里选中一个策略：先记下来，再立刻转。
+    private func selectOrientation(_ mode: PlaybackOrientationMode) {
+        display.orientationMode = mode
+        didAutoOrient = false
         closePanel()
+
+        switch mode {
+        case .portrait:
+            applyOrientation(.portrait)
+            showToast("强制竖屏（已记住）")
+        case .landscape:
+            applyOrientation(.landscape)
+            showToast("强制横屏（已记住）")
+        case .auto:
+            // 尺寸已经读到就立刻判；还没读到就等 `onChange(of: videoSize)`
+            applyAutoOrientation(for: model.videoSize)
+            showToast("自动识别方向")
+        }
         scheduleHide()
     }
 
@@ -375,7 +420,11 @@ struct VideoPlayerView: View {
         scheduleHide()
     }
 
-    /// 跳转（底部 ±秒 按钮用）。引擎里有一份同样的逻辑给双击用，两边共用同一个 HUD。
+    /// 跳转（底部 ±秒 按钮用）。
+    ///
+    /// 只走 HUD、不再发涟漪：涟漪是「点在画面上」的反馈，从底栏按钮点出来的
+    /// 画面上不该凭空出现一圈。双击跳转反过来——那里只有涟漪，没有中间那块 HUD
+    /// （HUD 会和播放 / 暂停按钮撞在一起，见 `PlayerHUDOverlay` 的注释）。
     private func jump(by delta: Double) {
         let duration = model.progress.duration
         guard duration > 0 else { return }
@@ -385,9 +434,6 @@ struct VideoPlayerView: View {
         engine.hud.show(
             .seek(delta: target - from, target: target, total: duration),
             autoHideAfter: 0.8
-        )
-        engine.hud.showRipple(
-            SeekRipple(forward: delta >= 0, seconds: Int(abs(delta).rounded()), position: delta >= 0 ? 0.84 : 0.16)
         )
         scheduleHide()
     }
@@ -486,7 +532,8 @@ struct VideoPlayerView: View {
                     closePanel()
                     showGestureHelp = true
                 },
-                onToggleOrientation: toggleOrientation
+                orientationMode: orientationMode,
+                onSelectOrientation: selectOrientation
             )
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }

@@ -396,22 +396,42 @@ final class PlayerGestureEngine {
         case .none:
             return
         case .playPause:
-            model.togglePlay()
-            hud.show(.playPause(model.isPlaying), autoHideAfter: 0.6)
+            togglePlayByTap(model)
         case .forward:
-            jump(by: settings.seekStep, position: ratio)
+            jump(by: settings.seekStep, position: ripplePosition(for: ratio))
         case .backward:
-            jump(by: -settings.seekStep, position: ratio)
+            jump(by: -settings.seekStep, position: ripplePosition(for: ratio))
         case .sides:
             if ratio < 1.0 / 3.0 {
                 jump(by: -settings.seekStep, position: 0.16)
             } else if ratio > 2.0 / 3.0 {
                 jump(by: settings.seekStep, position: 0.84)
             } else {
-                model.togglePlay()
-                hud.show(.playPause(model.isPlaying), autoHideAfter: 0.6)
+                togglePlayByTap(model)
             }
         }
+    }
+
+    /// 双击切播放 / 暂停。
+    ///
+    /// **只在锁定状态弹中间那颗图标**：没锁的时候页面会把控件叫出来，
+    /// 中央本来就会显示播放 / 暂停按钮，再叠一个 HUD 圆圈上去就是两个图标压在一起
+    /// （用户报的「手势气泡和暂停按钮重合」）。
+    private func togglePlayByTap(_ model: VideoPlaybackModel) {
+        model.togglePlay()
+        if locked {
+            hud.show(.playPause(model.isPlaying), autoHideAfter: 0.6)
+        }
+    }
+
+    /// 涟漪的横向落点：**中间那条竖带要空出来**。
+    ///
+    /// 双击位置正好在屏幕中间时（`.forward` / `.backward` 模式下点哪儿都算），
+    /// 涟漪会刚好压在播放 / 暂停按钮上。夹到 0.24 / 0.76，视觉上仍然「就是点的那一侧」。
+    private func ripplePosition(for ratio: CGFloat) -> CGFloat {
+        if ratio < 0.34 { return 0.16 }
+        if ratio > 0.66 { return 0.84 }
+        return ratio < 0.5 ? 0.24 : 0.76
     }
 
     private func jump(by delta: Double, position: CGFloat) {
@@ -422,10 +442,8 @@ final class PlayerGestureEngine {
         let target = min(max(from + delta, 0), duration)
         // 双击跳转给 0.3 秒容差：精确到帧在远端流上要多读一个 GOP，明显卡顿
         model.seek(to: target, tolerance: 0.3)
-        hud.show(
-            .seek(delta: target - from, target: target, total: duration),
-            autoHideAfter: 0.7
-        )
+        // 只发涟漪，不发中间那块 HUD：双击的反馈就是「点的那一侧 + 跳了多少秒」，
+        // 中间的数字气泡会和播放 / 暂停按钮撞在一起，而且信息重复。
         hud.showRipple(
             SeekRipple(forward: delta >= 0, seconds: Int(abs(delta).rounded()), position: position)
         )

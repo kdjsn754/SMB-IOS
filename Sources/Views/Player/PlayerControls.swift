@@ -340,22 +340,36 @@ struct PlayerHUDOverlay: View {
     @ObservedObject var bus: PlayerHUDBus
 
     var body: some View {
-        ZStack {
-            if let value = bus.value {
-                content(value)
-                    .transition(.opacity)
+        GeometryReader { geo in
+            ZStack {
+                if let value = bus.value {
+                    content(value)
+                        .position(x: geo.size.width / 2, y: placement(for: value, in: geo))
+                        .transition(.opacity)
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height)
+            // 只在「出现 / 消失」时做淡入淡出；数值变化不做动画，
+            // 否则拖动时每帧都开一个动画事务，反而拖慢手感
+            .animation(.easeOut(duration: 0.16), value: bus.value == nil)
         }
-        // 只在「出现 / 消失」时做淡入淡出；数值变化不做动画，
-        // 否则拖动时每帧都开一个动画事务，反而拖慢手感
-        .animation(.easeOut(duration: 0.16), value: bus.value == nil)
         .allowsHitTesting(false)
     }
-}
 
-private extension PlayerHUDOverlay {
+    /// 手势 HUD 的落点。
+    ///
+    /// **默认往上挪到屏幕中线以上**：中线是播放 / 暂停按钮和「播放结束」卡片的位置，
+    /// 以前 HUD 就摆在正中，暂停时拖一下进度，黑色气泡正好扣在暂停按钮上（用户报的问题）。
+    /// 上移 86 pt 之后，竖屏停在按钮上方、横屏落在顶栏与中央按钮之间的空档里，两边都不压。
+    /// 唯一留在正中是「锁屏状态下的播放 / 暂停」——那时画面上没有任何控件，中间是空的。
+    private func placement(for value: GestureHUD, in geo: GeometryProxy) -> CGFloat {
+        let center = geo.size.height / 2
+        if case .playPause = value { return center }
+        return max(64, center - 86)
+    }
+
     @ViewBuilder
-    func content(_ value: GestureHUD) -> some View {
+    private func content(_ value: GestureHUD) -> some View {
         switch value {
         case let .seek(delta, target, total):
             VStack(spacing: 4) {

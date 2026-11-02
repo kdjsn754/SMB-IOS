@@ -6,6 +6,7 @@ import SwiftUI
 enum PlayerPanel: String, Identifiable {
     case speed
     case fit
+    case orientation
     case subtitle
     case audio
     case timer
@@ -17,6 +18,7 @@ enum PlayerPanel: String, Identifiable {
         switch self {
         case .speed: return "播放速度"
         case .fit: return "画面"
+        case .orientation: return "屏幕方向"
         case .subtitle: return "字幕"
         case .audio: return "音轨"
         case .timer: return "定时关闭"
@@ -36,7 +38,8 @@ struct PlayerPanelSheet: View {
     var onDownload: () -> Void
     var onGestureSettings: () -> Void
     var onGestureHelp: () -> Void
-    var onToggleOrientation: () -> Void
+    var orientationMode: PlaybackOrientationMode
+    var onSelectOrientation: (PlaybackOrientationMode) -> Void
 
     private static let rates: [Float] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
     private static let timerChoices = [15, 30, 45, 60]
@@ -101,6 +104,8 @@ struct PlayerPanelSheet: View {
             speedGrid
         case .fit:
             fitList
+        case .orientation:
+            orientationList
         case .subtitle:
             trackList(
                 tracks: model.subtitles,
@@ -158,6 +163,17 @@ struct PlayerPanelSheet: View {
 
     private var fitList: some View {
         VStack(spacing: 0) {
+            // 屏幕方向也放一份入口：从底栏「画面」胶囊进来就能顺手改，
+            // 不用绕回「更多」。真正的内容在 `.orientation` 面板里。
+            PanelRow(
+                icon: "arrow.triangle.2.circlepath",
+                title: "屏幕方向",
+                detail: orientationMode.title,
+                selected: false
+            ) {
+                onShow(.orientation)
+            }
+
             ForEach(VideoFit.allCases) { option in
                 PanelRow(
                     icon: fitIcon(option),
@@ -177,6 +193,32 @@ struct PlayerPanelSheet: View {
         case .aspect: return "rectangle.arrowtriangle.2.inward"
         case .fill: return "rectangle.arrowtriangle.2.outward"
         case .stretch: return "arrow.left.and.right"
+        }
+    }
+
+    // MARK: - 屏幕方向
+
+    /// 三选一：自动识别 / 强制竖屏 / 强制横屏。
+    ///
+    /// 选中即生效、并且**记进 UserDefaults**——退出播放器重新打开还是这个方向。
+    /// 以前只有一个「切换横竖屏」开关，只在本次播放有效，退出再进又被视频比例掰回去。
+    private var orientationList: some View {
+        VStack(spacing: 0) {
+            ForEach(PlaybackOrientationMode.allCases) { option in
+                OrientationRow(
+                    option: option,
+                    selected: orientationMode == option
+                ) {
+                    onSelectOrientation(option)
+                }
+            }
+
+            Text("选择会被记住，下次打开播放器仍按这个方向；退出播放器时浏览器页面回到进入前的方向。")
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.5))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 4)
+                .padding(.top, 12)
         }
     }
 
@@ -272,13 +314,13 @@ struct PlayerPanelSheet: View {
             )
 
             PanelRow(
-                icon: "arrow.clockwise",
-                title: "切换横竖屏",
-                detail: nil,
-                selected: false,
-                showChevron: false,
-                action: onToggleOrientation
-            )
+                icon: "arrow.triangle.2.circlepath",
+                title: "屏幕方向",
+                detail: "\(orientationMode.title)（\(orientationMode.shortTitle)）",
+                selected: false
+            ) {
+                onShow(.orientation)
+            }
 
             PanelRow(
                 icon: "rectangle.arrowtriangle.2.inward",
@@ -392,6 +434,62 @@ struct PlayerPanelSheet: View {
 }
 
 // MARK: - 行
+
+/// 屏幕方向的一行。
+///
+/// 竖屏 / 横屏的图标用 `OrientationGlyph` 自绘，不用 SF Symbol：
+/// `rectangle.landscape` 这类名字在部分系统版本上会缺失，缺失时 `Image(systemName:)`
+/// 不报错、直接渲染成 0 尺寸空白（1.3.x 用户截图里「只剩两个字没有图标」就是这么来的）。
+private struct OrientationRow: View {
+    let option: PlaybackOrientationMode
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                icon
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 22)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.title)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white)
+                    Text(option.detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 8)
+
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(minHeight: 50)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlayerRowPressStyle())
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        switch option {
+        case .auto:
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 14, weight: .medium))
+        case .portrait:
+            OrientationGlyph(landscape: false, lineWidth: 1.6)
+        case .landscape:
+            OrientationGlyph(landscape: true, lineWidth: 1.6)
+        }
+    }
+}
 
 private struct PanelRow: View {
     let icon: String
