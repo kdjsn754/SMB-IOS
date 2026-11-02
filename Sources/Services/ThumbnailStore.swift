@@ -5,18 +5,20 @@ import AVFoundation
 ///
 /// 设计要点：
 /// 1. 同一个文件只生成一份 480px 缩略图，网格和列表共用，避免同一张图取两次。
-/// 2. 图片和视频共用一道有序闸门（**同时 3 个**，先比优先级层再比格子序号放行）：
-///    前台（屏幕上的格子）**开始跑**的顺序严格按「左上 → 右下」；目录级后台预载（`isPrefetch`）
-///    排在所有前台之后，负责把整个文件夹的缩略图都加载完。
-///    优先级是**活值**（`PriorityBox`）：预载抢先建的任务一旦被前台格子 join，
-///    闸门立刻按前台对待，不会出现「第一个文件反而最后出来」。
-///    并发 3 必须配 `SMBConnection` 的 3 条缩略图会话才有效果 —— 见那里。
+/// 2. **图片和视频分道**（1.5.1）：
+///    - 图片：3 并发 + 3 条专用 SMB 会话，一条一个；
+///    - 视频封面：1 并发 + 1 条专用会话。视频要读 moov / 首个 GOP 再抽帧，又大又慢，
+///      和照片挤一个闸门时一张封面就能把照片的并发吃掉一半（这是「比别人慢」的大头）。
+///    - 两条车道内部都按优先级层 + 格子序号放行：0 前台图片 > 1 前台视频 >
+///      2 预载图片 > 3 预载视频。优先级是**活值**（`PriorityBox`），预载抢先建的任务
+///      一旦被前台格子 join，闸门立刻按前台对待，不会出现「第一个文件反而最后出来」。
 /// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输；
 ///    单张还有 15 s 时间预算，到点让位，避免一个卡住的请求堵死整屏。
 /// 4. 失败的文件进负缓存冷却 45 s，避免「划回去就重试」把 NAS 打满。
-/// 5. 并发 3 之后「放行」有序但「完成」无序 —— 三个名额同时在飞，谁先读完谁先上屏。
-///    所以真图上屏前还要过一道按序发布层（`PublishOrder`）：等所有更小序号的任务
-///    都结束才返回。读提速、观感仍是「左上 → 右下」逐张出。
+/// 5. 「读」可以无序完成，「上屏」仍然按格子序号来（`PublishOrder`），但等待是**有上限**的：
+///    某个格子迟迟不出（大视频、卡住的读）不允许把后面已经读完的整屏图全压住 ——
+///    超过 0.7 s 就先让后面的上屏，它自己晚一点补进来。主流相册都是这个模型
+///    （占位先站住、就绪即上屏），全局严格串行的代价是一张慢图 = 整屏白等。
 final class ThumbnailStore: @unchecked Sendable {
     static let shared = ThumbnailStore()
 
@@ -78,23 +80,30 @@ final class ThumbnailStore: @unchecked Sendable {
         }
     }
 
-    /// 按序发布协调器：并发读的结果按「格子序号」依次放行上屏。
+    /// 按序发布协调器：并发读的结果按「格子序号」依次放行上屏，**但等待有上限**。
     ///
-    /// 闸门并发 3 之后，「放行」有序但「完成」无序 —— 三个名额同时在飞，谁先读完
-    /// 谁先上屏，第 2、3 张的小图会抢在第 1 张的大视频前面（用户实测：「缩略图
-    /// 又不是按顺序放出来了」）。把「读」与「出」拆开：读保持 3 并发（提速不动），
-    /// 出图在这里排队 —— 任务创建时 `begin` 登记序号；真图到手后 `waitTurn`，
-    /// 只要还有**更小序号**的任务没跑完就挂着，直到它们 `end`。
+    /// 闸门并发 3 之后，「放行」有序但「完成」无序 —— 谁先读完谁先上屏，
+    /// 第 2、3 张的小图会抢在第 1 张的大视频前面。所以「读」与「出」拆开：
+    /// 读保持并发，出图在这里排队 —— 任务创建时 `begin` 登记序号，真图到手后 `waitTurn`。
+    ///
+    /// 1.5.1 起 `waitTurn` 带**等待上限**（`publishBudgetNanos`，0.7 s）：更小序号的任务
+    /// 一直不结束（大视频封面 / 卡在 NAS 上的读）时，到点就直接放行后面的。
+    /// 严格无限等会让「一张慢图」变成「整屏白等」—— 这是 1.5.0 比主流相册慢的主因。
     ///
     /// - 失败 / 取消的返回占位图标，占位长得都一样、没有排序意义，不在这里等；
     ///   但它们的 `end` 照样登记 —— 否则后面的序号被永久压住。
     /// - `end` 由 `produce` 的 `defer` 无条件执行（成功 / 失败 / 超时 / 取消都到），
-    ///   所以等待最坏压住一个单张预算（15 s），不存在死锁。
+    ///   所以等待最坏压住一个发布预算，不存在死锁。
     /// - 用「活跃集合」而不是「推进计数（nextToRelease++）」：重进目录 / 刷新时
     ///   序号重新从 0 开始，上一代留下的推进值会把新一代任务全部误判成「已轮到」、
     ///   直接放行又乱序；活跃集合只看「前面还有没有人没跑完」，换代天然自洽。
     private final class PublishOrder: @unchecked Sendable {
         static let shared = PublishOrder()
+
+        /// 单张最多等「前面的图」多久。0.7 s 是实测折中：
+        /// 正常照片一张 100~300 ms 读完，三张一波，一屏九张约 0.9 s 内到齐，
+        /// 极少数情况下最后一张会等到上限；而慢任务（视频封面）到点就让位，不拖累整屏。
+        static let publishBudgetNanos: UInt64 = 700 * 1_000_000
 
         private let lock = NSLock()
         /// 目录键 -> 仍在跑（未 end）的格子序号
@@ -140,19 +149,31 @@ final class ThumbnailStore: @unchecked Sendable {
             for continuation in ready { continuation.resume() }
         }
 
-        /// 等所有更小序号的任务结束。已轮到就立即返回；
+        /// 等所有更小序号的任务结束，**最多等 `maxWaitNanos`**。
+        /// 到点就直接放行：后面的图上屏，慢的那张自己晚一点补进来。
         /// 等待期间任务被取消也放行（调用方检查取消标记自行返回）。
-        func waitTurn(serverID: UUID, path: String, order: Int) async {
+        func waitTurn(serverID: UUID, path: String, order: Int, maxWaitNanos: UInt64) async {
             let dir = Self.dirKey(serverID: serverID, path: path)
 
             lock.lock()
             let running = active[dir]
-            if running == nil || running!.allSatisfy({ $0 >= order }) {
-                lock.unlock()
-                return
-            }
+            let blocked = running.map { !$0.allSatisfy({ $0 >= order }) } ?? false
             lock.unlock()
+            guard blocked else { return }
 
+            // 两路赛跑：一路等前面结束，一路是发布预算。谁先到用谁。
+            // 超时那一路胜出时，挂起的那一路被取消 —— 取消会走
+            // `withTaskCancellationHandler` 里的 `withdraw`，把续体摘掉再 resume，
+            // 所以不会有「任务走了、续体永远挂着」的泄漏。
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await self.waitForPredecessors(dir: dir, order: order) }
+                group.addTask { try? await Task.sleep(nanoseconds: maxWaitNanos) }
+                await group.next()
+                group.cancelAll()
+            }
+        }
+
+        private func waitForPredecessors(dir: String, order: Int) async {
             await withTaskCancellationHandler {
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                     lock.lock()
@@ -213,16 +234,26 @@ final class ThumbnailStore: @unchecked Sendable {
     private var jobs: [String: Job] = [:]
     private var failures: [String: Date] = [:]
 
-    /// 缩略图读端的闸门：图片和视频共用，**一次跑 3 个**、按格子序号放行。
+    /// 图片车道：**同时 3 个**、按「优先级层 + 格子序号」放行，对应 3 条专用会话。
     ///
-    /// 并发 1 → 3 是这轮的主要提速点：单个小文件的耗时几乎全是 SMB 往返延迟，
+    /// 并发 1 → 3 是 1.4.10 的主要提速点：单个小文件的耗时几乎全是 SMB 往返延迟，
     /// 三个同时在飞，等于把「几十张串行」变成「三张三张地读」。
-    /// 注意它只保证**开始**的顺序，不保证**完成**的顺序 —— 完成序由 `PublishOrder`
-    /// 兜住（见下）。1.4.10 只加了并发、没加发布层，用户实测「缩略图不按顺序出了」。
+    /// 完成序由 `PublishOrder` 兜住（见上），1.5.1 起它的等待有上限。
+    private let imageLimiter = OrderedLimiter(limit: 3, settleMilliseconds: 100)
+
+    /// 视频车道：**同时 1 个**，独占一条会话。
     ///
-    /// 并发数必须和 `SMBConnection` 的缩略图会话数一致（3 条独立 socket）——
-    /// 只加并发不加会话，三条请求还是挤在一条 TCP 上排队，等于没加。
-    private let displayLimiter = OrderedLimiter(limit: 3, settleMilliseconds: 250)
+    /// 视频封面要读 moov / 首个 GOP 再解码抽帧，1~15 s 很常见。和照片挤同一个闸门时，
+    /// 一张封面就把照片的 3 个名额吃掉 1~3 个 —— 「一屏里夹几个视频，照片就慢下来」
+    /// 就是这么来的。分道之后，视频慢只影响它自己。
+    private let videoLimiter = OrderedLimiter(limit: 1, settleMilliseconds: 0)
+
+    /// 闸门优先级层。数字越小越先放行：
+    /// 屏幕上正在看的图片 → 屏幕上正在看的视频 → 后台预载的图片 → 后台预载的视频。
+    /// 视频永远排在图片后面：封面晚一点出现没关系，照片晚出现就是「卡」。
+    private static func priorityTier(isVideo: Bool, isPrefetch: Bool) -> Int {
+        (isPrefetch ? 2 : 0) + (isVideo ? 1 : 0)
+    }
 
     init() {
         memory.countLimit = 600
@@ -285,7 +316,7 @@ final class ThumbnailStore: @unchecked Sendable {
         // 否则这个文件会排在整屏前台格子后面（预载循环从第 0 个开始，
         // 总是抢在格子的 .task 之前建任务 —— 第一个文件必然中招）
         if !isPrefetch {
-            job.priority.promote(to: 0)
+            job.priority.promote(to: Self.priorityTier(isVideo: item.kind == .video, isPrefetch: false))
         }
         let waiter = Waiter()
         let result = await withTaskCancellationHandler {
@@ -323,9 +354,12 @@ final class ThumbnailStore: @unchecked Sendable {
         }
 
         let box = CancellationBox()
-        let priority = PriorityBox(isPrefetch ? 1 : 0)
-        // 按序发布层登记序号（只登记一次 —— join 进来的等待者用的是同一个 job）
-        PublishOrder.shared.begin(serverID: serverID, path: item.path, order: order)
+        let priority = PriorityBox(Self.priorityTier(isVideo: item.kind == .video, isPrefetch: isPrefetch))
+        // 按序发布层只登记**前台**任务：后台预载的结果不上屏，它的序号不该去挡
+        // 「用户刚滑到的那一屏」。预载登记会让快速下滑时的新格子白等前面的预载任务。
+        if !isPrefetch {
+            PublishOrder.shared.begin(serverID: serverID, path: item.path, order: order)
+        }
         let task = Task<UIImage?, Never> { [weak self] in
             guard let self else { return nil }
             return await self.produce(
@@ -380,9 +414,13 @@ final class ThumbnailStore: @unchecked Sendable {
         isPrefetch: Bool,
         cancel: CancellationBox
     ) async -> UIImage? {
-        // 结束登记必须无条件发生：按序发布层靠「更小序号都结束了」放行，
-        // 漏一次 end 就把后面的序号永久压住
-        defer { PublishOrder.shared.end(serverID: serverID, path: item.path, order: order) }
+        // 结束登记必须和 `begin` 成对：按序发布层靠「更小序号都结束了」放行，
+        // 漏一次 end 就把后面的序号永久压住。后台预载没登记，这里也不登记。
+        defer {
+            if !isPrefetch {
+                PublishOrder.shared.end(serverID: serverID, path: item.path, order: order)
+            }
+        }
 
         let cache = CacheManager.shared
         let url = cache.thumbnailURL(serverID: serverID, item: item)
@@ -398,17 +436,18 @@ final class ThumbnailStore: @unchecked Sendable {
         var image: UIImage?
         switch item.kind {
         case .image, .video:
-            // 图片和视频共用一道闸门：最多三个同时在跑、按「优先级层 + 格子序号」放行 ——
-            // 优先级是共享盒的活值：预载任务排队期间被前台格子 join，
-            // 这里读到的就是前台层，随时插到整屏前台队列的正确位置
-            await displayLimiter.acquire(order: order, priority: priority)
+            // 分道放行：照片走图片车道（3 并发），视频封面走视频车道（1 并发），
+            // 视频再慢也不会占住照片的名额。优先级是共享盒的活值：
+            // 预载任务排队期间被前台格子 join，这里读到的就是前台层。
+            let limiter = item.kind == .video ? videoLimiter : imageLimiter
+            await limiter.acquire(order: order, priority: priority)
             if cancel.isCancelled {
-                await displayLimiter.release()
+                await limiter.release()
                 return nil
             }
 
             // 单张时间预算：到点就掐断传输（读在块边界干净退出），把名额让出去。
-            // 不这么做的话，一个卡在 NAS 那边的大文件会把三个名额之一永久占住。
+            // 不这么做的话，一个卡在 NAS 那边的大文件会把名额永久占住。
             let timeout = TimeoutFlag()
             let watchdog = Task {
                 try? await Task.sleep(nanoseconds: Self.jobBudgetNanos)
@@ -421,7 +460,7 @@ final class ThumbnailStore: @unchecked Sendable {
                 image = await videoThumbnail(item: item, connection: connection, cancel: cancel)
             }
             watchdog.cancel()
-            await displayLimiter.release()
+            await limiter.release()
             // 超时跟「用户取消」不是一回事：要记一次失败进冷却，别让它在滚动时反复重试
             if timeout.isFired { markFailure(key: key) }
         case .folder, .other:
@@ -445,11 +484,18 @@ final class ThumbnailStore: @unchecked Sendable {
             markFailure(key: key)
         }
 
-        // 按序发布：读是 3 并发、完成顺序不可控，真图要等更小序号的任务都出完再返回。
-        // 失败 / 取消返回的占位图标长得都一样，没有排序意义，不在这里等；
-        // 预载任务（isPrefetch）同样不等 —— 它们的结果进缓存，不直接上屏。
-        if let image, !isPrefetch, !cancel.isCancelled {
-            await PublishOrder.shared.waitTurn(serverID: serverID, path: item.path, order: order)
+        // 按序发布：读是并发的、完成顺序不可控，真图要等更小序号的任务出完再返回；
+        // 但**最多等 0.7 s** —— 一张慢图（大视频封面 / 卡住的读）不许把后面已读完的整屏压住。
+        // 判定用**活值**（priority ≤ 1 = 前台）：预载抢先建的任务被格子 join 后同样要排队，
+        // 否则「第一个文件」那类乱序会从这条缝里漏回来。
+        // 失败 / 取消返回的占位图标长得都一样，没有排序意义，不在这里等。
+        if let image, priority.current <= 1, !cancel.isCancelled {
+            await PublishOrder.shared.waitTurn(
+                serverID: serverID,
+                path: item.path,
+                order: order,
+                maxWaitNanos: PublishOrder.publishBudgetNanos
+            )
         }
         return image
     }
@@ -629,8 +675,8 @@ final class ThumbnailStore: @unchecked Sendable {
         }
         guard size > 0 else { return nil }
 
-        // ① 小文件：整份读进来做「镜像」，等于一个不截断的本地文件，最稳
-        if size <= VideoThumbnailMirror.wholeFileLimit {
+        // ① 小文件（≤ 24 MB）：整份读进来做「镜像」，等于一个不截断的本地文件，最稳也最快
+        if size <= VideoThumbnailMirror.cheapMirrorLimit {
             if let mirrored = await VideoThumbnailMirror.makeImage(
                 connection: connection,
                 path: item.path,
@@ -643,15 +689,33 @@ final class ThumbnailStore: @unchecked Sendable {
             if cancel.isCancelled { return nil }
         }
 
-        // ② 大文件：镜像必然截断 mdat，样本偏移越界就报 -11821（和首帧在不在镜像里无关），
-        //    所以直接对流式资产做顺序解码：只读 moov + 第一个 GOP，没有截断
-        return await VideoThumbnailStream.makeImage(
-            connection: connection,
-            path: item.path,
-            fileSize: size,
-            fileExtension: item.fileExtension,
-            cancel: cancel
-        )
+        // ② 中大文件：先走流式取帧 —— 只读 moov（可能在尾部）+ 第一个 GOP，
+        //    流量通常比 24~64 MB 的镜像小一个数量级。镜像必然截断 mdat，
+        //    样本偏移越界就报 -11821（和首帧在不在镜像里无关），所以大文件本就不能镜像。
+        if size > VideoThumbnailMirror.cheapMirrorLimit,
+           let streamed = await VideoThumbnailStream.makeImage(
+               connection: connection,
+               path: item.path,
+               fileSize: size,
+               fileExtension: item.fileExtension,
+               cancel: cancel
+           ) {
+            return streamed
+        }
+        if cancel.isCancelled { return nil }
+
+        // ③ 流式也失败、但还小到能整份读：退回镜像，宁慢不空
+        if size > VideoThumbnailMirror.cheapMirrorLimit,
+           size <= VideoThumbnailMirror.wholeFileLimit {
+            return await VideoThumbnailMirror.makeImage(
+                connection: connection,
+                path: item.path,
+                fileSize: size,
+                fileExtension: item.fileExtension,
+                cancel: cancel
+            )
+        }
+        return nil
     }
 
     // MARK: - 辅助

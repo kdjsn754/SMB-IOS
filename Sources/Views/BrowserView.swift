@@ -361,22 +361,54 @@ struct BrowserView: View {
     /// - 需要远端读取的以**后台优先级**进闸门：屏幕上格子的前台请求随时插队；
     /// - 排序用 `model.items` 而不是 `visibleItems`：搜索过滤时预载范围不变，
     ///   依旧是整个文件夹（用户要求「当前打开目录内的都加载完」）；
+    /// - **滑动窗口 4 个在飞**（1.5.1）：以前是 `for + await` 逐张串行，任何时刻只有 1 个
+    ///   预载请求在跑，图片车道 3 条会话空了 2 条，整目录后台填充速度只有上限的三分之一。
+    ///   现在始终保持 4 个任务在飞（图片 3 + 视频 1 两条车道都能喂满），
+    ///   完成一个补一个 —— 顺序仍由闸门按格子序号选人保证；
     /// - 离开目录 / 刷新 / 换排序时任务被取消，`CancellationBox` 连底层 SMB 传输一起掐断。
     private func startThumbnailPrefetch() {
         thumbnailPrefetch?.cancel()
         let connection = app.connection(for: server)
         let serverID = server.id
         let items = currentSort.sorted(model.items)
+        guard !items.isEmpty else { return }
         thumbnailPrefetch = Task {
-            for (index, item) in items.enumerated() {
-                if Task.isCancelled { return }
-                _ = await ThumbnailStore.shared.thumbnail(
-                    for: item,
-                    serverID: serverID,
-                    connection: connection,
-                    order: index,
-                    isPrefetch: true
-                )
+            let window = 4
+            await withTaskGroup(of: Void.self) { group in
+                var next = 0
+                while next < items.count, next < window {
+                    let item = items[next]
+                    let order = next
+                    group.addTask {
+                        _ = await ThumbnailStore.shared.thumbnail(
+                            for: item,
+                            serverID: serverID,
+                            connection: connection,
+                            order: order,
+                            isPrefetch: true
+                        )
+                    }
+                    next += 1
+                }
+                while await group.next() != nil {
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        return
+                    }
+                    guard next < items.count else { continue }
+                    let item = items[next]
+                    let order = next
+                    group.addTask {
+                        _ = await ThumbnailStore.shared.thumbnail(
+                            for: item,
+                            serverID: serverID,
+                            connection: connection,
+                            order: order,
+                            isPrefetch: true
+                        )
+                    }
+                    next += 1
+                }
             }
         }
     }

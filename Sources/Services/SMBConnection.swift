@@ -26,12 +26,25 @@ actor SMBConnection {
     private var manager: SMB2Manager?
     private var connecting: Task<SMB2Manager, Error>?
 
-    // MARK: - 缩略图专用会话（3 条独立 socket）
+    // MARK: - 缩略图专用会话（4 条独立 socket）
 
-    /// 缩略图通道数。文档（Android 端实测）给的是 3：4 条以上时部分群晖 / 路由器共享
-    /// 会开始回 `STATUS_INSUFFICIENT_RESOURCES`，3 条已经把「小文件往返延迟」这张网织密。
-    private static let thumbnailChannelCount = 3
-    private var thumbnailManagers: [SMB2Manager?] = [nil, nil, nil]
+    /// 缩略图通道怎么分：`0~2` 给图片（3 条并发正好一条一个），`3` 单独留给视频封面。
+    ///
+    /// 为什么视频要独占一条：视频封面要读 `moov` / 首个 GOP（几兆到几十兆）、还要抽帧解码，
+    /// 一张封面能把照片的名额占住 1~15 s。分道之后「一屏照片里夹着几个视频」不再拖慢整屏，
+    /// 这是 1.5.1 的主要提速点之一。
+    enum ThumbLane {
+        case image
+        case video
+    }
+
+    /// 通道总数 4：图片 3 + 视频 1。文档（Android 端实测）提到 4 条以上个别群晖 / 路由器
+    /// 会开始回 `STATUS_INSUFFICIENT_RESOURCES`，所以不往上加 —— 建不起来的那条
+    /// 会退回主连接，功能不受影响。
+    private static let thumbnailChannelCount = 4
+    /// 视频封面专用通道下标
+    private static let videoChannel = 3
+    private var thumbnailManagers: [SMB2Manager?] = Array(repeating: nil, count: 4)
     private var thumbnailConnecting: [Int: Task<SMB2Manager, Error>] = [:]
     private var thumbnailCursor = 0
 
@@ -103,7 +116,7 @@ actor SMBConnection {
         for thumbnail in thumbnailManagers {
             try? await thumbnail?.disconnectShare()
         }
-        thumbnailManagers = [nil, nil, nil]
+        thumbnailManagers = Array(repeating: nil, count: Self.thumbnailChannelCount)
         thumbnailConnecting = [:]
     }
 
@@ -115,25 +128,34 @@ actor SMBConnection {
     func invalidate() {
         manager = nil
         connecting = nil
-        thumbnailManagers = [nil, nil, nil]
+        thumbnailManagers = Array(repeating: nil, count: Self.thumbnailChannelCount)
         thumbnailConnecting = [:]
     }
 
-    // MARK: - 缩略图读取（3 条独立会话）
+    // MARK: - 缩略图读取（4 条独立会话：图片 3 + 视频 1）
 
-    /// 读缩略图 / 照片头部这类小文件的字节，走**独立的 3 条会话**，不和列目录、播放抢同一条连接。
+    /// 读缩略图 / 照片头部这类小文件的字节，走**独立会话**，不和列目录、播放抢同一条连接。
     ///
-    /// 为什么不是「一条连接上并发三个读」：一条 TCP 只有一条接收流水线，多个文件的响应
+    /// 为什么不是「一条连接上并发几个读」：一条 TCP 只有一条接收流水线，多个文件的响应
     /// 只能排队到达。而缩略图这种百 KB 级文件的耗时几乎全是往返延迟（WiFi 下 3~5 ms / 次），
     /// 只有让多个请求**同时在飞**，把几十次往返重叠起来，目录才会一批一批地出图
     /// （Android 端把这叫 THUMB 通道，见优化说明第 2、3 节）。
     ///
+    /// - Parameter lane: 图片车道在 0~2 轮询，视频封面固定走 3 号通道 ——
+    ///   视频读得又大又慢，绝不能把照片的通道占住。
+    ///
     /// 失败时只作废这一条通道，主连接（列目录 / 播放）不受影响。
-    func thumbRead(_ path: String, offset: Int64, length: Int, cancel: CancellationBox? = nil) async throws -> Data {
+    func thumbRead(
+        _ path: String,
+        offset: Int64,
+        length: Int,
+        lane: ThumbLane = .image,
+        cancel: CancellationBox? = nil
+    ) async throws -> Data {
         guard length > 0, offset >= 0 else { return Data() }
         let start = UInt64(offset)
         let end = start &+ UInt64(length)
-        let index = nextThumbnailChannel()
+        let index = lane == .video ? Self.videoChannel : nextImageChannel()
 
         let manager: SMB2Manager
         do {
@@ -165,10 +187,10 @@ actor SMBConnection {
         }
     }
 
-    /// 三条通道轮询取用。并发 3 时正好一条一个，不会都挤在同一个 socket 上。
-    private func nextThumbnailChannel() -> Int {
-        let index = thumbnailCursor % Self.thumbnailChannelCount
-        thumbnailCursor = (thumbnailCursor + 1) % Self.thumbnailChannelCount
+    /// 图片通道 0~2 轮询取用。图片并发 3 时正好一条一个，不会都挤在同一个 socket 上。
+    private func nextImageChannel() -> Int {
+        let index = thumbnailCursor % Self.videoChannel
+        thumbnailCursor = (thumbnailCursor + 1) % Self.videoChannel
         return index
     }
 

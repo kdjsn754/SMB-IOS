@@ -42,6 +42,10 @@ enum VideoThumbnailMirror {
     private static let probeBoxLimit = 64
     /// 小于这个大小的片子可以整份读进来（等于不截断），镜像才安全
     static let wholeFileLimit: Int64 = 64 * 1024 * 1024
+    /// 「先镜像」的上限（1.5.1）：超过这个大小的片子先走流式取帧，
+    /// 只读 moov + 首个 GOP，通常只有几兆，比整份读 24~64 MB 快一个数量级。
+    /// 流式失败时仍会退回镜像（见 `ThumbnailStore.videoThumbnail`），宁慢不空。
+    static let cheapMirrorLimit: Int64 = 24 * 1024 * 1024
 
     private struct Probe {
         let summary: MP4Inspector.Summary
@@ -85,7 +89,7 @@ enum VideoThumbnailMirror {
 
             var head: Data
             do {
-                head = try await connection.thumbRead(path, offset: 0, length: Int(length), cancel: cancel)
+                head = try await connection.thumbRead(path, offset: 0, length: Int(length), lane: .video, cancel: cancel)
             } catch {
                 lastError = "读文件头失败：\(error.localizedDescription)"
                 continue
@@ -107,7 +111,7 @@ enum VideoThumbnailMirror {
                     moovBytes = cached
                 } else {
                     moovBytes = try? await connection.thumbRead(
-                        path, offset: moov.offset, length: Int(moov.size), cancel: cancel
+                        path, offset: moov.offset, length: Int(moov.size), lane: .video, cancel: cancel
                     )
                 }
                 guard let bytes = moovBytes, Int64(bytes.count) == moov.size else {
@@ -212,7 +216,7 @@ enum VideoThumbnailMirror {
         while offset + 8 <= fileSize, boxes.count < probeBoxLimit {
             if cancel.isCancelled { return nil }
             guard let head = try? await connection.thumbRead(
-                path, offset: offset, length: 16, cancel: cancel
+                path, offset: offset, length: 16, lane: .video, cancel: cancel
             ), head.count >= 8 else { break }
             guard let size32 = MP4Inspector.readU32(head, 0),
                   let type = MP4Inspector.fourCC(head, 4) else { break }
@@ -235,7 +239,7 @@ enum VideoThumbnailMirror {
             case "moov":
                 if size <= maxMoovSize,
                    let data = try? await connection.thumbRead(
-                       path, offset: offset, length: Int(size), cancel: cancel
+                       path, offset: offset, length: Int(size), lane: .video, cancel: cancel
                    ), Int64(data.count) == size {
                     moovData = data
                 }
