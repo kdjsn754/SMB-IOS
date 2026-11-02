@@ -489,8 +489,25 @@ struct VideoPlayerView: View {
         }
         // 同一个面板重复点（连点两次「屏幕方向」）不要再压一层栈
         guard panelPath.last != next else { return }
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
-            panelPath.append(next)
+        if panelPath.isEmpty {
+            // 首次升起：整块从底部滑上来 + 淡入，这一下必须有动画
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
+                panelPath.append(next)
+            }
+        } else {
+            // 面板之间换页：**不做高度插值**。
+            //
+            // 面板高度是内容撑的，插值 = 每一帧都在改 `UIScrollView` 的 frame 和
+            // contentSize，而滚动位置的写回又必须等布局定稿 —— 只能在动画里反复
+            // 强制布局（1.4.8 那五拍就是这么来的，用户反馈「很卡」）。
+            // 瞬时替换：布局只算一次，写回一次即准，动画帧数直接归零。
+            // 顺带也避开了 `.ultraThinMaterial` 每帧重算模糊（高度一直在变，
+            // 卡片面积每帧不同，模糊层要整块重画）。
+            var transaction = Transaction()
+            transaction.animation = nil
+            withTransaction(transaction) {
+                panelPath.append(next)
+            }
         }
     }
 
@@ -500,7 +517,11 @@ struct VideoPlayerView: View {
     /// 「回到上一页」，整块关掉是另一个动作（右上角 ×）。
     private func goBackPanel() {
         guard panelPath.count > 1 else { return }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+        // 和 `open` 的换页同理：高度瞬变，不要弹簧。返回时用户盯着的是「上一页的内容
+        // 回来了没有」，高度插值只会让内容在动画里跟着 scrollView 反复重排。
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
             panelPath.removeLast()
         }
     }

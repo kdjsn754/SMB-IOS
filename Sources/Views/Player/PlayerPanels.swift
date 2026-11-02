@@ -618,9 +618,12 @@ struct PlayerPanelSheet: View {
 
     /// 换页后把这一页上次的位置写回去。
     ///
-    /// 换内容时 `UIScrollView` 会立刻把偏移夹回 0（内容变短了），而面板高度是带弹簧
-    /// 动画变的，所以一次写不牢：先等新内容布局，写完在动画期间再补几拍。
-    /// 写入期间置 `box.isRestoring`，别把中间值当成用户滚到的新位置记下来。
+    /// 换页是**瞬变**的（见 `VideoPlayerView.open` 里的 `withTransaction`），所以
+    /// 等当前这一轮 SwiftUI 更新落完，`contentSize` 就已经是最终值，写一次即准。
+    ///
+    /// 1.4.8 这里是在 0.34 s 弹簧动画里连写五拍、每拍 `layoutIfNeeded()`：动画每帧都在
+    /// 改 scrollView 的 frame，我们又每拍强制整棵树布局 —— 用户反馈「很卡」。
+    /// 现在最多两拍（第二拍只为兜底系统在本轮布局末尾的夹取），全程不做循环。
     private func restoreScroll(to panel: PlayerPanel) {
         let box = scrollBox
         let target = box.offsets[panel.rawValue] ?? 0
@@ -630,27 +633,29 @@ struct PlayerPanelSheet: View {
         }
         box.isRestoring = true
         Task { @MainActor in
-            for delay in [20, 110, 190, 260] {
-                try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
-                writeScrollOffset(target)
-            }
-            // 弹簧动画（0.3 s）跑完系统还会再压一次，最后补一拍
-            try? await Task.sleep(nanoseconds: 220_000_000)
+            // 让当前更新周期先跑完：此刻新内容的尺寸才写进 `contentSize`
+            await Task.yield()
             writeScrollOffset(target)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            // 兜底一次：系统在一轮布局收尾时可能再压一次偏移
+            writeScrollOffset(target)
+            try? await Task.sleep(nanoseconds: 60_000_000)
             box.isRestoring = false
         }
     }
 
     /// 直接写 `contentOffset` —— 这是唯一确定生效的方式
     /// （`ScrollPosition.scrollTo(y:)` 在内容刚换的时候会被一起夹掉，见 `PanelScrollProbe`）。
-    /// 内容比目标短时 UIKit 只会滚到能滚的最大值，所以每拍都重算上限，不硬写。
+    /// 内容比目标短时 UIKit 只会滚到能滚的最大值，所以每次写都重算上限，不硬写。
     private func writeScrollOffset(_ target: CGFloat) {
         guard let scroll = scrollBox.scrollView else { return }
         scroll.layoutIfNeeded()
         let maxY = max(0, scroll.contentSize.height + scroll.adjustedContentInset.bottom - scroll.bounds.height)
         let y = min(target, maxY)
         guard abs(scroll.contentOffset.y - y) > 0.5 else { return }
-        scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: y), animated: false)
+        UIView.performWithoutAnimation {
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: y), animated: false)
+        }
     }
 
     private var timerValue: String? {
