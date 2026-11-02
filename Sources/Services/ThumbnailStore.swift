@@ -16,10 +16,10 @@ import Dispatch
 /// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输；
 ///    单张还有 15 s 时间预算，到点让位，避免一个卡住的请求堵死整屏。
 /// 4. 失败的文件进负缓存冷却（图片 45 s / 视频 15 s），避免「划回去就重试」把 NAS 打满。
-/// 5. 「读」可以无序完成，「上屏」**严格按格子序号**（`PublishOrder`）：序号更小的格子
-///    没结束，这张就先等。只有「已经跑了 2.5 s 还没结束」的才不再挡路 ——
-///    视频封面、卡住的读这类慢任务到点让位，正常照片一张 0.2~1 s 全部落在预算内，
-///    所以常态就是「左上 → 右下」逐格被替换成真图（占位图标先站住，观感与系统相册一致）。
+/// 5. 「读」可以无序完成，「上屏」**严格按格子序号**（`PublishBox`）：读好的图先放进
+///    箱子，只有自己是「有图的最小序号」且前面没有未收工的序号时才放出去，一次放一张。
+///    停滞只对**真的在跑**的任务计时（2.5 s），排队等闸门的时间不算 —— 上一版把两者
+///    混在一起，导致一屏后半截的图集体「超时」抢先上屏。
 final class ThumbnailStore: @unchecked Sendable {
     static let shared = ThumbnailStore()
 
@@ -83,7 +83,7 @@ final class ThumbnailStore: @unchecked Sendable {
         private let lock = NSLock()
         private var registeredOrder: Int?
 
-        /// 首次登记返回 true —— 调用方负责执行 `PublishOrder.begin`
+        /// 首次登记返回 true —— 调用方负责执行 `PublishBox.begin`
         func register(_ order: Int) -> Bool {
             lock.lock()
             defer { lock.unlock() }
@@ -113,167 +113,256 @@ final class ThumbnailStore: @unchecked Sendable {
         }
     }
 
-    /// 按序发布协调器：并发读的结果按「格子序号」依次放行上屏。
+    /// 按序发布箱：**读好的缩略图先放进箱子，然后按格子序号一张张放出去**。
     ///
-    /// 「读」保持并发（图片 3 张同时在飞），「出」在这里排队：任务登记序号后，
-    /// 拿到真图要等所有**更小序号**的任务结束才返回。
+    /// 这是「读并发、出有序」的唯一实现点。前几版的毛病是让**每个任务自己算超时**：
+    /// 一屏只有 6 个并发名额，第 7 张往后的任务在闸门里排队，而「停滞预算」是从
+    /// **任务创建**那一刻开始烧的 —— 等它们真读完，前面的序号早被判成「已停滞」，
+    /// 于是十几张图一起涌上屏。用户说「还是乱序」，根因就在这里。
     ///
-    /// 1.5.2 修掉两个致命缺陷：
-    /// 1. **序号必须由前台补登记**。预载（`isPrefetch`）不登记序号，而它从第 0 个
-    ///    开始、又总是抢在格子的 `.task` 之前建任务 —— 前几格的 job 大多是预载建的，
-    ///    如果格子 join 时不补登记，这些序号压根不在活跃表里，`waitTurn` 看到「前面
-    ///    没人」就直接放行，顺序保护对最前面几格完全失效。这就是「还是乱序」的根因。
-    /// 2. **按阻塞者计时，而不是给等待者设全局上限**。旧版每个等待者最多等 0.7 s，
-    ///    到点就放行 —— 而 0.7 s 对「还没读完的这张」来说根本不够，于是第 2、3 格的
-    ///    快图集体超时抢先上屏，照样乱。现在只看**阻塞者自己跑了多久**：超过
-    ///    `stallNanos` 还没结束的才不再挡路。正常照片一张 0.2~1 s 完成，全部落在
-    ///    预算内 → 严格按序；真正慢的（视频封面 / 卡住的读）到点自动让位，不拖整屏。
-    ///
-    /// - 失败 / 取消的返回占位图标，占位长得都一样、没有排序意义，不在这里等；
-    ///   但它们的 `end` 照样登记 —— 否则后面的序号被永久压住。
-    /// - `end` 由 `produce` 的 `defer` 无条件执行（成功 / 失败 / 超时 / 取消都到），
-    ///   所以等待最坏压住一个停滞预算，不存在死锁。
-    /// - 用「活跃表」而不是「推进计数（nextToRelease++）」：重进目录 / 刷新时
-    ///   序号重新从 0 开始，上一代留下的推进值会把新一代任务全部误判成「已轮到」、
-    ///   直接放行又乱序；活跃表只看「前面还有没有人没跑完」，换代天然自洽。
-    private final class PublishOrder: @unchecked Sendable {
-        static let shared = PublishOrder()
+    /// 现在改成集中式：
+    /// 1. `begin` 登记序号（预载建的 job 被前台格子 join 时补登记）；
+    /// 2. `markReading` 在**拿到闸门名额、真正开始读**时打点 —— 排队时间不算停滞；
+    /// 3. 图读完 `park` 进箱子，**不直接返回给格子**，在这里等「轮到我」；
+    /// 4. 箱子只在「自己是箱子里**有图的最小序号**，且前面没有未收工的序号挡着」时放行，
+    ///    而且一次只放一张（`releaseGapNanos` 节流），观感就是左上 → 右下逐格替换；
+    /// 5. 失败 / 取消 / 超时 `seal`，后面立刻推进 —— 一个坏文件不能把整屏卡死。
+    private final class PublishBox: @unchecked Sendable {
+        static let shared = PublishBox()
 
-        /// 一个格子最多挡后面的图多久。正常照片远小于它，所以常态就是严格按序；
-        /// 视频封面（3~15 s）到点自动让位，不让整屏等一张封面。
-        static let stallNanos: UInt64 = 1_000_000_000
+        /// 已经开始读的序号：读这么久还没出图才让位。照片正常 0.2~1 s，
+        /// 2.5 s 说明是真慢（几十兆的大图 / 网络抖动），此时让后面的先出更合理。
+        static let stallNanos: UInt64 = 2_500_000_000
+        /// 还没轮到读的序号：在闸门里排这么久还没拿到名额才让位。
+        /// 只在「并发名额被前面的慢图长期占着」时触发，正常情况用不到。
+        static let queueNanos: UInt64 = 6_000_000_000
+        /// 连续放行之间的间隔：让「逐格被替换」看得见。
+        /// 12 ms 不到一帧，30 格铺满也只要 0.36 s，但不会「一片同时刷出来」。
+        static let releaseGapNanos: UInt64 = 12_000_000
+        /// 上一代残留的槽位（重进目录 / 刷新）超过这个年龄就当垃圾清掉
+        private static let staleNanos: UInt64 = 30_000_000_000
+        /// 首屏聚集窗口：目录从空变有之后，先等这么久再开始放行。
+        ///
+        /// 格子的 `.task` 触发顺序没有保证 —— 第 5 格完全可以比第 0 格早几十毫秒开始。
+        /// 如果它一读完就放行，箱子会认为「前面没人」（第 0~4 格还没登记），
+        /// 于是第 5 格先冒出来 —— 用户看到的还是乱序。等这一小会儿，让整屏都登记进来，
+        /// 从最小序号开始按序放。90 ms 不到 6 帧，肉眼看不出延迟。
+        private static let settleNanos: UInt64 = 90_000_000
+
+        private struct Slot {
+            var registeredAt: UInt64
+            var readingAt: UInt64?
+            var image: UIImage?
+            var sealed = false
+            var waiter: CheckedContinuation<Void, Never>?
+        }
 
         private let lock = NSLock()
-        /// 目录键 -> 序号 -> 登记时间（uptime 纳秒）
-        private var active: [String: [Int: UInt64]] = [:]
-        /// 目录键 -> 序号 -> 等待放行的续体
-        private var waiters: [String: [Int: [CheckedContinuation<Void, Never>]]] = [:]
+        /// 目录键 -> 序号 -> 槽位（只放「还没上屏」的）
+        private var slots: [String: [Int: Slot]] = [:]
+        /// 节流用的下一次推进
+        private var wake: Task<Void, Never>?
+        /// 目录键 -> 聚集窗口结束时刻（只在「目录从空变有」时设置）
+        private var settleUntil: [String: UInt64] = [:]
 
         /// 同一台服务器下按目录分组：不同目录的序号互相独立，
-        /// A 目录卡住的任务不许压住 B 目录刚点开的格子
+        /// A 目录卡住的任务不许压住 B 目录刚点开的格子。
         private static func dirKey(serverID: UUID, path: String) -> String {
             var dir = path
             if let slash = dir.lastIndex(of: "/") { dir = String(dir[..<slash]) }
             return serverID.uuidString + "|" + dir
         }
 
+        /// 这个序号什么时候该停止挡路：
+        /// 已经在读的按「开读之后 `stallNanos`」算，还没轮到读的按「登记之后 `queueNanos`」算。
+        /// **排队时间绝不算进前者** —— 上一版就是在这里错的。
+        private static func stallPoint(_ slot: Slot) -> UInt64 {
+            if let readingAt = slot.readingAt { return readingAt &+ stallNanos }
+            return slot.registeredAt &+ queueNanos
+        }
+
+        // MARK: 登记
+
         func begin(serverID: UUID, path: String, order: Int) {
             let dir = Self.dirKey(serverID: serverID, path: path)
             let now = DispatchTime.now().uptimeNanoseconds
             lock.lock()
-            var perOrder = active[dir] ?? [:]
-            // 同一个序号被重复登记（预载 + 格子 join）时保留最早的计时，不重置停滞预算；
-            // 但上一代留下的残项（大于两个停滞预算还没清）要按新一代重新计时，
-            // 否则重进目录时序号 0 的旧时间戳会把新任务直接判成「已停滞」、顺序保护失效。
-            if let started = perOrder[order], now &- started <= Self.stallNanos * 2 {
-                // 同一代，保留原计时
+            var per = slots[dir] ?? [:]
+            // 同代重复登记（预载先建 job、格子 join 时补登记）保留原计时；
+            // 太久的残项按新一代重新计时，否则重进目录时旧时间戳会让停滞判断立刻成立。
+            if let existing = per[order], now &- existing.registeredAt < Self.staleNanos {
+                // 保留
             } else {
-                perOrder[order] = now
+                per[order] = Slot(registeredAt: now)
             }
-            active[dir] = perOrder
+            // 目录从空变有：留一个很短的聚集窗口，等这一屏的格子把序号都登记进来。
+            // 已经有过槽位的（滚动中）不重置，否则每来一格都要重新等 90 ms。
+            if per.count == 1, (slots[dir]?.isEmpty ?? true) {
+                settleUntil[dir] = now &+ Self.settleNanos
+            }
+            slots[dir] = per
             lock.unlock()
         }
 
-        func end(serverID: UUID, path: String, order: Int) {
+        /// 真正开始读（拿到闸门名额）—— 停滞预算从这一刻起算。
+        func markReading(serverID: UUID, path: String, order: Int) {
             let dir = Self.dirKey(serverID: serverID, path: path)
             let now = DispatchTime.now().uptimeNanoseconds
             lock.lock()
-            if var perOrder = active[dir] {
-                perOrder[order] = nil
-                active[dir] = perOrder.isEmpty ? nil : perOrder
-            }
-            // 找出刚获得放行资格的等待者：它前面再没有「还在预算内」的序号了
-            var ready: [CheckedContinuation<Void, Never>] = []
-            let running = active[dir] ?? [:]
-            if var perOrder = waiters[dir] {
-                for (waitingOrder, continuations) in perOrder
-                where Self.deadline(running: running, order: waitingOrder, now: now) == nil {
-                    perOrder[waitingOrder] = nil
-                    ready.append(contentsOf: continuations)
-                }
-                waiters[dir] = perOrder.isEmpty ? nil : perOrder
+            if var per = slots[dir], var slot = per[order], slot.readingAt == nil {
+                slot.readingAt = now
+                per[order] = slot
+                slots[dir] = per
             }
             lock.unlock()
-            for continuation in ready { continuation.resume() }
         }
 
-        /// 还有没有阻塞者？返回「最早解除阻塞」的时刻（阻塞者各自的停滞点）。
-        /// 已经跑过 `stallNanos` 的序号不再算阻塞者 —— 它慢，但不许拖住整屏。
-        private static func deadline(running: [Int: UInt64], order: Int, now: UInt64) -> UInt64? {
-            var earliest: UInt64?
-            for (runningOrder, startedAt) in running where runningOrder < order {
-                let at = startedAt &+ stallNanos
-                guard at > now else { continue }
-                earliest = min(earliest ?? at, at)
-            }
-            return earliest
-        }
-
-        /// 等所有「还在预算内」的更小序号任务结束。
-        /// 每一轮都重算阻塞者：前面的人结束时立刻往下走，停滞点到了也往下走。
-        func waitTurn(serverID: UUID, path: String, order: Int) async {
+        /// 图读好了：放进箱子，等轮到自己再返回（返回 = 可以上屏了）。
+        func park(serverID: UUID, path: String, order: Int, image: UIImage) async {
             let dir = Self.dirKey(serverID: serverID, path: path)
-            while true {
-                if Task.isCancelled { return }
-                guard let at = nextStallPoint(dir: dir, order: order) else { return }
-
-                // 两路赛跑：一路等前面结束，一路睡到停滞点。谁先到都重算一遍。
-                // 被取消的那一路会走 `withdraw`，把续体摘掉再 resume，不会泄漏。
-                await withTaskGroup(of: Void.self) { group in
-                    group.addTask { await self.waitForRelease(dir: dir, order: order) }
-                    group.addTask {
-                        let now = DispatchTime.now().uptimeNanoseconds
-                        if at > now { try? await Task.sleep(nanoseconds: at - now) }
-                    }
-                    await group.next()
-                    group.cancelAll()
-                }
-            }
-        }
-
-        /// 同步取一次「下一个停滞点」。锁只在同步上下文里用
-        /// （`NSLock.lock()` 在 async 上下文里不可用，Swift 6 会直接报错）。
-        private func nextStallPoint(dir: String, order: Int) -> UInt64? {
-            lock.lock()
-            defer { lock.unlock() }
-            let running = active[dir] ?? [:]
-            return Self.deadline(
-                running: running, order: order, now: DispatchTime.now().uptimeNanoseconds
-            )
-        }
-
-        private func waitForRelease(dir: String, order: Int) async {
             await withTaskCancellationHandler {
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                     lock.lock()
-                    // 双检：快速路径判断和真正挂起之间，前面的任务可能刚好全部 end
-                    let running = active[dir] ?? [:]
-                    let now = DispatchTime.now().uptimeNanoseconds
-                    if Self.deadline(running: running, order: order, now: now) == nil {
+                    guard var per = slots[dir], var slot = per[order], slot.sealed == false else {
+                        // 没登记 / 已收工：直接放行，绝不能把图吞掉
                         lock.unlock()
                         continuation.resume()
                         return
                     }
-                    waiters[dir, default: [:]][order, default: []].append(continuation)
+                    slot.image = image
+                    slot.waiter = continuation
+                    per[order] = slot
+                    slots[dir] = per
+                    let (resume, wakeAt) = drainLocked(dir)
                     lock.unlock()
+                    for item in resume { item.resume() }
+                    scheduleWake(at: wakeAt)
                 }
             } onCancel: {
                 withdraw(dir: dir, order: order)
             }
         }
 
-        /// 取消时从等待队列摘除自己的续体。摘到才 resume —— `end` 那边摘不到就
-        /// 不会再 resume，两边靠「同一把锁下的字典移除只有一方成功」保证不双 resume。
+        /// 收工：失败 / 取消 / 已放行。这个序号从此不再挡后面的任何一张。
+        func seal(serverID: UUID, path: String, order: Int) {
+            let dir = Self.dirKey(serverID: serverID, path: path)
+            lock.lock()
+            guard var per = slots[dir], var slot = per[order] else {
+                lock.unlock()
+                return
+            }
+            slot.sealed = true
+            let waiter = slot.waiter
+            slot.waiter = nil
+            per[order] = slot
+            slots[dir] = per
+            let (resume, wakeAt) = drainLocked(dir)
+            lock.unlock()
+            waiter?.resume()
+            for item in resume { item.resume() }
+            scheduleWake(at: wakeAt)
+        }
+
+        // MARK: 放行
+
+        /// 按序号推进放行。一次**最多放行一张**（剩下的排到 `releaseGapNanos` 后），
+        /// 这样「左上 → 右下 逐格被替换」在视觉上成立，而不是一片同时刷出来。
+        /// 返回：要 resume 的等待者、下一次该醒来的时刻。
+        private func drainLocked(_ dir: String) -> ([CheckedContinuation<Void, Never>], UInt64?) {
+            guard var per = slots[dir] else {
+                settleUntil[dir] = nil
+                return ([], nil)
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+
+            // 聚集窗口内先不放：等这一屏的格子登记齐，从最小序号开始按序放
+            if let until = settleUntil[dir] {
+                if now < until { return ([], until) }
+                settleUntil[dir] = nil
+            }
+
+            // 已收工的槽位直接清掉，不留垃圾。
+            // 注意先收集 key 再删：遍历字典的同时修改是未定义行为（会崩）。
+            let sealedOrders = per.filter { $0.value.sealed }.map { $0.key }
+            for order in sealedOrders { per[order] = nil }
+
+            // 箱子里**有图**的最小序号
+            guard let pick = per
+                .filter({ $0.value.image != nil })
+                .min(by: { $0.key < $1.key })?.key
+            else {
+                slots[dir] = per.isEmpty ? nil : per
+                return ([], nil)
+            }
+
+            // 挡在它前面的：序号更小、还没图
+            let blockers = per.filter { $0.key < pick && $0.value.image == nil }
+
+            if !blockers.isEmpty {
+                let points = blockers.map { Self.stallPoint($0.value) }
+                // 还有没到停滞点的 → 等它（或等它读完）
+                if !points.allSatisfy({ $0 <= now }) {
+                    slots[dir] = per
+                    return ([], max(points.min() ?? now, now &+ 1))
+                }
+            }
+
+            // 放行这张
+            let waiter = per[pick]?.waiter
+            per[pick] = nil
+            slots[dir] = per.isEmpty ? nil : per
+            // 箱子里还有别的图 → 排下一拍继续，避免十几张同一帧一起刷出来
+            let next = per.isEmpty ? nil : now &+ Self.releaseGapNanos
+            return (waiter.map { [$0] } ?? [], next)
+        }
+
+        /// 节流：到点继续放下一张。旧的一次性任务直接取消（新的会重新排）。
+        private func scheduleWake(at deadline: UInt64?) {
+            guard let deadline else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            // 至少 1 ms，别忙等
+            let delay = max(deadline > now ? deadline - now : 0, 1_000_000)
+            lock.lock()
+            wake?.cancel()
+            let task = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled else { return }
+                self?.drainAll()
+            }
+            wake = task
+            lock.unlock()
+        }
+
+        private func drainAll() {
+            lock.lock()
+            var resume: [CheckedContinuation<Void, Never>] = []
+            var next: UInt64?
+            for dir in Array(slots.keys) {
+                let (list, wakeAt) = drainLocked(dir)
+                resume.append(contentsOf: list)
+                if let wakeAt { next = min(next ?? wakeAt, wakeAt) }
+            }
+            lock.unlock()
+            for item in resume { item.resume() }
+            scheduleWake(at: next)
+        }
+
+        /// 等待被取消（格子滚走）：把续体摘掉，别永远挂着。
+        /// 槽位保留，`produce` / `thumbnail` 收尾的 `seal` 会把它清掉。
         private func withdraw(dir: String, order: Int) {
             lock.lock()
             var continuation: CheckedContinuation<Void, Never>?
-            if var perOrder = waiters[dir], var list = perOrder[order] {
-                continuation = list.popLast()
-                if list.isEmpty { perOrder[order] = nil } else { perOrder[order] = list }
-                if perOrder.isEmpty { waiters[dir] = nil } else { waiters[dir] = perOrder }
+            if var per = slots[dir], var slot = per[order], slot.waiter != nil {
+                continuation = slot.waiter
+                slot.waiter = nil
+                per[order] = slot
+                slots[dir] = per
             }
             lock.unlock()
             continuation?.resume()
+            // 摘掉等待者后槽位可能还留着图（格子滚走、但任务恰好读完），
+            // 补一次推进把它放出去，别让它卡在箱子里占着序号。
+            drainAll()
         }
     }
 
@@ -309,7 +398,7 @@ final class ThumbnailStore: @unchecked Sendable {
     /// 单个小文件的耗时几乎全是 SMB 往返延迟，多几个同时在飞，等于把「几十张串行」
     /// 变成「六张六张地读」。1.6.0 从 3 提到 6：千兆下 3 条会话的吞吐上限只到
     /// 300~400 Mbps（单连接没有请求流水线），6 条才开始摸到网卡上限。
-    /// 完成序由 `PublishOrder` 兜住（见上）。
+    /// 完成序由 `PublishBox` 兜住（见上）。
     private let imageLimiter = OrderedLimiter(limit: 6, settleMilliseconds: 60)
 
     /// 后台预载的独立闸门：**最多 3 个**同时进图片/视频车道。
@@ -381,11 +470,15 @@ final class ThumbnailStore: @unchecked Sendable {
 
         let key = Self.key(for: item, serverID: serverID)
         if let image = memory.object(forKey: key as NSString) {
-            // 内存命中也要占一个发布序号：否则「已经看过的几张秒出」会插到
+            // 内存命中也要进发布箱排一次：否则「已经看过的几张秒出」会插到
             // 正在读网络的格子前面，用户看到的同样是乱序。
-            if !isPrefetch {
-                await publishInline(serverID: serverID, path: item.path, order: order)
-            }
+            // 视频封面不参与发布序列（见 `makeJob` 的说明）：它慢，却拿占位图标先站住，
+            // 让它当「挡路的人」只会把后面整屏照片压住 2.5 s，然后自己最后一个出现 ——
+            // 那正是「第 1 格先出、第 0 格后出」的观感来源。
+            guard !isPrefetch, item.kind == .image else { return image }
+            PublishBox.shared.begin(serverID: serverID, path: item.path, order: order)
+            await PublishBox.shared.park(serverID: serverID, path: item.path, order: order, image: image)
+            PublishBox.shared.seal(serverID: serverID, path: item.path, order: order)
             return image
         }
 
@@ -414,9 +507,28 @@ final class ThumbnailStore: @unchecked Sendable {
         if waiter.finishOnce() {
             detach(key: key, job: job)
         }
-        if let result {
-            memory.setObject(result, forKey: key as NSString, cost: Self.cost(of: result))
+
+        // 发布序号以凭据里记的为准：预载先建的 job 被前台格子 join 时补登记的是
+        // 格子自己的序号，和这里传进来的 `order` 可能不是同一个（预载不看可见性）。
+        let publishOrder = job.publish.order ?? order
+
+        guard let result else {
+            // 失败 / 取消：立刻收工，别让这个序号把后面整屏挡住
+            if !isPrefetch, item.kind == .image {
+                PublishBox.shared.seal(serverID: serverID, path: item.path, order: publishOrder)
+            }
+            return nil
         }
+        memory.setObject(result, forKey: key as NSString, cost: Self.cost(of: result))
+        guard !isPrefetch, item.kind == .image else { return result }
+
+        // **照片上屏全部从这里过**：新建的 job、join 回来的 job、内存命中，一条不漏。
+        // 图先放进箱子，轮到这一格才返回 —— 这就是「读好的先攒着、按顺序放出来」。
+        PublishBox.shared.begin(serverID: serverID, path: item.path, order: publishOrder)
+        await PublishBox.shared.park(
+            serverID: serverID, path: item.path, order: publishOrder, image: result
+        )
+        PublishBox.shared.seal(serverID: serverID, path: item.path, order: publishOrder)
         return result
     }
 
@@ -425,19 +537,6 @@ final class ThumbnailStore: @unchecked Sendable {
         lock.lock()
         failures.removeAll()
         lock.unlock()
-    }
-
-    /// 「已经有图、不走网络」的路径也按序放行一次：占一个序号 → 等前面的结束 → 交还。
-    ///
-    /// 内存命中 / 磁盘命中本来可以立刻返回，但那样它就绕过了整条发布链 ——
-    /// 重进目录时「看过的几张秒出、没看过的还在读」，先冒出来的就是后面那几张。
-    /// 这里只是补一个序号和一次等待，真正的时间成本几乎为零（前面的图本身也很快）。
-    private func publishInline(serverID: UUID, path: String, order: Int) async {
-        let ticket = PublishTicket()
-        guard ticket.register(order) else { return }
-        PublishOrder.shared.begin(serverID: serverID, path: path, order: order)
-        await PublishOrder.shared.waitTurn(serverID: serverID, path: path, order: order)
-        PublishOrder.shared.end(serverID: serverID, path: path, order: order)
     }
 
     // MARK: - 任务管理
@@ -458,8 +557,8 @@ final class ThumbnailStore: @unchecked Sendable {
             //    后面的图会直接越过它们先上屏（「缩略图还是乱序」的根因）。
             if !isPrefetch {
                 existing.priority.promote(to: Self.priorityTier(isVideo: item.kind == .video, isPrefetch: false))
-                if publish.register(order) {
-                    PublishOrder.shared.begin(serverID: serverID, path: item.path, order: order)
+                if item.kind == .image, publish.register(order) {
+                    PublishBox.shared.begin(serverID: serverID, path: item.path, order: order)
                 }
             }
             return existing
@@ -468,10 +567,13 @@ final class ThumbnailStore: @unchecked Sendable {
         let box = CancellationBox()
         let publish = PublishTicket()
         let priority = PriorityBox(tier)
-        // 只有前台任务登记发布序号：后台预载的结果不直接上屏，它的序号不该去挡
-        // 「用户刚滑到的那一屏」。预载登记会让快速下滑时的新格子白等前面的预载任务。
-        if !isPrefetch, publish.register(order) {
-            PublishOrder.shared.begin(serverID: serverID, path: item.path, order: order)
+        // 只有**照片的前台任务**登记发布序号：
+        // - 后台预载的结果不直接上屏，它的序号不该去挡「用户刚滑到的那一屏」；
+        // - 视频封面要读 moov / 首个 GOP 再抽帧，3~8 s 很常见。它挡在序列里就会
+        //   把后面整屏照片压住一个停滞预算，然后自己最后一个出现 ——「第 1 格先出、
+        //   第 0 格后出」。视频有占位图标先站住，走自己的车道（2 并发）即可。
+        if !isPrefetch, item.kind == .image, publish.register(order) {
+            PublishBox.shared.begin(serverID: serverID, path: item.path, order: order)
         }
         let task = Task<UIImage?, Never> { [weak self] in
             guard let self else { return nil }
@@ -528,14 +630,10 @@ final class ThumbnailStore: @unchecked Sendable {
         publish: PublishTicket,
         cancel: CancellationBox
     ) async -> UIImage? {
-        // 结束登记必须和 `begin` 成对：按序发布层靠「更小序号都结束了」放行，
-        // 漏一次 end 就把后面的序号永久压住（会被停滞预算兜住，但会平白多挡 2.5 s）。
-        // 用凭据里记住的序号，而不是入参 `order` —— 前台 join 时补登记用的是格子自己的序号。
-        defer {
-            if let registeredOrder = publish.order {
-                PublishOrder.shared.end(serverID: serverID, path: item.path, order: registeredOrder)
-            }
-        }
+        // 发布序号的登记 / 收工**不在这里做**：统一由 `thumbnail` 那层负责。
+        // 原因：同一个 job 可能先被预载创建、后被前台格子 join，图最后是从
+        // `thumbnail` 返回给格子的；把「进箱子排队」放在下面任何一处，都会出现
+        // 「produce 已经返回、格子还没排上队」的窗口 —— 那正是前几版漏掉的一条乱序缝。
 
         let cache = CacheManager.shared
         let url = cache.thumbnailURL(serverID: serverID, item: item)
@@ -544,15 +642,9 @@ final class ThumbnailStore: @unchecked Sendable {
         // 用 ImageIO 从文件解（和别处一致）：`UIImage(data:)` 是懒解码，
         // 位图会拖到主线程第一次绘制时才解出来，压缩数据也一直在内存里挂着。
         //
-        // 命中也要排队（1.5.2）：重进目录时「看过的几张秒出、没看过的还在读」，
-        // 秒出的那几张会插到整屏前面 —— 用户看到的同样是乱序。排队只是等
-        // 序号更小的格子，而它们自己通常也是几毫秒的解码，几乎不增加总时间。
+        // 命中直接返回：它照旧要经过 `thumbnail` 那层的发布箱排队，
+        // 重进目录时「看过的几张秒出、没看过的还在读」也不会插到前面去。
         if let cached = ImageDownsampler.downsample(url: url, maxPixel: Self.pixelSize) {
-            if priority.current <= 1, !cancel.isCancelled {
-                await PublishOrder.shared.waitTurn(
-                    serverID: serverID, path: item.path, order: publish.order ?? order
-                )
-            }
             return cached
         }
         if cancel.isCancelled { return nil }
@@ -582,6 +674,14 @@ final class ThumbnailStore: @unchecked Sendable {
             if cancel.isCancelled {
                 await limiter.release()
                 return nil
+            }
+            // 从这一刻起才算「在读」：停滞预算只在这种状态下计时。
+            // 在闸门里排队的时间绝不能被算成停滞 —— 并发 6、一屏 12 格时，
+            // 后 6 格光排队就会把预算烧光，那是前几版乱序的真正来源。
+            if item.kind == .image, let registered = publish.order {
+                PublishBox.shared.markReading(
+                    serverID: serverID, path: item.path, order: registered
+                )
             }
 
             // 单张时间预算：到点就掐断传输（读在块边界干净退出），把名额让出去。
@@ -622,18 +722,8 @@ final class ThumbnailStore: @unchecked Sendable {
             markFailure(key: key, isVideo: item.kind == .video)
         }
 
-        // 按序发布：读是并发的、完成顺序不可控，真图要等「还在停滞预算内」的更小序号任务出完。
-        // 快图（0.2~1 s）互相严格按序；超过 2.5 s 仍未结束的那张不再挡路（视频封面 / 卡住的读），
-        // 后面的按序继续出，它自己晚一点补进来 —— 「有界重排」而不是旧版的「等待者全局超时」。
-        // 判定用**活值**（priority ≤ 1 = 前台）：预载抢先建的任务被格子 join 后同样要排队。
-        // 失败 / 取消返回的占位图标长得都一样，没有排序意义，不在这里等。
-        if let image, priority.current <= 1, !cancel.isCancelled {
-            await PublishOrder.shared.waitTurn(
-                serverID: serverID,
-                path: item.path,
-                order: publish.order ?? order
-            )
-        }
+        // 这里只负责「把图生产出来」，**不负责什么时候上屏**：
+        // 图交给 `thumbnail` 后先进发布箱，按格子序号一张张放出去。
         return image
     }
 
