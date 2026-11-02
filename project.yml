@@ -38,7 +38,7 @@ targets:
         PRODUCT_NAME: SMBViewer
         PRODUCT_BUNDLE_IDENTIFIER: com.smbviewer.app
         MARKETING_VERSION: "1.4.3"
-        CURRENT_PROJECT_VERSION: "78"
+        CURRENT_PROJECT_VERSION: "79"
         INFOPLIST_FILE: Config/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"

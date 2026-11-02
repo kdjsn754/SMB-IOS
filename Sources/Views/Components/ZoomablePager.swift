@@ -512,6 +512,8 @@ final class PhotoPageView: UIView, UIScrollViewDelegate {
             apply(full: cached, animated: false)
             return
         }
+        // 重试时先把上一次的失败提示收掉，否则它会一直压在（重试成功的）图片上面
+        failureView.isHidden = true
         if placeholderView.image == nil {
             placeholderView.image = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID)
         }
@@ -552,6 +554,7 @@ final class PhotoPageView: UIView, UIScrollViewDelegate {
     private func apply(full image: UIImage, animated: Bool) {
         fullImage = image
         imageView.image = image
+        failureView.isHidden = true
         layoutContentIfPossible()
         centerContent()
         guard animated else {
