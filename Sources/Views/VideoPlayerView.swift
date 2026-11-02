@@ -121,11 +121,6 @@ struct VideoPlayerView: View {
             }
             // 导航栏整个不要：顶部控件自己做，才能跟着自动隐藏一起淡出
             .toolbar(.hidden, for: .navigationBar)
-            .onGeometryChange(for: Bool.self) { proxy in
-                proxy.size.width > proxy.size.height
-            } action: { landscape in
-                chrome.isLandscape = landscape
-            }
         }
         .preferredColorScheme(.dark)
         // 视频尺寸就绪（首次读元数据可能几百毫秒）后按比例转一次
@@ -142,6 +137,9 @@ struct VideoPlayerView: View {
         }
         .onAppear {
             engine.model = model
+            // 进页面还没转屏之前，按钮就要显示对：横着进来的（浏览器里横屏点开）
+            // 得马上是「竖屏」文案 + 竖条，否则第一眼又是反的。
+            chrome.isLandscape = (entryMode == .landscape)
         }
         .task {
             await model.start(item: item, serverID: serverID, connection: connection)
@@ -168,15 +166,27 @@ struct VideoPlayerView: View {
         guard manualMode == nil, !didAutoOrient,
               size.width > 0, size.height > 0 else { return }
         didAutoOrient = true
-        ScreenOrientationController.lock(size.width / size.height >= 1.15 ? .landscape : .portrait)
+        applyOrientation(size.width / size.height >= 1.15 ? .landscape : .portrait)
     }
 
     /// 顶部按钮：手动切横竖屏
     private func toggleOrientation() {
         let target: ScreenMode = chrome.isLandscape ? .portrait : .landscape
         manualMode = target
-        ScreenOrientationController.lock(target)
+        applyOrientation(target)
         scheduleHide()
+    }
+
+    /// 转屏的唯一入口：**先把形态写进控件状态，再请求系统转**。
+    ///
+    /// 「现在是横是竖」不能靠几何探测（原来用 `proxy.size.width > height`）：
+    /// 旋转动画那一拍 `onGeometryChange` 会先报一次旧值，之后尺寸虽然换了，
+    /// 但按钮文案/图标已经按旧值算过——用户看到的「横屏里写着横屏、图标空白」
+    /// 就是这一次错配加上 SF Symbol 缺失叠出来的。`isLandscape` 现在跟着
+    /// 「我们让系统去做什么」走，两者永远一致。
+    private func applyOrientation(_ mode: ScreenMode) {
+        chrome.isLandscape = (mode == .landscape)
+        ScreenOrientationController.lock(mode)
     }
 
     /// 关闭播放页：先把方向转回「进页面之前」的形态，再退出。
@@ -488,12 +498,13 @@ private struct PlayerChromeLayer: View {
         }
     }
 
-    /// 切横竖屏：文字 + 图标。文字一定看得见，不会出现「图标是个空圈」的情况。
+    /// 切横竖屏：文字 + 自绘小方块。方块一定画得出来，
+    /// 不像 SF Symbol 那样会因为名字在不同系统版本上缺失而渲染成空白。
     private var orientationPill: some View {
         Button(action: onToggleOrientation) {
-            HStack(spacing: 5) {
-                Image(systemName: chrome.isLandscape ? "rectangle.portrait" : "rectangle.landscape")
-                    .font(.system(size: 12, weight: .semibold))
+            HStack(spacing: 6) {
+                OrientationGlyph(landscape: !chrome.isLandscape)
+                    .foregroundStyle(.white)
                 Text(chrome.isLandscape ? "竖屏" : "横屏")
                     .font(.system(size: 12, weight: .semibold))
             }

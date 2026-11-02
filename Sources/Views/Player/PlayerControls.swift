@@ -90,6 +90,25 @@ struct PlayerGlassButton: View {
     }
 }
 
+/// 横竖屏按钮上那个小方框。
+///
+/// **不用 SF Symbol**：`rectangle.landscape` 这类名字在不同系统版本上会出现缺失，
+/// 缺失时 `Image(systemName:)` 不报错、直接渲染成 0 尺寸空白——用户截图里
+/// 「横屏时按钮只剩『横屏』两个字，竖屏时却有图标」就是这么来的。
+/// 自己用 `RoundedRectangle` 画，系统怎么改都画得出来。
+/// 画的是「点下去会变成的方向」：横着的那块 = 点了转横屏。
+struct OrientationGlyph: View {
+    /// true = 画横着的方块（点下去进横屏）
+    var landscape: Bool
+    var lineWidth: CGFloat = 1.5
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2.4, style: .continuous)
+            .strokeBorder(lineWidth: lineWidth)
+            .frame(width: landscape ? 15 : 10, height: landscape ? 10 : 15)
+    }
+}
+
 /// 胶囊按钮：底部那几个「有当前值」的项（倍速、画面）用它，
 /// 值直接写在按钮上，不用点开才知道现在是什么状态。
 struct PlayerGlassPill: View {
