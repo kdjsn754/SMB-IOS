@@ -85,7 +85,7 @@ enum VideoThumbnailMirror {
 
             var head: Data
             do {
-                head = try await connection.read(path, offset: 0, length: Int(length), cancel: cancel)
+                head = try await connection.thumbRead(path, offset: 0, length: Int(length), cancel: cancel)
             } catch {
                 lastError = "读文件头失败：\(error.localizedDescription)"
                 continue
@@ -106,7 +106,7 @@ enum VideoThumbnailMirror {
                 if let cached = probe.moovData, Int64(cached.count) == moov.size {
                     moovBytes = cached
                 } else {
-                    moovBytes = try? await connection.read(
+                    moovBytes = try? await connection.thumbRead(
                         path, offset: moov.offset, length: Int(moov.size), cancel: cancel
                     )
                 }
@@ -211,7 +211,7 @@ enum VideoThumbnailMirror {
 
         while offset + 8 <= fileSize, boxes.count < probeBoxLimit {
             if cancel.isCancelled { return nil }
-            guard let head = try? await connection.read(
+            guard let head = try? await connection.thumbRead(
                 path, offset: offset, length: 16, cancel: cancel
             ), head.count >= 8 else { break }
             guard let size32 = MP4Inspector.readU32(head, 0),
@@ -234,7 +234,7 @@ enum VideoThumbnailMirror {
             switch type {
             case "moov":
                 if size <= maxMoovSize,
-                   let data = try? await connection.read(
+                   let data = try? await connection.thumbRead(
                        path, offset: offset, length: Int(size), cancel: cancel
                    ), Int64(data.count) == size {
                     moovData = data

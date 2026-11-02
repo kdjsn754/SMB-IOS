@@ -26,6 +26,15 @@ actor SMBConnection {
     private var manager: SMB2Manager?
     private var connecting: Task<SMB2Manager, Error>?
 
+    // MARK: - 缩略图专用会话（3 条独立 socket）
+
+    /// 缩略图通道数。文档（Android 端实测）给的是 3：4 条以上时部分群晖 / 路由器共享
+    /// 会开始回 `STATUS_INSUFFICIENT_RESOURCES`，3 条已经把「小文件往返延迟」这张网织密。
+    private static let thumbnailChannelCount = 3
+    private var thumbnailManagers: [SMB2Manager?] = [nil, nil, nil]
+    private var thumbnailConnecting: [Int: Task<SMB2Manager, Error>] = [:]
+    private var thumbnailCursor = 0
+
     init(server: SMBServer, password: String) {
         self.server = server
         self.password = password
@@ -87,9 +96,15 @@ actor SMBConnection {
     }
 
     func disconnect() async {
-        guard let manager else { return }
-        try? await manager.disconnectShare()
-        self.manager = nil
+        if let manager {
+            try? await manager.disconnectShare()
+            self.manager = nil
+        }
+        for thumbnail in thumbnailManagers {
+            try? await thumbnail?.disconnectShare()
+        }
+        thumbnailManagers = [nil, nil, nil]
+        thumbnailConnecting = [:]
     }
 
     /// 作废当前连接（回前台时调用）。
@@ -100,6 +115,84 @@ actor SMBConnection {
     func invalidate() {
         manager = nil
         connecting = nil
+        thumbnailManagers = [nil, nil, nil]
+        thumbnailConnecting = [:]
+    }
+
+    // MARK: - 缩略图读取（3 条独立会话）
+
+    /// 读缩略图 / 照片头部这类小文件的字节，走**独立的 3 条会话**，不和列目录、播放抢同一条连接。
+    ///
+    /// 为什么不是「一条连接上并发三个读」：一条 TCP 只有一条接收流水线，多个文件的响应
+    /// 只能排队到达。而缩略图这种百 KB 级文件的耗时几乎全是往返延迟（WiFi 下 3~5 ms / 次），
+    /// 只有让多个请求**同时在飞**，把几十次往返重叠起来，目录才会一批一批地出图
+    /// （Android 端把这叫 THUMB 通道，见优化说明第 2、3 节）。
+    ///
+    /// 失败时只作废这一条通道，主连接（列目录 / 播放）不受影响。
+    func thumbRead(_ path: String, offset: Int64, length: Int, cancel: CancellationBox? = nil) async throws -> Data {
+        guard length > 0, offset >= 0 else { return Data() }
+        let start = UInt64(offset)
+        let end = start &+ UInt64(length)
+        let index = nextThumbnailChannel()
+
+        let manager: SMB2Manager
+        do {
+            manager = try await thumbnailManager(at: index)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // 建不起独立会话（个别服务器限制同账号并发连接）：退回主连接。
+            // 功能不能丢，只是拿不到并发收益 —— 绝不能因为「多开一条连接」让缩略图全不加载。
+            thumbnailManagers[index] = nil
+            return try await transfer(path: path, range: start..<end, cancel: cancel)
+        }
+
+        do {
+            let data: Data = try await manager.contents(
+                atPath: path,
+                range: start..<end,
+                progress: { _, _ in !(cancel?.isCancelled ?? false) }
+            )
+            if cancel?.isCancelled == true { throw CancellationError() }
+            return data
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if cancel?.isCancelled == true { throw CancellationError() }
+            // 只作废这一条通道；主连接（列目录 / 播放）不受影响
+            self.thumbnailManagers[index] = nil
+            throw SMBFailure.operation(Self.describe(error))
+        }
+    }
+
+    /// 三条通道轮询取用。并发 3 时正好一条一个，不会都挤在同一个 socket 上。
+    private func nextThumbnailChannel() -> Int {
+        let index = thumbnailCursor % Self.thumbnailChannelCount
+        thumbnailCursor = (thumbnailCursor + 1) % Self.thumbnailChannelCount
+        return index
+    }
+
+    /// 懒建会话：第一条通道还没建好时，后面两条会各自并行建，不会串成一队。
+    private func thumbnailManager(at index: Int) async throws -> SMB2Manager {
+        if let manager = thumbnailManagers[index] { return manager }
+        if let task = thumbnailConnecting[index] { return try await task.value }
+
+        let server = self.server
+        let password = self.password
+        let task = Task<SMB2Manager, Error> {
+            try await SMBConnection.makeManager(server: server, password: password)
+        }
+        thumbnailConnecting[index] = task
+
+        do {
+            let manager = try await task.value
+            self.thumbnailManagers[index] = manager
+            self.thumbnailConnecting[index] = nil
+            return manager
+        } catch {
+            self.thumbnailConnecting[index] = nil
+            throw error
+        }
     }
 
     // MARK: - 目录与文件

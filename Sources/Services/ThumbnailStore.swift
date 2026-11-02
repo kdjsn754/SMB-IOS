@@ -5,13 +5,15 @@ import AVFoundation
 ///
 /// 设计要点：
 /// 1. 同一个文件只生成一份 480px 缩略图，网格和列表共用，避免同一张图取两次。
-/// 2. 图片和视频共用一道有序闸门（一次一个，先比优先级层再比格子序号放行）：
+/// 2. 图片和视频共用一道有序闸门（**同时 3 个**，先比优先级层再比格子序号放行）：
 ///    前台（屏幕上的格子）严格按「左上 → 右下」依次出现；目录级后台预载（`isPrefetch`）
 ///    排在所有前台之后，负责把整个文件夹的缩略图都加载完。
 ///    优先级是**活值**（`PriorityBox`）：预载抢先建的任务一旦被前台格子 join，
 ///    闸门立刻按前台对待，不会出现「第一个文件反而最后出来」。
-/// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输。
-/// 4. 失败的文件进负缓存冷却几分钟，避免「划回去就重试」把 NAS 打满。
+///    并发 3 必须配 `SMBConnection` 的 3 条缩略图会话才有效果 —— 见那里。
+/// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输；
+///    单张还有 15 s 时间预算，到点让位，避免一个卡住的请求堵死整屏。
+/// 4. 失败的文件进负缓存冷却 45 s，避免「划回去就重试」把 NAS 打满。
 final class ThumbnailStore: @unchecked Sendable {
     static let shared = ThumbnailStore()
 
@@ -25,9 +27,19 @@ final class ThumbnailStore: @unchecked Sendable {
     /// 超过这个大小就不再整份塞进内存，改成边读边落临时文件，让 ImageIO 从文件里取
     private static let imageMemoryLimit: Int64 = 24 * 1024 * 1024
     /// 分块读取大小（单次 SMB 读请求上限）
-    private static let imageReadChunk: Int = 8 * 1024 * 1024
-    /// 失败冷却时间
-    private static let failureTTL: TimeInterval = 180
+    private static let imageReadChunk: Int = 4 * 1024 * 1024
+    /// 照片快路径：只读头部这么多字节，够把 EXIF APP1（最大 64 KB）连内嵌缩略图一起拿到
+    private static let quickPathHeaderBytes = 256 * 1024
+    /// 照片快路径只对 jpg/jpeg 生效（只有它们带 EXIF 内嵌缩略图）
+    private static let quickPathExtensions: Set<String> = ["jpg", "jpeg"]
+    /// 小于这个体积的图整份读更快，不值得多一次「读头部 → 失败回退」的判断
+    private static let quickPathMinSize: Int64 = 3 * 1024 * 1024
+    /// 单张缩略图的总时间预算。超时就掐断并记一次失败，把并发名额让给后面的 ——
+    /// 否则一个卡住的请求会把整屏缩略图堵死（Android 端踩过：300 MB 视频把队列占十几分钟）
+    private static let jobBudgetNanos: UInt64 = 15 * 1_000_000_000
+    /// 失败冷却时间。原来 180 s 太长：一次网络抖动换来三分钟的图标，用户得重进目录才有机会重来；
+    /// 45 s 足够躲开「正在被播放 / 正在被镜像」这类瞬时状态。
+    private static let failureTTL: TimeInterval = 45
     /// AVFoundation 无法解码的容器，直接不做封面，避免白读十几兆
     private static let undecodableVideoExtensions: Set<String> = [
         "mkv", "avi", "wmv", "flv", "rmvb", "rm", "webm", "vob"
@@ -63,20 +75,49 @@ final class ThumbnailStore: @unchecked Sendable {
         }
     }
 
+    /// 单张缩略图是否被 `jobBudget` 掐断过。掐断和「用户取消」要区分对待：
+    /// 后者不记失败（下次出现还要重来），前者要进冷却（这文件确实难搞）。
+    private final class TimeoutFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+
+        /// 返回 true 表示是它第一次触发（避免重复 cancel）
+        func mark() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if fired { return false }
+            fired = true
+            return true
+        }
+
+        var isFired: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return fired
+        }
+    }
+
     private let memory = NSCache<NSString, UIImage>()
     private let lock = NSLock()
     private var jobs: [String: Job] = [:]
     private var failures: [String: Date] = [:]
 
-    /// 缩略图唯一的闸门：图片和视频共用，一次只跑一个、按格子序号放行。
-    /// 分成「图片 3 并发 + 视频 1 并发」两道闸门时是排不出全局顺序的
-    /// （视频可能比它前面几张图片先返回），所以合并成一道。
-    /// 空闲后的新一批先聚集 250 ms 再挑最小序号，避免「后出现的格子抢到第一个名额」。
-    private let displayLimiter = OrderedLimiter(limit: 1, settleMilliseconds: 250)
+    /// 缩略图唯一的闸门：图片和视频共用，**一次跑 3 个**、按格子序号放行。
+    ///
+    /// 并发 1 → 3 是这轮的主要提速点：单个小文件的耗时几乎全是 SMB 往返延迟，
+    /// 三个同时在飞，等于把「几十张串行」变成「三张三张地出」。
+    /// 放行规则一点没变（先比优先级层，再比格子序号），所以观感仍是
+    /// 「从左上第一张开始出」，不会出现「中间某张先冒出来」。
+    ///
+    /// 并发数必须和 `SMBConnection` 的缩略图会话数一致（3 条独立 socket）——
+    /// 只加并发不加会话，三条请求还是挤在一条 TCP 上排队，等于没加。
+    private let displayLimiter = OrderedLimiter(limit: 3, settleMilliseconds: 250)
 
     init() {
-        memory.countLimit = 400
-        memory.totalCostLimit = 40 * 1024 * 1024
+        memory.countLimit = 600
+        // 64 MB：一个 480px 的格子约 0.4~0.9 MB，够压住两三个满屏目录，
+        // 滑动回去时不用再读网络（原来是 40 MB，翻几屏就被挤掉了）
+        memory.totalCostLimit = 64 * 1024 * 1024
     }
 
     /// 进后台时调用：把还在排队的缩略图任务全部取消。
@@ -239,7 +280,7 @@ final class ThumbnailStore: @unchecked Sendable {
         var image: UIImage?
         switch item.kind {
         case .image, .video:
-            // 图片和视频共用一道闸门：一次只跑一个、按「优先级层 + 格子序号」放行 ——
+            // 图片和视频共用一道闸门：最多三个同时在跑、按「优先级层 + 格子序号」放行 ——
             // 优先级是共享盒的活值：预载任务排队期间被前台格子 join，
             // 这里读到的就是前台层，随时插到整屏前台队列的正确位置
             await displayLimiter.acquire(order: order, priority: priority)
@@ -247,18 +288,37 @@ final class ThumbnailStore: @unchecked Sendable {
                 await displayLimiter.release()
                 return nil
             }
+
+            // 单张时间预算：到点就掐断传输（读在块边界干净退出），把名额让出去。
+            // 不这么做的话，一个卡在 NAS 那边的大文件会把三个名额之一永久占住。
+            let timeout = TimeoutFlag()
+            let watchdog = Task {
+                try? await Task.sleep(nanoseconds: Self.jobBudgetNanos)
+                guard !Task.isCancelled else { return }
+                if timeout.mark() { cancel.cancel() }
+            }
             if item.kind == .image {
                 image = await imageThumbnail(item: item, connection: connection, cancel: cancel)
             } else {
                 image = await videoThumbnail(item: item, connection: connection, cancel: cancel)
             }
+            watchdog.cancel()
             await displayLimiter.release()
+            // 超时跟「用户取消」不是一回事：要记一次失败进冷却，别让它在滚动时反复重试
+            if timeout.isFired { markFailure(key: key) }
         case .folder, .other:
             return nil
         }
 
         // 被取消就不落盘、也不记失败，下次出现时还能重来
         if cancel.isCancelled { return nil }
+
+        // 绿帧绝不进缓存：一旦落盘就永久化了（Android 端为此每张封面都是绿的）
+        if item.kind == .video, let frame = image, ImageValidator.isMostlyGreen(frame) {
+            ThumbnailDiagnostics.record(item.name, "取到纯绿帧，不缓存")
+            markFailure(key: key)
+            return nil
+        }
 
         if let image, let data = image.jpegData(compressionQuality: 0.72) {
             try? data.write(to: url, options: .atomic)
@@ -296,6 +356,17 @@ final class ThumbnailStore: @unchecked Sendable {
             return nil
         }
 
+        // ① 照片快路径：只读头部 256 KB，取 EXIF 里那张内嵌缩略图。
+        //    手机拍的照片基本都带一张 320~480 的预览图 —— 一张 8 MB 的照片
+        //    不必把整份拉下来，这一条把「照片目录」的首屏从几十次往返压到一次。
+        //    解不出来（或太小）就返回 nil，继续走下面的整份读，绝不让「省流量」变成「没图」。
+        if let quick = await embeddedThumbnail(
+            item: item, size: size, connection: connection, cancel: cancel
+        ) {
+            return quick
+        }
+        if cancel.isCancelled { return nil }
+
         if size > Self.imageMemoryLimit {
             return await largeImageThumbnail(
                 item: item, size: size, connection: connection, cancel: cancel
@@ -313,7 +384,7 @@ final class ThumbnailStore: @unchecked Sendable {
             let want = min(Self.imageReadChunk, total - data.count)
             let chunk: Data
             do {
-                chunk = try await connection.read(item.path, offset: offset, length: want, cancel: cancel)
+                chunk = try await connection.thumbRead(item.path, offset: offset, length: want, cancel: cancel)
             } catch is CancellationError {
                 return nil
             } catch {
@@ -335,6 +406,34 @@ final class ThumbnailStore: @unchecked Sendable {
             return nil
         }
         return image
+    }
+
+    /// 照片快路径：读头部 256 KB，从 EXIF 里取内嵌缩略图。
+    ///
+    /// 只在「jpg/jpeg + ≥ 3 MB」时尝试：小图整份读本来就比一次判断更快，
+    /// 而且不带 EXIF 的图（截图、导出图）多读一次头纯属浪费。
+    /// 任何失败都返回 `nil` 让调用方回退，**不在这里记失败** —— 快路径失败不代表这张图没救。
+    private func embeddedThumbnail(
+        item: FileItem,
+        size: Int64,
+        connection: SMBConnection,
+        cancel: CancellationBox
+    ) async -> UIImage? {
+        guard Self.quickPathExtensions.contains(item.fileExtension),
+              size >= Self.quickPathMinSize else { return nil }
+
+        let want = Int(min(size, Int64(Self.quickPathHeaderBytes)))
+        guard want > 0 else { return nil }
+
+        do {
+            let header = try await connection.thumbRead(
+                item.path, offset: 0, length: want, cancel: cancel
+            )
+            guard !header.isEmpty, !cancel.isCancelled else { return nil }
+            return JPEGEmbeddedThumbnail.image(fromHeader: header, maxPixel: Self.pixelSize)
+        } catch {
+            return nil
+        }
     }
 
     /// 大图：边读边写临时文件，再让 ImageIO 从文件里解码出缩略图。
@@ -363,7 +462,7 @@ final class ThumbnailStore: @unchecked Sendable {
             while written < size {
                 if cancel.isCancelled { return nil }
                 let want = Int(min(Int64(Self.imageReadChunk), size - written))
-                let chunk = try await connection.read(
+                let chunk = try await connection.thumbRead(
                     item.path, offset: written, length: want, cancel: cancel
                 )
                 if chunk.isEmpty { break }
