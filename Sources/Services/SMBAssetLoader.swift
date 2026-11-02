@@ -123,8 +123,10 @@ final class SMBAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
                     }
                     guard size > 0 else { break }
 
-                    let data = try await connection.read(
-                        path, offset: offset + sent, length: size, cancel: cancel
+                    // 走**视频专用缩略图通道**而不是主连接：抽帧会连着发几十个 range 请求，
+                    // 挤在主连接上会和列目录 / 正在播放的视频互抢，播放端就会卡顿。
+                    let data = try await connection.thumbRead(
+                        path, offset: offset + sent, length: size, lane: .video, cancel: cancel
                     )
                     if data.isEmpty { break }
                     if request.isCancelled { return }

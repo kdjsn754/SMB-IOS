@@ -25,15 +25,8 @@ import UIKit
 enum VideoThumbnailMirror {
     /// moov 读进内存的上限
     private static let maxMoovSize: Int64 = 8 * 1024 * 1024
-    /// 极小的片子至少也要读这么多
-    private static let minPrefix: Int64 = 8 * 1024 * 1024
-    /// 文件开头依次尝试取的字节数（覆盖头几秒的画面数据，够抽第一帧）。
-    /// 单个 GOP 大的片子（4K / 高码率）12 MB 装不下第一帧，所以要逐级加大。
-    private static let prefixAttempts: [Int64] = [
-        12 * 1024 * 1024,
-        24 * 1024 * 1024,
-        40 * 1024 * 1024
-    ]
+    /// 镜像至少读这么多（首帧落点很靠前时也别读得太抠，留点余量给解析器）
+    private static let minPrefix: Int64 = 2 * 1024 * 1024
     /// 镜像最多读这么多（再大就只是在浪费流量）
     private static let maxPrefix: Int64 = 48 * 1024 * 1024
     /// 分片 MP4 的镜像目标长度：切在不超过这个长度的最后一个 fragment 边界上
@@ -42,10 +35,6 @@ enum VideoThumbnailMirror {
     private static let probeBoxLimit = 64
     /// 小于这个大小的片子可以整份读进来（等于不截断），镜像才安全
     static let wholeFileLimit: Int64 = 64 * 1024 * 1024
-    /// 「先镜像」的上限（1.5.1）：超过这个大小的片子先走流式取帧，
-    /// 只读 moov + 首个 GOP，通常只有几兆，比整份读 24~64 MB 快一个数量级。
-    /// 流式失败时仍会退回镜像（见 `ThumbnailStore.videoThumbnail`），宁慢不空。
-    static let cheapMirrorLimit: Int64 = 24 * 1024 * 1024
 
     private struct Probe {
         let summary: MP4Inspector.Summary
@@ -80,6 +69,12 @@ enum VideoThumbnailMirror {
 
         let ext = fileExtension.isEmpty ? "mp4" : fileExtension
         let lengths = mirrorLengths(summary: summary, fileSize: fileSize)
+        guard !lengths.isEmpty else {
+            // 首帧落在镜像上限之外：不在本地拼接上浪费几十兆流量，交给流式兜底
+            let offset = summary.videoTrack?.firstSampleOffset ?? -1
+            ThumbnailDiagnostics.record(name, "首帧@\(offset) 超出镜像上限，交给流式")
+            return nil
+        }
         var lastError = "未知原因"
         var triedLength: Int64 = 0
 
@@ -149,7 +144,14 @@ enum VideoThumbnailMirror {
 
     // MARK: - 镜像长度
 
-    /// 决定镜像要读多少字节。分片 MP4 只能切在 fragment 边界上；普通 MP4 逐级加大。
+    /// 决定镜像要读多少字节。分片 MP4 只能切在 fragment 边界上；普通 MP4 按首帧落点**精确算一次**。
+    ///
+    /// 1.5.2：不再 12 → 24 → 40 → 48 MB 逐级重读。旧逻辑对首帧靠后的片子会把同一部片
+    /// 从头读四遍（最多 124 MB 流量），而抽帧失败往往和镜像长度无关（结构本身有问题），
+    /// 重试只是白烧流量、白占视频通道。现在：
+    /// - 能算出首帧落点 → 只读「首帧末尾 + 1 MB」这一段（通常 2~6 MB），一次到位；
+    /// - 首帧落在 48 MB 之后 → 返回空，交给流式兜底（镜像要读几十兆还不一定覆盖得到）；
+    /// - 算不出落点（分片 / 异常）→ 小片整份读，大片只试开头一段。
     private static func mirrorLengths(summary: MP4Inspector.Summary, fileSize: Int64) -> [Int64] {
         if summary.isFragmented {
             // 切在「完整 fragment 的结尾」：最后一个盒子的 end 就是安全边界
@@ -162,34 +164,14 @@ enum VideoThumbnailMirror {
             if boundary > 0 { return [min(boundary, fileSize)] }
         }
 
-        // 超过镜像上限（48 MB）但还小到能整份读进来：直接整份读一次，
-        // 别按 12/24/40/48 一次次试 —— 截断的镜像本来就会被判「样本偏移越界」，白费流量
-        if fileSize > maxPrefix, fileSize <= wholeFileLimit {
-            return [fileSize]
-        }
-
-        var first = min(fileSize, max(minPrefix, prefixAttempts[0]))
-        // 首个视频样本的落点是最硬的约束：GOP 再大也不能把它切掉
         if let video = summary.videoTrack, video.firstSampleOffset > 0, video.firstSampleSize > 0 {
             let need = video.firstSampleOffset + video.firstSampleSize + 1024 * 1024
-            if need > first {
-                first = min(min(fileSize, maxPrefix), need)
-            }
+            guard need <= maxPrefix else { return [] }
+            return [min(fileSize, max(minPrefix, need))]
         }
 
-        var candidates: [Int64] = [first]
-        for base in prefixAttempts {
-            candidates.append(min(fileSize, max(minPrefix, base)))
-        }
-        candidates.append(min(fileSize, maxPrefix))
-        if fileSize <= wholeFileLimit { candidates.append(fileSize) }
-        candidates.sort()
-
-        var unique: [Int64] = []
-        for value in candidates where value > 0 {
-            if unique.last != value { unique.append(value) }
-        }
-        return unique
+        if fileSize <= wholeFileLimit { return [fileSize] }
+        return [min(fileSize, minPrefix)]
     }
 
     private static func temporaryURL(ext: String) -> URL {

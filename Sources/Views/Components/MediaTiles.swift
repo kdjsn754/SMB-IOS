@@ -37,17 +37,16 @@ struct ThumbnailImage: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             } else {
+                // 占位先站住（系统相册的做法）：加载中也直接显示图标，不转圈 ——
+                // 「转圈消失 → 图出现」会让人盯着每一格看，出图稍有一点先后就像乱序；
+                // 「图标 → 图」是一整片安静地逐格被替换，观感才和相册一致。
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(Color(uiColor: .secondarySystemFill))
                     .overlay {
-                        if failed {
-                            Image(systemName: placeholderIcon)
-                                .font(.system(size: 20, weight: .regular))
-                                .foregroundStyle(.tertiary)
-                        } else {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
+                        Image(systemName: placeholderIcon)
+                            .font(.system(size: 20, weight: .regular))
+                            .foregroundStyle(.tertiary)
+                            .opacity(failed ? 1 : 0.55)
                     }
             }
         }
@@ -73,10 +72,8 @@ struct ThumbnailImage: View {
     }
 
     private func load() async {
-        if let cached = ThumbnailStore.shared.cachedThumbnail(for: item, serverID: serverID) {
-            apply(cached)
-            return
-        }
+        // 不在格子这一层直接读内存缓存：所有「上屏」都要经过 `ThumbnailStore` 的
+        // 按序发布层，否则秒出的那张会插到正在读网络的格子前面（肉眼可见的乱序）。
         if image == nil { failed = false }
 
         let result = await ThumbnailStore.shared.thumbnail(

@@ -92,7 +92,9 @@ enum VideoFrameDecoder {
             player.replaceCurrentItem(with: nil)
         }
 
-        let deadline = Date().addingTimeInterval(12)
+        // 12 → 7 s：这条路只是兜底（镜像已经先试过了），首帧正常情况下 1~2 s 就到；
+        // 等太久会把单张缩略图预算（15 s）吃光，读者 / 生成器两条后路连试都试不上
+        let deadline = Date().addingTimeInterval(7)
         var waited = 0
         while Date() < deadline {
             if Task.isCancelled { return (nil, "已取消") }

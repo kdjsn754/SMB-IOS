@@ -28,25 +28,25 @@ actor SMBConnection {
 
     // MARK: - 缩略图专用会话（4 条独立 socket）
 
-    /// 缩略图通道怎么分：`0~2` 给图片（3 条并发正好一条一个），`3` 单独留给视频封面。
+    /// 缩略图通道怎么分：`0~2` 给图片（3 条并发正好一条一个），`3~4` 留给视频封面。
     ///
-    /// 为什么视频要独占一条：视频封面要读 `moov` / 首个 GOP（几兆到几十兆）、还要抽帧解码，
-    /// 一张封面能把照片的名额占住 1~15 s。分道之后「一屏照片里夹着几个视频」不再拖慢整屏，
-    /// 这是 1.5.1 的主要提速点之一。
+    /// 为什么视频要独占通道：视频封面要读 `moov` / 首个 GOP（几兆到几十兆）再抽帧解码，
+    /// 一张封面能把照片的名额占住 2~15 s。分道之后「一屏照片里夹着几个视频」不再拖慢整屏，
+    /// 这是 1.5.1 的提速点之一。
     enum ThumbLane {
         case image
         case video
     }
 
-    /// 通道总数 4：图片 3 + 视频 1。文档（Android 端实测）提到 4 条以上个别群晖 / 路由器
-    /// 会开始回 `STATUS_INSUFFICIENT_RESOURCES`，所以不往上加 —— 建不起来的那条
+    /// 通道总数 5：图片 3 + 视频 2。文档（Android 端实测）提到 4 条以上个别群晖 / 路由器
+    /// 会开始回 `STATUS_INSUFFICIENT_RESOURCES`，所以不再往上加 —— 建不起来的那条
     /// 会退回主连接，功能不受影响。
-    private static let thumbnailChannelCount = 4
-    /// 视频封面专用通道下标
-    private static let videoChannel = 3
-    private var thumbnailManagers: [SMB2Manager?] = Array(repeating: nil, count: 4)
+    private static let imageChannelCount = 3
+    private static let thumbnailChannelCount = 5
+    private var thumbnailManagers: [SMB2Manager?] = Array(repeating: nil, count: 5)
     private var thumbnailConnecting: [Int: Task<SMB2Manager, Error>] = [:]
-    private var thumbnailCursor = 0
+    private var imageCursor = 0
+    private var videoCursor = 0
 
     init(server: SMBServer, password: String) {
         self.server = server
@@ -155,7 +155,7 @@ actor SMBConnection {
         guard length > 0, offset >= 0 else { return Data() }
         let start = UInt64(offset)
         let end = start &+ UInt64(length)
-        let index = lane == .video ? Self.videoChannel : nextImageChannel()
+        let index = lane == .video ? nextVideoChannel() : nextImageChannel()
 
         let manager: SMB2Manager
         do {
@@ -189,8 +189,16 @@ actor SMBConnection {
 
     /// 图片通道 0~2 轮询取用。图片并发 3 时正好一条一个，不会都挤在同一个 socket 上。
     private func nextImageChannel() -> Int {
-        let index = thumbnailCursor % Self.videoChannel
-        thumbnailCursor = (thumbnailCursor + 1) % Self.videoChannel
+        let index = imageCursor % Self.imageChannelCount
+        imageCursor = (imageCursor + 1) % Self.imageChannelCount
+        return index
+    }
+
+    /// 视频通道 3~4 轮询。一部片的抽帧会连着发几十个 range 请求，两条通道轮着用，
+    /// 两条请求流不会挤在同一个 socket 的接收流水线上互相等。
+    private func nextVideoChannel() -> Int {
+        let index = Self.imageChannelCount + videoCursor % (Self.thumbnailChannelCount - Self.imageChannelCount)
+        videoCursor = (videoCursor + 1) % (Self.thumbnailChannelCount - Self.imageChannelCount)
         return index
     }
 
