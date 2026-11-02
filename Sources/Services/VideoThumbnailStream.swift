@@ -24,6 +24,17 @@ enum VideoThumbnailStream {
         guard fileSize > 0, !cancel.isCancelled else { return nil }
         let name = (path as NSString).lastPathComponent
 
+        // 先看一眼编码：`hev1` 要在字节流上改标签（Apple 只认 `hvc1`），
+        // `4:4:4` / `4:2:2` 的 HEVC 则根本没有解码器 —— 别让下面的抽帧白等 7 秒。
+        let probe = await MP4CodecTag.probe(
+            connection: connection, path: path, fileSize: fileSize, cancel: cancel
+        )
+        if probe.isUndecodableOnIOS {
+            ThumbnailDiagnostics.record(name, "\(probe.unsupportedDescription) 编码，iOS 解不了")
+            return nil
+        }
+        if cancel.isCancelled { return nil }
+
         let budget = ByteBudget(limit: byteBudget)
         let asset = MediaAssetFactory.shared.makeAsset(
             connection: connection,
@@ -31,7 +42,8 @@ enum VideoThumbnailStream {
             fileSize: fileSize,
             fileExtension: fileExtension,
             budget: budget,
-            cancel: cancel
+            cancel: cancel,
+            codecProbe: probe
         )
         defer { MediaAssetFactory.shared.release(asset) }
 

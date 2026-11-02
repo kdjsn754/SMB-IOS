@@ -896,6 +896,14 @@ final class ThumbnailStore: @unchecked Sendable {
         }
         guard size > 0 else { return nil }
 
+        // 已经探明是 iOS 解不了的编码（HEVC 4:4:4 / 4:2:2）：直接放弃，
+        // 别再走一遍「读 moov + 三次抽帧等超时」—— 一屏都是这种片子时会白烧流量和时间
+        if let known = MP4CodecTag.cachedProbe(
+            connection: connection, path: item.path, fileSize: size
+        ), known.isUndecodableOnIOS {
+            return nil
+        }
+
         // ① 迷你镜像（**所有大小都先走这条**）：读 16 字节盒子头摸结构 → 只读
         //    「首帧落点 + moov」拼成本地小文件，本地解码器抽首帧。一次 2~12 MB，两秒内出图。
         //

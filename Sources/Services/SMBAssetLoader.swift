@@ -12,6 +12,8 @@ final class SMBAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
     private let fileSize: Int64
     private let contentType: String?
     private let chunkSize: Int
+    /// `hev1` → `hvc1` 的标签修正。不给就原样透传（绝大多数片子都不需要改）
+    private let codecProbe: VideoCodecProbe
 
     /// 本次资源允许传输的字节额度；`nil` 表示不限（播放用）。
     /// 生成视频封面时必须给额度，否则 AVFoundation 会一路读到文件末尾。
@@ -25,6 +27,7 @@ final class SMBAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
         fileExtension: String,
         budget: ByteBudget? = nil,
         cancel: CancellationBox? = nil,
+        codecProbe: VideoCodecProbe = .empty,
         chunkSize: Int = 1024 * 1024
     ) {
         self.connection = connection
@@ -32,6 +35,7 @@ final class SMBAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
         self.fileSize = fileSize
         self.budget = budget
         self.cancel = cancel
+        self.codecProbe = codecProbe
         self.chunkSize = max(64 * 1024, chunkSize)
         if !fileExtension.isEmpty, let type = UTType(filenameExtension: fileExtension) {
             self.contentType = type.identifier
@@ -104,6 +108,7 @@ final class SMBAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
         let chunk = chunkSize
         let budget = self.budget
         let cancel = self.cancel
+        let codecProbe = self.codecProbe
 
         Task {
             do {
@@ -135,7 +140,9 @@ final class SMBAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
                         return
                     }
 
-                    dataRequest.respond(with: data)
+                    dataRequest.respond(
+                        with: codecProbe.applyingPatch(to: data, base: offset + sent)
+                    )
                     sent += Int64(data.count)
                     budget?.consume(Int64(data.count))
                     if data.count < size { break }
@@ -172,7 +179,8 @@ final class MediaAssetFactory: @unchecked Sendable {
         fileSize: Int64,
         fileExtension: String,
         budget: ByteBudget? = nil,
-        cancel: CancellationBox? = nil
+        cancel: CancellationBox? = nil,
+        codecProbe: VideoCodecProbe = .empty
     ) -> AVURLAsset {
         let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let ext = fileExtension.isEmpty ? "mp4" : fileExtension
@@ -185,7 +193,8 @@ final class MediaAssetFactory: @unchecked Sendable {
             fileSize: fileSize,
             fileExtension: ext,
             budget: budget,
-            cancel: cancel
+            cancel: cancel,
+            codecProbe: codecProbe
         )
         let queue = DispatchQueue(label: "com.smbviewer.asset.\(token)")
 

@@ -275,6 +275,22 @@ final class VideoPlaybackModel: ObservableObject {
         }
 
         errorMessage = nil
+
+        // 先探一次编码再建资产：
+        // - `hev1` 标签 Apple 不认（只认 `hvc1`），探测结果会带着改写位置进 loader；
+        // - `4:4:4` / `4:2:2` 的 HEVC 在 iOS 上根本没有解码器，直接说清楚，
+        //   别让用户对着黑屏等半天还不知道为什么。
+        let codecProbe = await MP4CodecTag.probe(
+            connection: connection, path: item.path, fileSize: size
+        )
+        if codecProbe.isUndecodableOnIOS {
+            errorMessage = """
+            这个视频是 \(codecProbe.unsupportedDescription) 编码，iPhone 上没有任何播放器能解码。
+            用电脑转成 H.264（或 HEVC 4:2:0）之后就能正常播放。
+            """
+            return
+        }
+
         let previousAsset = currentAsset
         currentAsset = nil
 
@@ -282,7 +298,8 @@ final class VideoPlaybackModel: ObservableObject {
             connection: connection,
             path: item.path,
             fileSize: size,
-            fileExtension: item.fileExtension
+            fileExtension: item.fileExtension,
+            codecProbe: codecProbe
         )
         currentAsset = asset
 

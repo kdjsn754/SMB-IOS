@@ -67,6 +67,16 @@ enum VideoThumbnailMirror {
             return nil
         }
 
+        // 编码标签与色度格式：`hev1` 得在镜像字节里改成 `hvc1` 才解得动（Apple 只认 hvc1）；
+        // `4:4:4` / `4:2:2` 的 HEVC 干脆没有解码器，别再往下烧流量。
+        // 结果顺手记进缓存，用户点开播放时不用重新探测。
+        let codec = probe.moovData.map { MP4CodecTag.analyze(moov: $0, base: moov.offset) } ?? .empty
+        MP4CodecTag.remember(codec, connection: connection, path: path, fileSize: fileSize)
+        if codec.isUndecodableOnIOS {
+            ThumbnailDiagnostics.record(name, "\(codec.unsupportedDescription) 编码，iOS 解不了")
+            return nil
+        }
+
         let ext = fileExtension.isEmpty ? "mp4" : fileExtension
         let lengths = mirrorLengths(summary: summary, fileSize: fileSize)
         guard !lengths.isEmpty else {
@@ -96,7 +106,10 @@ enum VideoThumbnailMirror {
 
             // 普通 MP4：mdat 被截断了，必须把声明长度改成实际字节数，
             // 否则解析器一看「声明 512 MB、文件只有 12 MB」直接判损坏（-11821 的常见来源）
-            let mirrored = summary.isFragmented ? head : patchMdatSize(head, layout: summary)
+            let mirrored = codec.applyingPatch(
+                to: summary.isFragmented ? head : patchMdatSize(head, layout: summary),
+                base: 0
+            )
 
             // moov 落在镜像之外（moov-at-end）就接到末尾
             var tail = Data()
@@ -113,7 +126,8 @@ enum VideoThumbnailMirror {
                     lastError = "moov 只读到部分字节（应为 \(moov.size)）"
                     continue
                 }
-                tail = bytes
+                // moov 接在镜像末尾时，坐标要从它自己的起点算
+                tail = codec.applyingPatch(to: bytes, base: moov.offset)
             }
             if cancel.isCancelled { return nil }
 
