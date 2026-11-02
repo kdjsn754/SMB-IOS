@@ -568,7 +568,7 @@ final class VideoPlaybackModel: ObservableObject {
     private func loadTracks(for item: AVPlayerItem) {
         let asset = item.asset
 
-        if let group = asset.mediaSelectionGroup(for: .legible) {
+        if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
             subtitleGroup = group
             var list: [MediaTrack] = []
             var map: [String: AVMediaSelectionOption] = [:]
@@ -597,7 +597,7 @@ final class VideoPlaybackModel: ObservableObject {
             selectedSubtitle = nil
         }
 
-        if let group = asset.mediaSelectionGroup(for: .audible) {
+        if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .audible) {
             audioGroup = group
             var list: [MediaTrack] = []
             var map: [String: AVMediaSelectionOption] = [:]
