@@ -6,7 +6,7 @@ import AVFoundation
 /// 设计要点：
 /// 1. 同一个文件只生成一份 480px 缩略图，网格和列表共用，避免同一张图取两次。
 /// 2. 图片和视频共用一道有序闸门（**同时 3 个**，先比优先级层再比格子序号放行）：
-///    前台（屏幕上的格子）严格按「左上 → 右下」依次出现；目录级后台预载（`isPrefetch`）
+///    前台（屏幕上的格子）**开始跑**的顺序严格按「左上 → 右下」；目录级后台预载（`isPrefetch`）
 ///    排在所有前台之后，负责把整个文件夹的缩略图都加载完。
 ///    优先级是**活值**（`PriorityBox`）：预载抢先建的任务一旦被前台格子 join，
 ///    闸门立刻按前台对待，不会出现「第一个文件反而最后出来」。
@@ -14,6 +14,9 @@ import AVFoundation
 /// 3. 每次读取都有字节上限，取消时通过 `CancellationBox` 立刻中止传输；
 ///    单张还有 15 s 时间预算，到点让位，避免一个卡住的请求堵死整屏。
 /// 4. 失败的文件进负缓存冷却 45 s，避免「划回去就重试」把 NAS 打满。
+/// 5. 并发 3 之后「放行」有序但「完成」无序 —— 三个名额同时在飞，谁先读完谁先上屏。
+///    所以真图上屏前还要过一道按序发布层（`PublishOrder`）：等所有更小序号的任务
+///    都结束才返回。读提速、观感仍是「左上 → 右下」逐张出。
 final class ThumbnailStore: @unchecked Sendable {
     static let shared = ThumbnailStore()
 
@@ -75,6 +78,114 @@ final class ThumbnailStore: @unchecked Sendable {
         }
     }
 
+    /// 按序发布协调器：并发读的结果按「格子序号」依次放行上屏。
+    ///
+    /// 闸门并发 3 之后，「放行」有序但「完成」无序 —— 三个名额同时在飞，谁先读完
+    /// 谁先上屏，第 2、3 张的小图会抢在第 1 张的大视频前面（用户实测：「缩略图
+    /// 又不是按顺序放出来了」）。把「读」与「出」拆开：读保持 3 并发（提速不动），
+    /// 出图在这里排队 —— 任务创建时 `begin` 登记序号；真图到手后 `waitTurn`，
+    /// 只要还有**更小序号**的任务没跑完就挂着，直到它们 `end`。
+    ///
+    /// - 失败 / 取消的返回占位图标，占位长得都一样、没有排序意义，不在这里等；
+    ///   但它们的 `end` 照样登记 —— 否则后面的序号被永久压住。
+    /// - `end` 由 `produce` 的 `defer` 无条件执行（成功 / 失败 / 超时 / 取消都到），
+    ///   所以等待最坏压住一个单张预算（15 s），不存在死锁。
+    /// - 用「活跃集合」而不是「推进计数（nextToRelease++）」：重进目录 / 刷新时
+    ///   序号重新从 0 开始，上一代留下的推进值会把新一代任务全部误判成「已轮到」、
+    ///   直接放行又乱序；活跃集合只看「前面还有没有人没跑完」，换代天然自洽。
+    private final class PublishOrder: @unchecked Sendable {
+        static let shared = PublishOrder()
+
+        private let lock = NSLock()
+        /// 目录键 -> 仍在跑（未 end）的格子序号
+        private var active: [String: Set<Int>] = [:]
+        /// 目录键 -> 序号 -> 等待放行的续体
+        private var waiters: [String: [Int: [CheckedContinuation<Void, Never>]]] = [:]
+
+        /// 同一台服务器下按目录分组：不同目录的序号互相独立，
+        /// A 目录卡住的任务不许压住 B 目录刚点开的格子
+        private static func dirKey(serverID: UUID, path: String) -> String {
+            var dir = path
+            if let slash = dir.lastIndex(of: "/") { dir = String(dir[..<slash]) }
+            return serverID.uuidString + "|" + dir
+        }
+
+        func begin(serverID: UUID, path: String, order: Int) {
+            let dir = Self.dirKey(serverID: serverID, path: path)
+            lock.lock()
+            active[dir, default: []].insert(order)
+            lock.unlock()
+        }
+
+        func end(serverID: UUID, path: String, order: Int) {
+            let dir = Self.dirKey(serverID: serverID, path: path)
+            lock.lock()
+            active[dir]?.remove(order)
+            if active[dir]?.isEmpty == true { active[dir] = nil }
+            // 找出刚获得放行资格的等待者：它前面再没有活跃序号了
+            var ready: [CheckedContinuation<Void, Never>] = []
+            if let running = active[dir] {
+                if var perOrder = waiters[dir] {
+                    for (waitingOrder, continuations) in perOrder
+                    where running.allSatisfy({ $0 >= waitingOrder }) {
+                        perOrder[waitingOrder] = nil
+                        ready.append(contentsOf: continuations)
+                    }
+                    waiters[dir] = perOrder.isEmpty ? nil : perOrder
+                }
+            } else if let perOrder = waiters.removeValue(forKey: dir) {
+                for continuations in perOrder.values { ready.append(contentsOf: continuations) }
+            }
+            lock.unlock()
+            for continuation in ready { continuation.resume() }
+        }
+
+        /// 等所有更小序号的任务结束。已轮到就立即返回；
+        /// 等待期间任务被取消也放行（调用方检查取消标记自行返回）。
+        func waitTurn(serverID: UUID, path: String, order: Int) async {
+            let dir = Self.dirKey(serverID: serverID, path: path)
+
+            lock.lock()
+            let running = active[dir]
+            if running == nil || running!.allSatisfy({ $0 >= order }) {
+                lock.unlock()
+                return
+            }
+            lock.unlock()
+
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    lock.lock()
+                    // 双检：快速路径判断和真正挂起之间，前面的任务可能刚好全部 end
+                    let running = active[dir]
+                    if running == nil || running!.allSatisfy({ $0 >= order }) {
+                        lock.unlock()
+                        continuation.resume()
+                        return
+                    }
+                    waiters[dir, default: [:]][order, default: []].append(continuation)
+                    lock.unlock()
+                }
+            } onCancel: {
+                withdraw(dir: dir, order: order)
+            }
+        }
+
+        /// 取消时从等待队列摘除自己的续体。摘到才 resume —— `end` 那边摘不到就
+        /// 不会再 resume，两边靠「同一把锁下的字典移除只有一方成功」保证不双 resume。
+        private func withdraw(dir: String, order: Int) {
+            lock.lock()
+            var continuation: CheckedContinuation<Void, Never>?
+            if var perOrder = waiters[dir], var list = perOrder[order] {
+                continuation = list.popLast()
+                if list.isEmpty { perOrder[order] = nil } else { perOrder[order] = list }
+                if perOrder.isEmpty { waiters[dir] = nil } else { waiters[dir] = perOrder }
+            }
+            lock.unlock()
+            continuation?.resume()
+        }
+    }
+
     /// 单张缩略图是否被 `jobBudget` 掐断过。掐断和「用户取消」要区分对待：
     /// 后者不记失败（下次出现还要重来），前者要进冷却（这文件确实难搞）。
     private final class TimeoutFlag: @unchecked Sendable {
@@ -102,12 +213,12 @@ final class ThumbnailStore: @unchecked Sendable {
     private var jobs: [String: Job] = [:]
     private var failures: [String: Date] = [:]
 
-    /// 缩略图唯一的闸门：图片和视频共用，**一次跑 3 个**、按格子序号放行。
+    /// 缩略图读端的闸门：图片和视频共用，**一次跑 3 个**、按格子序号放行。
     ///
     /// 并发 1 → 3 是这轮的主要提速点：单个小文件的耗时几乎全是 SMB 往返延迟，
-    /// 三个同时在飞，等于把「几十张串行」变成「三张三张地出」。
-    /// 放行规则一点没变（先比优先级层，再比格子序号），所以观感仍是
-    /// 「从左上第一张开始出」，不会出现「中间某张先冒出来」。
+    /// 三个同时在飞，等于把「几十张串行」变成「三张三张地读」。
+    /// 注意它只保证**开始**的顺序，不保证**完成**的顺序 —— 完成序由 `PublishOrder`
+    /// 兜住（见下）。1.4.10 只加了并发、没加发布层，用户实测「缩略图不按顺序出了」。
     ///
     /// 并发数必须和 `SMBConnection` 的缩略图会话数一致（3 条独立 socket）——
     /// 只加并发不加会话，三条请求还是挤在一条 TCP 上排队，等于没加。
@@ -213,11 +324,13 @@ final class ThumbnailStore: @unchecked Sendable {
 
         let box = CancellationBox()
         let priority = PriorityBox(isPrefetch ? 1 : 0)
+        // 按序发布层登记序号（只登记一次 —— join 进来的等待者用的是同一个 job）
+        PublishOrder.shared.begin(serverID: serverID, path: item.path, order: order)
         let task = Task<UIImage?, Never> { [weak self] in
             guard let self else { return nil }
             return await self.produce(
                 key: key, item: item, serverID: serverID, connection: connection,
-                order: order, priority: priority, cancel: box
+                order: order, priority: priority, isPrefetch: isPrefetch, cancel: box
             )
         }
         let job = Job(task: task, box: box, priority: priority)
@@ -264,8 +377,13 @@ final class ThumbnailStore: @unchecked Sendable {
         connection: SMBConnection,
         order: Int,
         priority: PriorityBox,
+        isPrefetch: Bool,
         cancel: CancellationBox
     ) async -> UIImage? {
+        // 结束登记必须无条件发生：按序发布层靠「更小序号都结束了」放行，
+        // 漏一次 end 就把后面的序号永久压住
+        defer { PublishOrder.shared.end(serverID: serverID, path: item.path, order: order) }
+
         let cache = CacheManager.shared
         let url = cache.thumbnailURL(serverID: serverID, item: item)
 
@@ -325,6 +443,13 @@ final class ThumbnailStore: @unchecked Sendable {
             cache.noteWrite(bytes: Int64(data.count))
         } else {
             markFailure(key: key)
+        }
+
+        // 按序发布：读是 3 并发、完成顺序不可控，真图要等更小序号的任务都出完再返回。
+        // 失败 / 取消返回的占位图标长得都一样，没有排序意义，不在这里等；
+        // 预载任务（isPrefetch）同样不等 —— 它们的结果进缓存，不直接上屏。
+        if let image, !isPrefetch, !cancel.isCancelled {
+            await PublishOrder.shared.waitTurn(serverID: serverID, path: item.path, order: order)
         }
         return image
     }
