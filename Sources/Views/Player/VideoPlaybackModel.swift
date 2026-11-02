@@ -275,10 +275,8 @@ final class VideoPlaybackModel: ObservableObject {
         }
 
         errorMessage = nil
-        if let previous = currentAsset {
-            MediaAssetFactory.shared.release(previous)
-            currentAsset = nil
-        }
+        let previousAsset = currentAsset
+        currentAsset = nil
 
         let asset = MediaAssetFactory.shared.makeAsset(
             connection: connection,
@@ -306,6 +304,10 @@ final class VideoPlaybackModel: ObservableObject {
 
         observe(playerItem)
         player.replaceCurrentItem(with: playerItem)
+        // 旧资产等换完再放：先放会把它底下还在读的 loader 拆掉
+        if let previousAsset {
+            MediaAssetFactory.shared.release(previousAsset)
+        }
         applyMute()
         player.defaultRate = playbackRate
         player.play()
