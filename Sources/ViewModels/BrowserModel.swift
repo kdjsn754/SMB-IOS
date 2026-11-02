@@ -10,6 +10,13 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
+    /// 目录内容代次：`items` 每换一批就 +1。
+    ///
+    /// 给外面那张「排序结果缓存」做失效判断用（见 `BrowserView.visibleItems`）。
+    /// **故意不是 `@Published`**：它总是和 `items` 一起变，跟着 `items` 那次刷新重算就够了，
+    /// 再多发一次通知只会让整页多算一遍。
+    private(set) var revision: Int = 0
+
     /// 退出全屏看图后的一小段「不认点击」时间窗。
     ///
     /// **故意不是 `@Published`**：写入它不能触发刷新。退出看图那一刻目录页刚从转场里
@@ -40,6 +47,7 @@ final class BrowserModel: ObservableObject {
         do {
             let list = try await connection.listDirectory(path)
             items = Self.sorted(list)
+            revision &+= 1
         } catch {
             if items.isEmpty {
                 errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

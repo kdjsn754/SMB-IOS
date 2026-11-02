@@ -26,6 +26,9 @@ struct BrowserView: View {
         _model = StateObject(wrappedValue: BrowserModel(server: server, path: path))
     }
 
+    /// 排序 + 搜索之后的结果缓存（引用类型，不参与 SwiftUI 观察）
+    @State private var listCache = DisplayListCache()
+
     private var title: String {
         path == "/" ? server.share : (path as NSString).lastPathComponent
     }
@@ -34,13 +37,21 @@ struct BrowserView: View {
         BrowserSort(rawValue: sortRaw) ?? .name
     }
 
-    /// 文件夹永远在前，其余按用户选择的排序方式
+    /// 当前排序 + 搜索之后的列表。
+    ///
+    /// **结果带缓存**：`body` 里要读它三次（网格 / 列表 / 预载），而点一下格子、
+    /// `overlay` 一翻就会让整页重算。每次重排几百项（`localizedStandardCompare`
+    /// 是代价最高的一类比较）正好压在「点开文件」那一帧的转场上，掉帧就掉在这里。
+    /// 缓存键 = 目录代次 + 排序方式 + 关键词，三者都不变就直接复用上次的数组。
     private var visibleItems: [FileItem] {
         let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = keyword.isEmpty
-            ? model.items
-            : model.items.filter { $0.name.localizedCaseInsensitiveContains(keyword) }
-        return currentSort.sorted(base)
+        let key = "\(model.revision)|\(sortRaw)|\(keyword)"
+        return listCache.value(for: key) {
+            let base = keyword.isEmpty
+                ? model.items
+                : model.items.filter { $0.name.localizedCaseInsensitiveContains(keyword) }
+            return currentSort.sorted(base)
+        }
     }
 
     /// 三列等宽、列内顶部对齐。每个格子的缩略图展示框高度固定（见 `TileAspect.box`），
@@ -102,6 +113,13 @@ struct BrowserView: View {
             // （用户 1.3.4 实测：这段时间里滚动、点文件夹都正常，只有 pop 手势没反应）。
             // 见 `PopGestureEnabler`。
             PopGestureEnabler.enableAfterModalDismiss()
+            // 看图时停掉的整目录缩略图预载，等退出转场结束再接回去。
+            // 延时 0.4 秒：退出缩回格子那几十帧里不要有任何后台读取抢 SMB / CPU。
+            Task {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                guard overlay == nil else { return }
+                startThumbnailPrefetch()
+            }
         }) { item in
             switch item {
             case .images(let request):
@@ -365,6 +383,15 @@ struct BrowserView: View {
     private func open(_ item: FileItem) {
         // 刚退出全屏看图的一小段时间内不认点击（见 `BrowserModel.noteViewerDismissed`）
         guard model.canOpenViewer else { return }
+
+        // 点开文件之前先把「整目录缩略图预载」停掉。
+        // `SMBConnection` 是 actor，同一时刻只跑一个读请求：预载还在逐个拉几十个文件的
+        // 封面时，刚点开的这张原图只能排在它们后面 —— 转场已经把缩略图放大到全屏了，
+        // 原图却还在队尾等，用户看到的就是「点开之后要糊一会儿才清晰」。
+        // 退出看图时再重启（见 `fullScreenCover` 的 `onDismiss`）。
+        thumbnailPrefetch?.cancel()
+        thumbnailPrefetch = nil
+
         switch item.kind {
         case .image:
             let images = visibleItems.filter { $0.kind == .image }
@@ -375,5 +402,23 @@ struct BrowserView: View {
         case .folder, .other:
             break
         }
+    }
+}
+
+/// 目录列表「排序 + 搜索」的结果缓存。
+///
+/// 故意做成引用类型而不是 `@State` 值：只在 `visibleItems` 计算属性里读，
+/// 不参与 SwiftUI 的依赖追踪；键没变就是一个数组引用直接返回，零重排。
+@MainActor
+private final class DisplayListCache {
+    private var key: String?
+    private var items: [FileItem] = []
+
+    func value(for key: String, build: () -> [FileItem]) -> [FileItem] {
+        if key == self.key { return items }
+        let built = build()
+        self.key = key
+        self.items = built
+        return built
     }
 }

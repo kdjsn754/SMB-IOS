@@ -33,7 +33,8 @@ import UIKit
 /// - **触摸探针**（`TouchProbeRecognizer`）：挂在窗口上的一个从不接收触摸的空识别器，
 ///   唯一作用是在手指**刚碰到屏幕**时（`shouldReceive`）立刻 `sweep()` 一遍，
 ///   再在下一拍 runloop 补一次 —— 早于系统判定「缩到阈值」，且完全不改变任何手势语义；
-/// - 轮询改为**恒定 100 ms**（不再 3 秒后降频），兜住系统在任何时刻的重挂；
+/// - 轮询改为**恒定 250 ms**（不再 3 秒后降频），兜住系统在任何时刻的重挂
+///   （手指落下那一下已经由探针同步处理，轮询只是兜底，不需要更密）；
 /// - 看图页 `index` 变化（翻页）时立刻 `enforce()` 一次。
 struct PinchDismissDisabler: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIViewController {
@@ -62,9 +63,13 @@ final class PinchDismissGuard: NSObject, UIGestureRecognizerDelegate {
     /// 系统捏合退出识别器的私有类名（iOS 26/27，社区验证）。
     private static let targetClassNames: Set<String> = ["_UITransformGestureRecognizer"]
 
-    /// 常驻轮询间隔。整树遍历是微秒级（页面树几十个节点），
-    /// 100 ms 一次的代价远低于一次缩略图解码，换来的是任何时刻重挂都能在一拍内被清掉。
-    private static let pollInterval: UInt64 = 100_000_000
+    /// 常驻轮询间隔。
+    ///
+    /// 「手指刚落下」这一刻已经由触摸探针同步兜住了（`shouldReceive` 里当场 `sweep()`），
+    /// 轮询只是防止「手没动、系统自己把识别器挂回来」这种极端情况，不需要 100 ms 那么密。
+    /// 屏幕上还压着底层目录页的上百个格子视图，整树遍历在主线程上跑，
+    /// 100 ms 一次在退出转场期间是会抢帧的 —— 放到 250 ms，行为不变、开销降到 1/2.5。
+    private static let pollInterval: UInt64 = 250_000_000
 
     private weak var host: UIViewController?
     /// 触摸探针：挂在窗口上、从不接收触摸，只在手指落下时触发清理。

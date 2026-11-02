@@ -193,9 +193,19 @@ struct VideoPlayerView: View {
     ///
     /// 反过来（先 dismiss 再转）的话，退出去那一帧下面还是横着的浏览器，
     /// 随后再被掰回竖屏，看起来就是「页面先横着闪一下」。
+    ///
+    /// **只在方向真的要变时才等**：竖屏看竖屏视频（最常见的一种）根本不用转，
+    /// 白等 260 ms 就变成「点了关闭还顿一下」，退出动画被硬生生推迟了。
     private func close() {
         engine.setLocked(false)
         chrome.locked = false
+
+        guard ScreenOrientationController.current != entryMode else {
+            ScreenOrientationController.restore(to: entryMode)
+            dismiss()
+            return
+        }
+
         ScreenOrientationController.restore(to: entryMode)
         Task {
             // 等几何动画（约 0.25 s）走完再退
