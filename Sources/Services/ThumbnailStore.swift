@@ -164,7 +164,7 @@ final class ThumbnailStore: @unchecked Sendable {
             // 同一个序号被重复登记（预载 + 格子 join）时保留最早的计时，不重置停滞预算；
             // 但上一代留下的残项（大于两个停滞预算还没清）要按新一代重新计时，
             // 否则重进目录时序号 0 的旧时间戳会把新任务直接判成「已停滞」、顺序保护失效。
-            if let started = perOrder[order], now &- started <= stallNanos * 2 {
+            if let started = perOrder[order], now &- started <= Self.stallNanos * 2 {
                 // 同一代，保留原计时
             } else {
                 perOrder[order] = now
@@ -214,13 +214,7 @@ final class ThumbnailStore: @unchecked Sendable {
             let dir = Self.dirKey(serverID: serverID, path: path)
             while true {
                 if Task.isCancelled { return }
-
-                lock.lock()
-                let running = active[dir] ?? [:]
-                let now = DispatchTime.now().uptimeNanoseconds
-                let at = Self.deadline(running: running, order: order, now: now)
-                lock.unlock()
-                guard let at else { return }
+                guard let at = nextStallPoint(dir: dir, order: order) else { return }
 
                 // 两路赛跑：一路等前面结束，一路睡到停滞点。谁先到都重算一遍。
                 // 被取消的那一路会走 `withdraw`，把续体摘掉再 resume，不会泄漏。
@@ -234,6 +228,17 @@ final class ThumbnailStore: @unchecked Sendable {
                     group.cancelAll()
                 }
             }
+        }
+
+        /// 同步取一次「下一个停滞点」。锁只在同步上下文里用
+        /// （`NSLock.lock()` 在 async 上下文里不可用，Swift 6 会直接报错）。
+        private func nextStallPoint(dir: String, order: Int) -> UInt64? {
+            lock.lock()
+            defer { lock.unlock() }
+            let running = active[dir] ?? [:]
+            return Self.deadline(
+                running: running, order: order, now: DispatchTime.now().uptimeNanoseconds
+            )
         }
 
         private func waitForRelease(dir: String, order: Int) async {
