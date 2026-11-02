@@ -32,8 +32,9 @@ final class ThumbnailStore: @unchecked Sendable {
     private static let imageHardLimit: Int64 = 160 * 1024 * 1024
     /// 超过这个大小就不再整份塞进内存，改成边读边落临时文件，让 ImageIO 从文件里取
     private static let imageMemoryLimit: Int64 = 24 * 1024 * 1024
-    /// 分块读取大小（单次 SMB 读请求上限）
-    private static let imageReadChunk: Int = 4 * 1024 * 1024
+    /// 大图落盘时的分块大小。>= 8 MB 的块会在通道层自动切段、多会话并发读，
+    /// 所以这里给 16 MB：既让并行生效，又把内存峰值压在 16 MB 以内。
+    private static let imageReadChunk: Int = 16 * 1024 * 1024
     /// 照片快路径：只读头部这么多字节，够把 EXIF APP1（最大 64 KB）连内嵌缩略图一起拿到
     private static let quickPathHeaderBytes = 256 * 1024
     /// 照片快路径只对 jpg/jpeg 生效（只有它们带 EXIF 内嵌缩略图）
@@ -140,7 +141,7 @@ final class ThumbnailStore: @unchecked Sendable {
 
         /// 一个格子最多挡后面的图多久。正常照片远小于它，所以常态就是严格按序；
         /// 视频封面（3~15 s）到点自动让位，不让整屏等一张封面。
-        static let stallNanos: UInt64 = 2_500_000_000
+        static let stallNanos: UInt64 = 1_000_000_000
 
         private let lock = NSLock()
         /// 目录键 -> 序号 -> 登记时间（uptime 纳秒）
@@ -303,12 +304,21 @@ final class ThumbnailStore: @unchecked Sendable {
     private var jobs: [String: Job] = [:]
     private var failures: [String: Date] = [:]
 
-    /// 图片车道：**同时 3 个**、按「优先级层 + 格子序号」放行，对应 3 条专用会话。
+    /// 图片车道：**同时 6 个**、按「优先级层 + 格子序号」放行，对应 6 条专用会话。
     ///
-    /// 并发 1 → 3 是 1.4.10 的主要提速点：单个小文件的耗时几乎全是 SMB 往返延迟，
-    /// 三个同时在飞，等于把「几十张串行」变成「三张三张地读」。
+    /// 单个小文件的耗时几乎全是 SMB 往返延迟，多几个同时在飞，等于把「几十张串行」
+    /// 变成「六张六张地读」。1.6.0 从 3 提到 6：千兆下 3 条会话的吞吐上限只到
+    /// 300~400 Mbps（单连接没有请求流水线），6 条才开始摸到网卡上限。
     /// 完成序由 `PublishOrder` 兜住（见上）。
-    private let imageLimiter = OrderedLimiter(limit: 3, settleMilliseconds: 100)
+    private let imageLimiter = OrderedLimiter(limit: 6, settleMilliseconds: 60)
+
+    /// 后台预载的独立闸门：**最多 3 个**同时进图片/视频车道。
+    ///
+    /// 预载和前台格子共用同一个车道，如果让它把 6 个名额全占满，用户往下滑时
+    /// 新格子只能等前面那几张几 MB 的大图读完 —— 观感就是「滑一下、停一下」。
+    /// 给它单独限到 3，剩下 3 个名额永远留给屏幕上的格子：后台照旧填满整个目录，
+    /// 前台随时插得进来。这是「速度不稳」的另一半原因。
+    private let prefetchGate = AsyncLimiter(limit: 3)
 
     /// 视频车道：**同时 2 个**，对应 2 条专用会话。
     ///
@@ -550,7 +560,18 @@ final class ThumbnailStore: @unchecked Sendable {
         var image: UIImage?
         switch item.kind {
         case .image, .video:
-            // 分道放行：照片走图片车道（3 并发），视频封面走视频车道（2 并发），
+            // 后台预载先过自己的小闸门：最多 3 个在跑，永远给前台留 3 个名额
+            if isPrefetch { await prefetchGate.acquire() }
+            defer {
+                if isPrefetch {
+                    // 这里的 release 是异步的：defer 体不能 await，扔一个 Task 收尾。
+                    // 晚几微秒释放不影响正确性，只是下一波预载稍晚一点开始。
+                    let gate = prefetchGate
+                    Task { await gate.release() }
+                }
+            }
+
+            // 分道放行：照片走图片车道（6 并发），视频封面走视频车道（2 并发），
             // 视频再慢也不会占住照片的名额。优先级是共享盒的活值：
             // 预载任务排队期间被前台格子 join，这里读到的就是前台层。
             let limiter = item.kind == .video ? videoLimiter : imageLimiter
@@ -658,26 +679,20 @@ final class ThumbnailStore: @unchecked Sendable {
         }
 
         let total = Int(size)
-        var data = Data()
-        // 只预留在 16MB 以内，避免一张大图一上来就吃掉大块内存
-        data.reserveCapacity(min(total, 16 * 1024 * 1024))
-        var offset: Int64 = 0
-
-        while data.count < total {
-            if cancel.isCancelled { return nil }
-            let want = min(Self.imageReadChunk, total - data.count)
-            let chunk: Data
-            do {
-                chunk = try await connection.thumbRead(item.path, offset: offset, length: want, cancel: cancel)
-            } catch is CancellationError {
-                return nil
-            } catch {
-                ThumbnailDiagnostics.record(item.name, "读取失败：\(error.localizedDescription)")
-                return nil
-            }
-            if chunk.isEmpty { break }
-            data.append(chunk)
-            offset += Int64(chunk.count)
+        // **一次把整份读回来**（不再按 4 MB 分块反复调）。
+        // 每次 `contents` 都要在服务端 open + close 一次文件，8 MB 的图分两块就是白付
+        // 两轮往返；而超过 8 MB 时 `SMBConnection.thumbRead` 内部会自动切段、多条会话
+        // 并发读 —— 分段并行只在这一层调用上才生效，这里分块会把并行能力挡掉。
+        let data: Data
+        do {
+            data = try await connection.thumbRead(
+                item.path, offset: 0, length: total, cancel: cancel
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            ThumbnailDiagnostics.record(item.name, "读取失败：\(error.localizedDescription)")
+            return nil
         }
 
         // 没读满就是残缺数据：宁可显示占位图标，也不要糊一张半截图上去

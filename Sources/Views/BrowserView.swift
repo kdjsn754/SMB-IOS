@@ -372,8 +372,17 @@ struct BrowserView: View {
         let serverID = server.id
         let items = currentSort.sorted(model.items)
         guard !items.isEmpty else { return }
+
+        // 先把 6 条图片会话并行建好，别让首屏每一格各等一次 TCP + 认证握手
+        // （「刚进目录那一下特别慢」主要就是它）。已建好的通道会直接返回。
+        Task {
+            await connection.prewarmThumbnailChannels()
+        }
+
         thumbnailPrefetch = Task {
-            let window = 4
+            // 8 个在飞：图片闸门 6 并发 + 视频车道 2 并发，后台填充才吃得满
+            // 6 条图片会话，不会只看 4 个在跑、2 条通道空着。
+            let window = 8
             await withTaskGroup(of: Void.self) { group in
                 var next = 0
                 while next < items.count, next < window {
