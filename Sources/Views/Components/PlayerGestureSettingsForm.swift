@@ -19,12 +19,8 @@ struct PlayerGestureSettingsSections: View {
         Section {
             Toggle("启用手势", isOn: $gestures.isEnabled)
 
-            Picker("双击画面", selection: $gestures.doubleTap) {
-                ForEach(DoubleTapAction.allCases) { action in
-                    Text(action.title).tag(action)
-                }
-            }
-            .disabled(!gestures.isEnabled)
+            DoubleTapMenuRow()
+                .disabled(!gestures.isEnabled)
 
             Picker("快进 / 快退", selection: $gestures.seekStep) {
                 ForEach(PlayerGestureSettings.seekStepChoices, id: \.self) { step in
@@ -74,6 +70,50 @@ struct PlayerGestureSettingsSections: View {
                 onReset?()
             }
         }
+    }
+}
+
+/// 「双击画面」单独用 `Menu`，不用 `Picker(.menu)`。
+///
+/// 这个动作的选项文案最长（「两侧快退/快进，中间播放暂停」），系统 menu picker 会把选中值
+/// 挤到标题下面折行，看着像多冒出来一行副标题（1.3.35 用户截图：「双击画面这个看着很别扭」）。
+/// 改成自绘 Menu：行尾只显示短文案（`shortTitle`，如「两侧快进」），
+/// 点开的菜单里仍然列完整描述，选完立刻生效。
+@MainActor
+private struct DoubleTapMenuRow: View {
+    @ObservedObject private var gestures = PlayerGestureSettings.shared
+
+    var body: some View {
+        Menu {
+            ForEach(DoubleTapAction.allCases) { action in
+                Button {
+                    gestures.doubleTap = action
+                } label: {
+                    if gestures.doubleTap == action {
+                        Label(action.title, systemImage: "checkmark")
+                    } else {
+                        Text(action.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Text("双击画面")
+                    .foregroundStyle(.primary)
+
+                Spacer(minLength: 8)
+
+                Text(gestures.doubleTap.shortTitle)
+                    .foregroundStyle(.secondary)
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .opacity(gestures.isEnabled ? 1 : 0.45)
     }
 }
 

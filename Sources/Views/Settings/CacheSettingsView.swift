@@ -54,8 +54,6 @@ struct CacheSettingsView: View {
                 .disabled(cacheLimit == 0)
             } header: {
                 SettingsSectionTitle("上限")
-            } footer: {
-                Text("超出上限后按写入时间从旧到新删除，一直删到 80% 为止。")
             }
 
             Section {
@@ -86,8 +84,6 @@ struct CacheSettingsView: View {
                 .buttonStyle(.plain)
             } header: {
                 SettingsSectionTitle("清理")
-            } footer: {
-                Text("只删除这台设备上的缓存，服务器里的原文件不受影响。")
             }
         }
         .toast($toast)

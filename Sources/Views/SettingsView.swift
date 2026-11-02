@@ -29,13 +29,8 @@ struct SettingsView: View {
                     Section {
                         ThemePicker(selection: $themeRaw)
                             .padding(.vertical, 6)
-                            // 行背景留空，让两块玻璃浮在分组背景上（叠在白色卡片上几乎看不出边界）
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
                     } header: {
                         SettingsSectionTitle("外观")
-                    } footer: {
-                        Text("主题会立刻应用到整个 App，不需要重启。")
                     }
 
                     Section {
@@ -64,8 +59,6 @@ struct SettingsView: View {
                         }
                     } header: {
                         SettingsSectionTitle("浏览")
-                    } footer: {
-                        Text("缓存只存在这台设备上，不会改动服务器里的文件。")
                     }
 
                     Section {
@@ -82,8 +75,6 @@ struct SettingsView: View {
                         }
                     } header: {
                         SettingsSectionTitle("播放")
-                    } footer: {
-                        Text("手势只在播放页生效，改完立即应用。")
                     }
 
                     Section {

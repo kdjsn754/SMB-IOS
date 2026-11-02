@@ -37,8 +37,6 @@ struct ThumbnailSettingsView: View {
                 .disabled(!thumbnailsEnabled)
             } header: {
                 SettingsSectionTitle("显示")
-            } footer: {
-                Text("关掉之后只显示文件类型图标，目录加载会更快。")
             }
 
             Section {

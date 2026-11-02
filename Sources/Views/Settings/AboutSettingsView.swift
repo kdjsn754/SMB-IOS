@@ -30,8 +30,6 @@ struct AboutSettingsView: View {
                 LabeledContent("网络库", value: "AMSMB2 · libsmb2")
             } header: {
                 SettingsSectionTitle("连接")
-            } footer: {
-                Text("只读访问：浏览、看图、看视频，不会修改服务器的文件。")
             }
 
             Section {
