@@ -77,6 +77,9 @@ final class VideoPlaybackModel: ObservableObject {
     @Published var downloadProgress: Double?
     @Published var isDownloading = false
     @Published var isPlaying = false
+    /// 视频画面尺寸（已按旋转元数据摆正，宽 > 高就是横片）。
+    /// 播放页拿它决定进页面时自动转横屏还是竖屏。
+    @Published private(set) var videoSize: CGSize = .zero
     /// 播放器音量（0…1），右上角音量面板与上下拖动手势共用同一份，退出重进也记得
     @Published fileprivate(set) var volume: Float = 1
 
@@ -84,6 +87,7 @@ final class VideoPlaybackModel: ObservableObject {
 
     private var currentAsset: AVURLAsset?
     private var statusCancellable: AnyCancellable?
+    private var sizeCancellable: AnyCancellable?
     private var endObserver: NSObjectProtocol?
     private var timeObserver: Any?
     /// 长按加速前的播放状态，松开后要还原
@@ -196,6 +200,8 @@ final class VideoPlaybackModel: ObservableObject {
     private func resetPlaybackState() {
         seekToken &+= 1
         progress.reset()
+        // 换片时先清尺寸：否则上一部的横竖判断会留在 `videoSize` 上
+        videoSize = .zero
     }
 
     /// 手指按下进度条（或开始横向拖画面）：记下起点，之后界面只认 `scrubTime`。
@@ -295,6 +301,8 @@ final class VideoPlaybackModel: ObservableObject {
         player.pause()
         player.replaceCurrentItem(with: nil)
         statusCancellable = nil
+        sizeCancellable = nil
+        videoSize = .zero
         isPlaying = false
         progress.setScrubTime(nil)
         progress.setSeeking(false)
@@ -348,12 +356,32 @@ final class VideoPlaybackModel: ObservableObject {
         statusCancellable = item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak item] status in
+                guard let self else { return }
+                // 兜底：有些流 ready 那一刻 KVO 还没把尺寸推过来，这里补读一次
+                if status == .readyToPlay, let size = item?.presentationSize {
+                    self.adopt(size)
+                }
                 guard status == .failed else { return }
                 let reason = item?.error?.localizedDescription ?? "编码格式不受支持或网络中断"
                 // 失败时把播放键还原成「播放」，否则它会一直停在暂停图标上
-                self?.isPlaying = false
-                self?.errorMessage = "无法播放：\(reason)"
+                self.isPlaying = false
+                self.errorMessage = "无法播放：\(reason)"
             }
+
+        // `presentationSize` 已经算上 `preferredTransform`，
+        // 手机竖拍的 MOV 也能拿到「看起来是竖的」宽高，不用自己解旋转。
+        // 就绪前是 `.zero`，所以用 KVO 跟着它走，别只在 status 回调里读一次。
+        sizeCancellable = item.publisher(for: \.presentationSize)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] size in
+                self?.adopt(size)
+            }
+    }
+
+    /// 收下视频尺寸。只认有效值、只在真的变了才赋值（`@Published` 一 set 整页重算）。
+    private func adopt(_ size: CGSize) {
+        guard size.width > 0, size.height > 0, size != videoSize else { return }
+        videoSize = size
     }
 
     private func configureAudioSession() {
@@ -450,6 +478,15 @@ struct VideoPlayerView: View {
 
     @State private var chromeVisible = true
     @State private var hideTask: Task<Void, Never>?
+
+    // 横竖屏
+    /// 当前是不是横屏。跟着真实布局尺寸算，旋转完成后由 SwiftUI 自己回调过来，
+    /// 比监听 `UIDevice.orientationDidChangeNotification` 准（那个在锁屏/分屏下会骗人）。
+    @State private var isLandscape = false
+    /// 用户手动切过之后就不再按视频比例自动转，尊重手动选择
+    @State private var manualMode: ScreenMode?
+    /// 自动转只做一次，否则回调重入会把用户后来的手动选择抢回去
+    @State private var didAutoOrient = false
 
     // 手势反馈
     @StateObject private var hud = HUDState()
@@ -549,8 +586,17 @@ struct VideoPlayerView: View {
             }
             // 导航栏整个不要：顶部控件自己做（关闭 / 标题 / ⋯），才能跟着自动隐藏一起淡出
             .toolbar(.hidden, for: .navigationBar)
+            .onGeometryChange(for: Bool.self) { proxy in
+                proxy.size.width > proxy.size.height
+            } action: { landscape in
+                isLandscape = landscape
+            }
         }
         .preferredColorScheme(.dark)
+        // 视频尺寸就绪（首次读元数据可能几百毫秒）后按比例转一次
+        .onChange(of: model.videoSize) { _, size in
+            applyAutoOrientation(for: size)
+        }
         .alert("播放器手势", isPresented: $showGestureHelp) {
             Button("知道了", role: .cancel) {}
         } message: {
@@ -571,7 +617,28 @@ struct VideoPlayerView: View {
             holdStartTask?.cancel()
             singleTapTask?.cancel()
             model.stop()
+            // 放开方向锁，交给系统按机身姿态落回去（不是硬掰成竖屏）
+            ScreenOrientationController.release()
         }
+    }
+
+    // MARK: - 横竖屏
+
+    /// 按视频比例自动转：宽/高 ≥ 1.15 当横片（4:3、16:9 都算），
+    /// 1.15 以下留在竖屏（竖拍、方形）。只自动一次。
+    private func applyAutoOrientation(for size: CGSize) {
+        guard manualMode == nil, !didAutoOrient,
+              size.width > 0, size.height > 0 else { return }
+        didAutoOrient = true
+        ScreenOrientationController.lock(size.width / size.height >= 1.15 ? .landscape : .portrait)
+    }
+
+    /// 顶部按钮：手动切横竖屏
+    private func toggleOrientation() {
+        let target: ScreenMode = isLandscape ? .portrait : .landscape
+        manualMode = target
+        ScreenOrientationController.lock(target)
+        scheduleHide()
     }
 
     /// 菜单里「手势说明」显示的内容，按当前设置动态生成，避免说明和实际不一致
@@ -976,6 +1043,20 @@ struct VideoPlayerView: View {
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
+
+            // 手动切横竖屏。图标画的是「点下去会变成的方向」，不是当前方向。
+            Button {
+                toggleOrientation()
+            } label: {
+                Image(systemName: isLandscape ? "rectangle.portrait" : "rectangle.landscape")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.black.opacity(0.45), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isLandscape ? "切换到竖屏" : "切换到横屏")
 
             Menu {
                 if zoom > 1.01 {

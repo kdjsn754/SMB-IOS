@@ -4,6 +4,9 @@ import UIKit
 @main
 @MainActor
 struct SMBViewerApp: App {
+    /// 只为播放页的横竖屏锁定存在：SwiftUI 没有 supportedInterfaceOrientations 的入口，
+    /// 必须挂一个 delegate。
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var app = AppModel()
     @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.light.rawValue
     @Environment(\.scenePhase) private var scenePhase

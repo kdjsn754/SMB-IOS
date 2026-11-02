@@ -1,0 +1,93 @@
+import SwiftUI
+import UIKit
+
+/// 屏幕形态。播放页只用这两个：横屏 / 竖屏。
+enum ScreenMode {
+    case portrait
+    case landscape
+
+    var mask: UIInterfaceOrientationMask {
+        switch self {
+        case .portrait: return .portrait
+        case .landscape: return .landscape
+        }
+    }
+
+    var toggled: ScreenMode {
+        self == .portrait ? .landscape : .portrait
+    }
+}
+
+/// 全 App 的方向闸门。
+///
+/// 只在播放页收窄成单一方向；平时是 `.allButUpsideDown`，和 `Info.plist` 一致，
+/// 也就是「浏览器页面照样能跟着机身转」。真正让系统照做的入口是
+/// `AppDelegate.application(_:supportedInterfaceOrientationsFor:)`——
+/// 没有那一层，`requestGeometryUpdate` 只是「请求」，系统可以不理。
+@MainActor
+enum OrientationGate {
+    static var mask: UIInterfaceOrientationMask = .allButUpsideDown
+    /// 当前被锁住的形态；nil = 没锁（播放页之外）
+    static var locked: ScreenMode?
+}
+
+/// 播放页的横竖屏切换。
+///
+/// iOS 16 起 `UIDevice.setValue(_:forKey: "orientation")` 已经失效（会抛
+/// `UIApplication.setStatusBarOrientation` 同款的 KVC 异常），唯一受支持的做法是
+/// `UIWindowScene.requestGeometryUpdate` + 收窄 `supportedInterfaceOrientations`。
+@MainActor
+enum ScreenOrientationController {
+
+    /// 锁到指定形态并转过去
+    static func lock(_ mode: ScreenMode) {
+        OrientationGate.mask = mode.mask
+        OrientationGate.locked = mode
+
+        guard let scene = activeScene() else { return }
+        // 先让系统重新问一遍「这个界面支持哪些方向」，否则几何请求会被拒
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mode.mask)) { _ in
+            // 台前调度 / iPad 分屏下系统会直接拒绝，静默忽略：
+            // 那种窗口形态本来就不由 App 决定方向。
+        }
+    }
+
+    /// 离开播放页：放开方向，按机身当前的姿态落回去（不是硬掰成竖屏）。
+    static func release() {
+        guard OrientationGate.locked != nil else { return }
+        OrientationGate.mask = .allButUpsideDown
+        OrientationGate.locked = nil
+
+        guard let scene = activeScene() else { return }
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
+
+    /// 当前界面方向。读 `windowScene.interfaceOrientation`，不要读 `UIDevice` 的——
+    /// 后者是机身姿态，锁屏时两者会不一致。
+    static var current: ScreenMode {
+        guard let scene = activeScene() else { return .portrait }
+        switch scene.interfaceOrientation {
+        case .landscapeLeft, .landscapeRight: return .landscape
+        default: return .portrait
+        }
+    }
+    private static func activeScene() -> UIWindowScene? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    }
+}
+
+/// 只为「方向闸门」存在的 AppDelegate。
+///
+/// SwiftUI 的 `App` 没有这个回调，必须挂一个 delegate 才能参与
+/// `supportedInterfaceOrientationsFor`。
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        // 这个方法只在主线程被调用
+        MainActor.assumeIsolated { OrientationGate.mask }
+    }
+}
