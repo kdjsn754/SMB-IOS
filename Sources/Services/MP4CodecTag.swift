@@ -238,4 +238,74 @@ enum MP4CodecTag {
         }
         return nil
     }
+
+    // MARK: - 本地文件修正
+
+    /// 下载到本地的文件就地修正：把 stsd 里的 `hev1` 换成 `hvc1`。
+    ///
+    /// 远端播放要经过 `SMBAssetLoader`，那里每个回给 AVFoundation 的分块都会过一遍
+    /// `applyingPatch`；但「下载到本地再播」走的是 `AVPlayerItem(url:)`，字节从磁盘直接
+    /// 进解复用器，**不经过加载器** —— 所以必须在落盘之后改文件本身，否则下载完照样黑屏。
+    ///
+    /// 只读 moov 那一小段（几十 KB 到几 MB），改的也只是四个字节，不做任何转码。
+    /// - Returns: 探测结果；找不到 moov 时返回 nil，文件保持原样。
+    @discardableResult
+    static func patchLocalFile(at url: URL) -> VideoCodecProbe? {
+        guard let handle = try? FileHandle(forUpdating: url) else { return nil }
+        defer { try? handle.close() }
+
+        guard let fileSize = try? handle.seekToEnd(), fileSize > 8 else { return nil }
+
+        var offset: Int64 = 0
+        var probes = 0
+        var moov: (offset: Int64, size: Int64)?
+
+        while offset + 8 <= Int64(fileSize), probes < maxBoxProbe {
+            probes += 1
+            guard let head = try? handle.readBytes(at: offset, count: 16), head.count >= 8,
+                  let size32 = MP4Inspector.readU32(head, 0),
+                  let type = MP4Inspector.fourCC(head, 4)
+            else { return nil }
+
+            var size = Int64(size32)
+            var header: Int64 = 8
+            if size32 == 1 {
+                guard head.count >= 16, let size64 = MP4Inspector.readU64(head, 8),
+                      size64 <= UInt64(Int64.max) else { return nil }
+                size = Int64(size64)
+                header = 16
+            } else if size32 == 0 {
+                size = Int64(fileSize) - offset
+            }
+            guard size >= header else { return nil }
+            if type == "moov" {
+                moov = (offset, size)
+                break
+            }
+            offset += size
+        }
+
+        guard let moov, moov.size >= 8, moov.size <= maxMoovSize,
+              let data = try? handle.readBytes(at: moov.offset, count: Int(moov.size))
+        else { return nil }
+
+        let probe = analyze(moov: data, base: moov.offset)
+        for patch in probe.patchOffsets {
+            // 只在那个位置确实是 "hev1" 时才写，偏移算错也不会把别的字节改坏
+            guard let current = try? handle.readBytes(at: patch, count: 4),
+                  MP4Inspector.fourCC(current, 0) == "hev1"
+            else { continue }
+            try? handle.seek(toOffset: UInt64(patch))
+            try? handle.write(contentsOf: Data(hvc1Bytes))
+        }
+        return probe
+    }
+}
+
+private extension FileHandle {
+    /// 从指定偏移读一段（不改变调用方关心的「当前偏移」语义，读完偏移停在末尾）
+    func readBytes(at offset: Int64, count: Int) throws -> Data {
+        try seek(toOffset: UInt64(offset))
+        return try read(upToCount: count) ?? Data()
+    }
 }

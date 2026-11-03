@@ -167,6 +167,8 @@ final class MediaStore: @unchecked Sendable {
         if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
            let size = attributes[.size] as? NSNumber,
            size.int64Value > 0 {
+            // 文件早在（上次下过 / 老版本下的）：补记一条，设置页里就能显示原始文件名
+            VideoDownloadStore.shared.record(item: item, serverID: serverID, url: url)
             return url
         }
 
@@ -184,7 +186,34 @@ final class MediaStore: @unchecked Sendable {
 
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.moveItem(at: temporary, to: url)
+
+        // 落盘之后就地把 `hev1` 改成 `hvc1`：本地播放走的是文件本身，
+        // 不经过 `SMBAssetLoader`，不打这个补丁下载完照样黑屏。
+        MP4CodecTag.patchLocalFile(at: url)
+
+        // 记进下载清单：缓存目录里是 SHA256 文件名，不留记录的话设置页没法列出「下载了哪些」
+        VideoDownloadStore.shared.record(item: item, serverID: serverID, url: url)
+
         cache.refresh()
+        return url
+    }
+
+    /// 这个资源是不是已经下载到本机了（有就返回缓存文件路径，直接播放，不再走网络）。
+    ///
+    /// 路径是「服务器 + 路径 + 大小 + 修改时间」算出来的，和 `localVideoURL` 完全一致，
+    /// 所以老版本下载的文件也能命中，不依赖索引。
+    func existingLocalVideoURL(for item: FileItem, serverID: UUID) -> URL? {
+        let suffix = item.fileExtension.isEmpty ? "mp4" : item.fileExtension
+        let url = CacheManager.shared.mediaURL(serverID: serverID, item: item, suffix: suffix)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = (attributes[.size] as? NSNumber)?.int64Value,
+              size > 0
+        else { return nil }
+        // 大小对不上就是半截文件（下载被系统杀掉之类），宁可重新走网络也别放个残片
+        if item.size > 0, size != item.size {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
         return url
     }
 

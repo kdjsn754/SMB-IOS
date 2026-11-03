@@ -297,8 +297,18 @@ final class VideoPlaybackModel: ObservableObject {
             return
         }
 
-        let previousAsset = currentAsset
-        currentAsset = nil
+        // 本机已经有下载副本的，直接放文件：不走网络，远端抖一下也不会黑屏。
+        // 文件落盘时已经打过 `hev1 → hvc1` 的补丁（见 `MediaStore` / `MP4CodecTag`）。
+        if let serverID,
+           let localURL = MediaStore.shared.existingLocalVideoURL(for: item, serverID: serverID) {
+            // 老版本下载的文件没打过标签补丁（那时还没这个逻辑），放之前补一次；
+            // 新下载的文件在落盘时已经补过，`patchOffsets` 为空不会走到这里。
+            if !codecProbe.patchOffsets.isEmpty {
+                MP4CodecTag.patchLocalFile(at: localURL)
+            }
+            present(item: item, playerItem: AVPlayerItem(url: localURL), asset: nil)
+            return
+        }
 
         let asset = MediaAssetFactory.shared.makeAsset(
             connection: connection,
@@ -307,10 +317,16 @@ final class VideoPlaybackModel: ObservableObject {
             fileExtension: item.fileExtension,
             codecProbe: codecProbe
         )
-        currentAsset = asset
+        present(item: item, playerItem: AVPlayerItem(asset: asset), asset: asset)
+    }
 
-        let playerItem = AVPlayerItem(asset: asset)
-        playerItem.preferredForwardBufferDuration = 5
+    /// 把新的 `AVPlayerItem` 顶上屏幕。远端流（loader 资产）和本地文件共用这一段收尾，
+    /// 免得「换片 → 续播 → 释放旧资产」的逻辑写两份、慢慢长歪。
+    private func present(item: FileItem, playerItem: AVPlayerItem, asset: AVURLAsset?) {
+        let previousAsset = currentAsset
+        currentAsset = asset
+        // 本地文件不需要前向缓冲，设了反而让 AVPlayer 多等
+        playerItem.preferredForwardBufferDuration = asset == nil ? 0 : 5
 
         resetPlaybackState()
         currentItem = item
@@ -361,15 +377,8 @@ final class VideoPlaybackModel: ObservableObject {
                 }
             }
             guard !box.isCancelled else { return }
-            let localItem = AVPlayerItem(url: url)
-            observe(localItem)
-            resetPlaybackState()
-            currentItem = item
-            updateNeighbours()
-            player.replaceCurrentItem(with: localItem)
-            applyMute()
-            player.play()
-            isPlaying = true
+            present(item: item, playerItem: AVPlayerItem(url: url), asset: nil)
+            errorMessage = nil
         } catch is CancellationError {
             // 用户自己点的取消，不是故障，安静退回播放页
         } catch {

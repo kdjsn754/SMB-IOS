@@ -15,6 +15,7 @@ import UIKit
 struct SettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
     @ObservedObject private var gestures = PlayerGestureSettings.shared
+    @ObservedObject private var downloads = VideoDownloadStore.shared
 
     @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.light.rawValue
     @AppStorage(SettingsKey.thumbnailsEnabled) private var thumbnailsEnabled: Bool = true
@@ -79,6 +80,22 @@ struct SettingsView: View {
 
                     Section {
                         NavigationLink {
+                            DownloadSettingsView()
+                        } label: {
+                            SettingsRow(
+                                icon: "arrow.down.circle.fill",
+                                tint: .blue,
+                                title: "视频下载",
+                                subtitle: "已存到本机的视频，可单独删除",
+                                value: downloads.summary
+                            )
+                        }
+                    } header: {
+                        SettingsSectionTitle("下载")
+                    }
+
+                    Section {
+                        NavigationLink {
                             AboutSettingsView()
                         } label: {
                             SettingsRow(
@@ -98,7 +115,10 @@ struct SettingsView: View {
             }
             .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
-            .onAppear { cache.refresh() }
+            .onAppear {
+                cache.refresh()
+                downloads.reload()
+            }
         }
     }
 

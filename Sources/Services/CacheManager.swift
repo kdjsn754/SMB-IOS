@@ -136,6 +136,8 @@ final class CacheManager: ObservableObject, @unchecked Sendable {
                 self.isWorking = false
                 self.thumbnailBytes = 0
                 self.mediaBytes = 0
+                // 视频文件一起清掉了，下载清单要跟着对账，否则设置页还挂着已删除的条目
+                VideoDownloadStore.shared.reload()
                 completion?()
             }
         }
