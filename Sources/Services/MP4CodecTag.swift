@@ -241,6 +241,36 @@ enum MP4CodecTag {
 
     // MARK: - 本地文件修正
 
+    /// 本地文件补标签的结果。
+    ///
+    /// 光「调用过 patch」不代表改成功：文件被别人占着、盘满、偏移算错都会静默失败，
+    /// 而失败的后果是——播放黑屏、有声音、不报错。所以改完必须回读确认。
+    struct LocalTagResult {
+        let probe: VideoCodecProbe
+        /// 需要改的都确实改成 `hvc1` 了（本来不需要改也算成功）
+        let applied: Bool
+    }
+
+    /// 落盘 / 播放前统一走这里：补标签，然后回读那四个字节确认。
+    ///
+    /// - Returns: `nil` 表示压根没读到 moov（不是标准 MP4 / 文件不可读）。
+    static func ensureLocalTag(at url: URL) -> LocalTagResult? {
+        guard let probe = patchLocalFile(at: url) else { return nil }
+        guard !probe.patchOffsets.isEmpty else {
+            return LocalTagResult(probe: probe, applied: true)
+        }
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return LocalTagResult(probe: probe, applied: false)
+        }
+        defer { try? handle.close() }
+        for offset in probe.patchOffsets {
+            guard let bytes = try? handle.readBytes(at: offset, count: 4),
+                  MP4Inspector.fourCC(bytes, 0) == "hvc1"
+            else { return LocalTagResult(probe: probe, applied: false) }
+        }
+        return LocalTagResult(probe: probe, applied: true)
+    }
+
     /// 下载到本地的文件就地修正：把 stsd 里的 `hev1` 换成 `hvc1`。
     ///
     /// 远端播放要经过 `SMBAssetLoader`，那里每个回给 AVFoundation 的分块都会过一遍

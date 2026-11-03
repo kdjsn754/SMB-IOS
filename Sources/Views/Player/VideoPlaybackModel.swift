@@ -159,6 +159,19 @@ final class VideoPlaybackModel: ObservableObject {
     @Published private(set) var canPlayPrevious = false
     /// 进页面时从上次位置续播的提示，页面弹一次 toast 后清掉
     @Published var resumeHint: String?
+    /// 一次性轻提示。和 `resumeHint` 分开：带 UUID，连点两次同样的文案也会各弹一次
+    @Published private(set) var notice: PlayerNotice?
+
+    /// 一次性轻提示（页面 `onChange` 里弹 toast，不自己清空）
+    struct PlayerNotice: Equatable {
+        let id = UUID()
+        let text: String
+    }
+
+    /// 弹一条轻提示
+    func post(_ text: String) {
+        notice = PlayerNotice(text: text)
+    }
     @Published private(set) var isLooping = false
     @Published private(set) var sleepDeadline: Date?
 
@@ -179,6 +192,10 @@ final class VideoPlaybackModel: ObservableObject {
     private static let loopKey = "settings.player.loop"
 
     private var currentAsset: AVURLAsset?
+    /// 当前正在播的本地文件（远端流时为 nil）。用来判断「已经在本机、不用再换片」
+    private var currentLocalURL: URL?
+    /// 本地文件就绪超时的看门狗
+    private var localReadyTask: Task<Void, Never>?
     private var statusCancellable: AnyCancellable?
     private var sizeCancellable: AnyCancellable?
     private var endObserver: NSObjectProtocol?
@@ -266,7 +283,9 @@ final class VideoPlaybackModel: ObservableObject {
         return playlist.firstIndex(where: { $0.path == currentItem.path })
     }
 
-    private func open(item: FileItem) async {
+    /// - Parameter forceStreaming: 跳过本地副本，强制走远端流。
+    ///   本地副本打不开时由看门狗回退到这里（见 `startLocalReadyWatchdog`）。
+    private func open(item: FileItem, forceStreaming: Bool = false) async {
         guard let connection else { return }
         player.pause()
         isPlaying = false
@@ -299,15 +318,30 @@ final class VideoPlaybackModel: ObservableObject {
 
         // 本机已经有下载副本的，直接放文件：不走网络，远端抖一下也不会黑屏。
         // 文件落盘时已经打过 `hev1 → hvc1` 的补丁（见 `MediaStore` / `MP4CodecTag`）。
-        if let serverID,
+        if !forceStreaming,
+           let serverID,
            let localURL = MediaStore.shared.existingLocalVideoURL(for: item, serverID: serverID) {
-            // 老版本下载的文件没打过标签补丁（那时还没这个逻辑），放之前补一次；
-            // 新下载的文件在落盘时已经补过，`patchOffsets` 为空不会走到这里。
-            if !codecProbe.patchOffsets.isEmpty {
-                MP4CodecTag.patchLocalFile(at: localURL)
+            // 老版本下载的文件可能没打过标签补丁：放之前补一次并**回读确认**。
+            // 改不动的文件在 iPhone 上一定黑屏，删掉改走在线播放，别让用户对着黑屏。
+            let tag = MP4CodecTag.ensureLocalTag(at: localURL)
+            if let tag, tag.probe.isUndecodableOnIOS {
+                errorMessage = """
+                这个视频是 \(tag.probe.unsupportedDescription) 编码，iPhone 上没有任何播放器能解码。
+                用电脑转成 H.264（或 HEVC 4:2:0）之后就能正常播放。
+                """
+                return
             }
-            present(item: item, playerItem: AVPlayerItem(url: localURL), asset: nil)
-            return
+            if let tag, !tag.applied {
+                try? FileManager.default.removeItem(at: localURL)
+                VideoDownloadStore.shared.reload()
+            } else {
+                // 放不出来就别用它（不删：也许只是这一次抽风），直接改走在线播放
+                let localAsset = AVURLAsset(url: localURL)
+                if await isPlayable(localAsset) {
+                    present(item: item, playerItem: AVPlayerItem(asset: localAsset), asset: nil)
+                    return
+                }
+            }
         }
 
         let asset = MediaAssetFactory.shared.makeAsset(
@@ -322,9 +356,23 @@ final class VideoPlaybackModel: ObservableObject {
 
     /// 把新的 `AVPlayerItem` 顶上屏幕。远端流（loader 资产）和本地文件共用这一段收尾，
     /// 免得「换片 → 续播 → 释放旧资产」的逻辑写两份、慢慢长歪。
-    private func present(item: FileItem, playerItem: AVPlayerItem, asset: AVURLAsset?) {
+    ///
+    /// - Parameter resumeAt: 明确指定从哪一秒接着放（本地/远端互换时用）。
+    ///   不传就按 `PlaybackMemory` 里记的位置。
+    private func present(
+        item: FileItem,
+        playerItem: AVPlayerItem,
+        asset: AVURLAsset?,
+        resumeAt: Double? = nil
+    ) {
         let previousAsset = currentAsset
         currentAsset = asset
+        // 记着「现在放的是哪个本地文件」：再点一次下载就知道根本不用换片
+        if asset == nil, let urlAsset = playerItem.asset as? AVURLAsset, urlAsset.url.isFileURL {
+            currentLocalURL = urlAsset.url
+        } else {
+            currentLocalURL = nil
+        }
         // 本地文件不需要前向缓冲，设了反而让 AVPlayer 多等
         playerItem.preferredForwardBufferDuration = asset == nil ? 0 : 5
 
@@ -333,7 +381,10 @@ final class VideoPlaybackModel: ObservableObject {
         updateNeighbours()
 
         // 续播：元数据就绪后再跳（见 status 回调里的 `pendingResume`）
-        if let position = PlaybackMemory.shared.position(for: resumeKey(for: item)) {
+        if let resumeAt, resumeAt > 1 {
+            pendingResume = resumeAt
+            resumeHint = nil
+        } else if let position = PlaybackMemory.shared.position(for: resumeKey(for: item)) {
             pendingResume = position
             resumeHint = "已从 \(Format.duration(position)) 继续播放"
         } else {
@@ -351,11 +402,80 @@ final class VideoPlaybackModel: ObservableObject {
         player.defaultRate = playbackRate
         player.play()
         isPlaying = true
+
+        // 本地文件「永远不 ready」时 AVPlayer 不报错，只留一片黑 —— 必须自己兜底
+        if asset == nil { startLocalReadyWatchdog(for: item) } else { localReadyTask?.cancel() }
+    }
+
+    /// 让 AVFoundation 自己说这份资产放不放得出来。
+    ///
+    /// 只看文件大小和 `hev1` 标签不够：结构损坏、容器不认识、只有音轨，
+    /// 都会让 `AVPlayerItem` 停在「黑屏又没有错误」的状态。**换片之前先问一句**，
+    /// 放不出来就别换 —— 正在播的画面还能留着，而不是被顶成一片黑。
+    private func isPlayable(_ asset: AVURLAsset) async -> Bool {
+        guard let playable = try? await asset.load(.isPlayable), playable else { return false }
+        let tracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+        return !tracks.isEmpty
+    }
+
+    /// 本地文件 6 秒还没 ready 就**自动改回在线播放**。
+    ///
+    /// 本地文件正常是几十毫秒就绪；真的打不开时 AVPlayer 既不报错也不出画面
+    /// （用户看到的就是「黑一下，然后没反应」）。这里不删文件 —— 有可能只是这一次
+    /// 被别的东西占住了 —— 只是绕过它走远端流，用户照样能看。
+    private func startLocalReadyWatchdog(for item: FileItem) {
+        localReadyTask?.cancel()
+        localReadyTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled, let self, self.currentLocalURL != nil else { return }
+            guard let current = self.player.currentItem, current.status != .readyToPlay else { return }
+            // 已经有明确错误（`.failed` 分支写过）就别覆盖，那条信息更准
+            guard self.errorMessage == nil else { return }
+            self.post("本地文件打不开，已改回在线播放")
+            await self.open(item: item, forceStreaming: true)
+        }
+    }
+
+    /// 切到本地文件播放，并且**保持在当前播放位置**。
+    ///
+    /// 调用方必须先确认这份资产放得出来（`isPlayable`）；这里不重复校验，
+    /// 只负责换片 —— 换完交给 `startLocalReadyWatchdog` 兜最后一道。
+    private func switchToLocal(_ asset: AVURLAsset, item: FileItem) {
+        let resumeAt = player.currentTime().seconds
+        present(item: item, playerItem: AVPlayerItem(asset: asset), asset: nil, resumeAt: resumeAt)
+        errorMessage = nil
+        post("已切换到本地文件，之后播放不再走网络")
     }
 
     /// 下载到本地再播：远端流因为容器/码率播不动时的兜底
     func downloadAndPlay(item: FileItem, serverID: UUID, connection: SMBConnection) async {
-        guard !isDownloading else { return }
+        guard !isDownloading else {
+            // 以前这里是静默 return：用户点了「看得见但没反应」，比报错还难懂
+            post("正在下载中，进度条就显示在屏幕上")
+            return
+        }
+
+        // 已经在本机、而且现在放的就是这个文件：什么都不用做。
+        // 以前这里会再 create 一个 AVPlayerItem 顶上屏幕 —— 屏幕会黑一下，
+        // 而对同一个文件的第二次打开并不总能成功（表现就是「黑一下然后再没反应」）。
+        if let local = MediaStore.shared.existingLocalVideoURL(for: item, serverID: serverID) {
+            if local == currentLocalURL {
+                errorMessage = nil
+                post("这个视频已经在本机，正在播放本地文件")
+                return
+            }
+            // 本机有一份、但现在没在放它（比如上次没打开成功）：
+            // 能放就直接切过去，放不出来就删掉重新下一份
+            let existing = AVURLAsset(url: local)
+            if MP4CodecTag.ensureLocalTag(at: local)?.probe.isUndecodableOnIOS != true,
+               await isPlayable(existing) {
+                switchToLocal(existing, item: item)
+                return
+            }
+            try? FileManager.default.removeItem(at: local)
+            VideoDownloadStore.shared.reload()
+        }
+
         let box = CancellationBox()
         downloadCancel = box
         messageBeforeDownload = errorMessage
@@ -377,8 +497,38 @@ final class VideoPlaybackModel: ObservableObject {
                 }
             }
             guard !box.isCancelled else { return }
-            present(item: item, playerItem: AVPlayerItem(url: url), asset: nil)
-            errorMessage = nil
+
+            // 落盘的文件再核一遍：4:2:2 / 4:4:4 的 HEVC 在 iPhone 上根本没有解码器，
+            // 直接塞给 AVPlayer 就是「黑一下、然后没反应」，不如把原因写清楚。
+            let tag = MP4CodecTag.ensureLocalTag(at: url)
+            if let tag {
+                if tag.probe.isUndecodableOnIOS {
+                    // 这份文件在这台机器上永远放不了，留着只是白占空间
+                    try? FileManager.default.removeItem(at: url)
+                    VideoDownloadStore.shared.reload()
+                    errorMessage = """
+                    这个视频是 \(tag.probe.unsupportedDescription) 编码，iPhone 上没有任何播放器能解码。
+                    用电脑转成 H.264（或 HEVC 4:2:0）之后就能正常播放。
+                    """
+                    return
+                }
+                if !tag.applied {
+                    errorMessage = "本地文件的编码标签改不动，这个文件在 iPhone 上会黑屏，已放弃使用。"
+                    try? FileManager.default.removeItem(at: url)
+                    VideoDownloadStore.shared.reload()
+                    return
+                }
+            }
+
+            // 换片之前先让 AVFoundation 自己确认这份文件放得出来。
+            // **关键**：确认之前不动 `player`，所以万一本地文件有问题，
+            // 现在正在播的画面不会被黑屏顶掉（这正是「黑一下、然后没反应」的来源）。
+            let localAsset = AVURLAsset(url: url)
+            guard await isPlayable(localAsset) else {
+                post("本地文件打不开，继续用在线播放")
+                return
+            }
+            switchToLocal(localAsset, item: item)
         } catch is CancellationError {
             // 用户自己点的取消，不是故障，安静退回播放页
         } catch {
@@ -713,6 +863,8 @@ final class VideoPlaybackModel: ObservableObject {
         sleepTask?.cancel()
         sleepTask = nil
         sleepDeadline = nil
+        localReadyTask?.cancel()
+        localReadyTask = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         statusCancellable = nil
@@ -799,6 +951,9 @@ final class VideoPlaybackModel: ObservableObject {
             .sink { [weak self, weak item] status in
                 guard let self, let item else { return }
                 if status == .readyToPlay {
+                    // 本地文件已经就绪，看门狗不用再等了
+                    self.localReadyTask?.cancel()
+                    self.localReadyTask = nil
                     // 兜底：有些流 ready 那一刻 KVO 还没把尺寸推过来，这里补读一次
                     self.adopt(item.presentationSize)
                     // 元数据已经解析完，这里读轨道组不会再触发远端 I/O
@@ -809,6 +964,8 @@ final class VideoPlaybackModel: ObservableObject {
                     }
                 }
                 guard status == .failed else { return }
+                self.localReadyTask?.cancel()
+                self.localReadyTask = nil
                 let reason = item.error?.localizedDescription ?? "编码格式不受支持或网络中断"
                 // 失败时把播放键还原成「播放」，否则它会一直停在暂停图标上
                 self.isPlaying = false

@@ -166,6 +166,11 @@ struct VideoPlayerView: View {
             guard let hint else { return }
             showToast(hint)
         }
+        // 一次性轻提示：下载完成切本地、本地打不开改回在线播放等
+        .onChange(of: model.notice) { _, notice in
+            guard let notice else { return }
+            showToast(notice.text)
+        }
         .alert("播放器手势", isPresented: $showGestureHelp) {
             Button("知道了", role: .cancel) {}
         } message: {

@@ -1,5 +1,22 @@
 import UIKit
 
+/// 下载到本地时可能出的错。都要能说人话 —— 用户看到的必须是「为什么」，不是「失败」。
+enum MediaStoreError: LocalizedError {
+    /// 收到的字节数和远端大小不一致
+    case incompleteDownload(expected: Int64, got: Int64)
+    /// `hev1 → hvc1` 标签改不动（文件被占用 / 只读），本地播放会黑屏，宁可报错
+    case tagPatchFailed
+
+    var errorDescription: String? {
+        switch self {
+        case let .incompleteDownload(expected, got):
+            return "只下到 \(Format.bytes(got)) / \(Format.bytes(expected))，文件不完整"
+        case .tagPatchFailed:
+            return "本地文件的编码标签改不动（可能被别的程序占着），这个文件在 iPhone 上会黑屏"
+        }
+    }
+}
+
 /// 大图与「下载后播放」的本地文件管理，全部落在缓存目录里，受缓存上限约束
 final class MediaStore: @unchecked Sendable {
     static let shared = MediaStore()
@@ -165,11 +182,19 @@ final class MediaStore: @unchecked Sendable {
         let url = cache.mediaURL(serverID: serverID, item: item, suffix: suffix)
 
         if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let size = attributes[.size] as? NSNumber,
-           size.int64Value > 0 {
-            // 文件早在（上次下过 / 老版本下的）：补记一条，设置页里就能显示原始文件名
-            VideoDownloadStore.shared.record(item: item, serverID: serverID, url: url)
-            return url
+           let size = (attributes[.size] as? NSNumber)?.int64Value,
+           size > 0 {
+            // 大小和远端对不上的就是残片（老版本下到一半被系统杀掉）。
+            // 残片交给 AVPlayer 的表现是「点开黑一下、然后什么都没发生」，宁可删掉重下。
+            if item.size > 0, size != item.size {
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                // 老版本下的文件没打过 `hev1 → hvc1` 补丁：这里顺手补一次（幂等，只读 moov）
+                MP4CodecTag.ensureLocalTag(at: url)
+                // 补记一条，设置页里就能显示原始文件名
+                VideoDownloadStore.shared.record(item: item, serverID: serverID, url: url)
+                return url
+            }
         }
 
         // 下载前先清理一次，避免撑爆缓存，也尽量不删掉刚下载的文件
@@ -187,9 +212,20 @@ final class MediaStore: @unchecked Sendable {
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.moveItem(at: temporary, to: url)
 
-        // 落盘之后就地把 `hev1` 改成 `hvc1`：本地播放走的是文件本身，
-        // 不经过 `SMBAssetLoader`，不打这个补丁下载完照样黑屏。
-        MP4CodecTag.patchLocalFile(at: url)
+        // ① 大小校验：AMSMB2 的报告偶尔会「成功但少收」，少一个字节播放器都可能直接黑屏
+        let landedAttributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let landed = (landedAttributes?[.size] as? NSNumber)?.int64Value ?? 0
+        if item.size > 0, landed != item.size {
+            try? FileManager.default.removeItem(at: url)
+            throw MediaStoreError.incompleteDownload(expected: item.size, got: landed)
+        }
+
+        // ② 落盘之后就地把 `hev1` 改成 `hvc1`（本地播放走的是文件本身，
+        // 不经过 `SMBAssetLoader`，不打这个补丁下载完照样黑屏），并回读确认改成功了
+        if let tag = MP4CodecTag.ensureLocalTag(at: url), !tag.applied {
+            try? FileManager.default.removeItem(at: url)
+            throw MediaStoreError.tagPatchFailed
+        }
 
         // 记进下载清单：缓存目录里是 SHA256 文件名，不留记录的话设置页没法列出「下载了哪些」
         VideoDownloadStore.shared.record(item: item, serverID: serverID, url: url)
