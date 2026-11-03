@@ -16,8 +16,12 @@ import UIKit
 @MainActor
 struct VideoPlayerView: View {
     let item: FileItem
-    let serverID: UUID
-    let connection: SMBConnection
+    /// 从「视频下载」页点进来时没有服务器上下文（放的就是本机文件），所以这两个是可选。
+    /// 正常从目录页进来永远有值。
+    let serverID: UUID?
+    let connection: SMBConnection?
+    /// 直接指定要放的本机文件。给了就跳过远端探测 —— 断网、服务器被删掉也照样能播。
+    var localURL: URL? = nil
     /// 同目录的视频，按目录页当前的排序。单文件时就是一个元素。
     var playlist: [FileItem] = []
 
@@ -196,12 +200,17 @@ struct VideoPlayerView: View {
             }
         }
         .task {
-            await model.start(
-                item: item,
-                serverID: serverID,
-                connection: connection,
-                playlist: playlist
-            )
+            if let localURL {
+                // 本机文件直放：不探测远端、不建加载器，一个网络包都不发
+                await model.startLocal(item: item, url: localURL)
+            } else {
+                await model.start(
+                    item: item,
+                    serverID: serverID,
+                    connection: connection,
+                    playlist: playlist
+                )
+            }
             // 用户可能用实体音量键调过，进页面先对齐一次
             model.syncVolumeFromSystem()
             scheduleHide()
@@ -559,6 +568,7 @@ struct VideoPlayerView: View {
                 },
                 onDownload: {
                     closePanel()
+                    guard let connection, let serverID else { return }
                     Task {
                         await model.downloadAndPlay(
                             item: model.currentItem ?? item,
@@ -567,6 +577,7 @@ struct VideoPlayerView: View {
                         )
                     }
                 },
+                showsDownload: connection != nil && localURL == nil,
                 onGestureHelp: {
                     closePanel()
                     showGestureHelp = true
@@ -626,19 +637,21 @@ struct VideoPlayerView: View {
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white.opacity(0.85))
-            Button {
-                Task {
-                    await model.downloadAndPlay(
-                        item: model.currentItem ?? item,
-                        serverID: serverID,
-                        connection: connection
-                    )
+            if let connection, let serverID {
+                Button {
+                    Task {
+                        await model.downloadAndPlay(
+                            item: model.currentItem ?? item,
+                            serverID: serverID,
+                            connection: connection
+                        )
+                    }
+                } label: {
+                    Label("下载到本地播放", systemImage: "arrow.down.circle")
                 }
-            } label: {
-                Label("下载到本地播放", systemImage: "arrow.down.circle")
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isDownloading)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.isDownloading)
         }
         .padding(24)
         .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 18, style: .continuous))

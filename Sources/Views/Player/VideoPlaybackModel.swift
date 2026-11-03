@@ -253,8 +253,8 @@ final class VideoPlaybackModel: ObservableObject {
 
     func start(
         item: FileItem,
-        serverID: UUID,
-        connection: SMBConnection,
+        serverID: UUID?,
+        connection: SMBConnection?,
         playlist: [FileItem] = []
     ) async {
         self.serverID = serverID
@@ -265,6 +265,41 @@ final class VideoPlaybackModel: ObservableObject {
         // 否则系统会在灵动岛弹一块媒体胶囊（用户明确要求去掉）。
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         await open(item: item)
+    }
+
+    /// 直接播本机文件（「视频下载」页点一行就是这条路）。
+    ///
+    /// 和 `open` 的区别只有一点：**不需要服务器**。不探远端编码、不建 loader、
+    /// 连 `connection` 都不查 —— 下载好的片子断网、服务器被删掉也照样能看。
+    /// 其余校验（标签、能不能解、播放器就绪看门狗）全部复用同一套。
+    func startLocal(item: FileItem, url: URL) async {
+        self.serverID = nil
+        self.connection = nil
+        self.playlist = [item]
+        configureAudioSession()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+
+        player.pause()
+        isPlaying = false
+        errorMessage = nil
+
+        // 老文件可能还带着 `hev1`（Apple 只认 `hvc1`），放之前补一次并回读确认
+        let tag = MP4CodecTag.ensureLocalTag(at: url)
+        if let tag, tag.probe.isUndecodableOnIOS {
+            errorMessage = """
+            这个视频是 \(tag.probe.unsupportedDescription) 编码，iPhone 上没有任何播放器能解码。
+            用电脑转成 H.264（或 HEVC 4:2:0）之后就能正常播放。
+            """
+            return
+        }
+
+        let asset = AVURLAsset(url: url)
+        guard await isPlayable(asset) else {
+            errorMessage = "这个本机文件打不开，可能没下完整。删掉重新下一份就行（设置 → 下载 → 视频下载）。"
+            return
+        }
+
+        present(item: item, playerItem: AVPlayerItem(asset: asset), asset: nil)
     }
 
     /// 换到列表里的另一集：不退出播放页，直接换 `AVPlayerItem`。
@@ -286,7 +321,10 @@ final class VideoPlaybackModel: ObservableObject {
     /// - Parameter forceStreaming: 跳过本地副本，强制走远端流。
     ///   本地副本打不开时由看门狗回退到这里（见 `startLocalReadyWatchdog`）。
     private func open(item: FileItem, forceStreaming: Bool = false) async {
-        guard let connection else { return }
+        guard let connection else {
+            errorMessage = "没有连接到服务器，在线播放需要先连上原来的那个服务器。"
+            return
+        }
         player.pause()
         isPlaying = false
 

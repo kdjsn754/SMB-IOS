@@ -75,6 +75,11 @@ struct PlayerPanelSheet: View {
     var onShow: (PlayerPanel) -> Void
     var onToggleLock: () -> Void
     var onDownload: () -> Void
+    /// 「下载到本地」这一行显不显示。
+    ///
+    /// 从「视频下载」页点进来的播放页没有服务器上下文（`connection == nil`），
+    /// 而且**正在放的就是本地文件** —— 再给一个下载入口只会让人以为还能再下一份。
+    var showsDownload: Bool = true
     var onGestureHelp: () -> Void
     var orientationMode: PlaybackOrientationMode
     var onSelectOrientation: (PlaybackOrientationMode) -> Void
@@ -421,12 +426,14 @@ struct PlayerPanelSheet: View {
             }
 
             PanelSection(title: "工具") {
-                PanelRow(
-                    icon: "arrow.down.circle",
-                    title: "下载到本地",
-                    chevron: false,
-                    action: onDownload
-                )
+                if showsDownload {
+                    PanelRow(
+                        icon: "arrow.down.circle",
+                        title: "下载到本地",
+                        chevron: false,
+                        action: onDownload
+                    )
+                }
 
                 PanelRow(icon: "hand.draw", title: "播放手势") {
                     onShow(.gestures)

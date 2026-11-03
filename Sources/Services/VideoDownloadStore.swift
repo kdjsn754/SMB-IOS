@@ -142,6 +142,11 @@ final class VideoDownloadStore: ObservableObject, @unchecked Sendable {
 
     // MARK: - 记录
 
+    /// 这一条在缓存目录里的实际位置（`id` 就是文件名）
+    func fileURL(for video: DownloadedVideo) -> URL {
+        directory.appendingPathComponent(video.id)
+    }
+
     /// 下载成功、文件已经搬进缓存目录后调用（`MediaStore.localVideoURL` 里）。
     /// 不在主线程上跑，写完再回主线程刷新列表。
     func record(item: FileItem, serverID: UUID, url: URL) {
