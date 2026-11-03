@@ -39,7 +39,7 @@ final class LocalVideoThumbnailer: @unchecked Sendable {
         }
         guard !isFailed(key) else { return nil }
 
-        let decoded = await Task.detached(priority: .utility) { Self.decode(url: url) }.value
+        let decoded = await Task.detached(priority: .utility) { await Self.decode(url: url) }.value
         guard let decoded else {
             markFailed(key)
             return nil

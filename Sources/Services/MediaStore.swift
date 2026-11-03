@@ -190,7 +190,7 @@ final class MediaStore: @unchecked Sendable {
                 try? FileManager.default.removeItem(at: url)
             } else {
                 // 老版本下的文件没打过 `hev1 → hvc1` 补丁：这里顺手补一次（幂等，只读 moov）
-                MP4CodecTag.ensureLocalTag(at: url)
+                _ = MP4CodecTag.ensureLocalTag(at: url)
                 // 补记一条，设置页里就能显示原始文件名
                 VideoDownloadStore.shared.record(item: item, serverID: serverID, url: url)
                 return url
