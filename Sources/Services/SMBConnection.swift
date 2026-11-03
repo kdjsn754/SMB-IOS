@@ -528,15 +528,40 @@ actor SMBConnection {
     }
 
     /// 下载到本地（用于「下载后播放」兜底方案）
-    func download(_ path: String, to url: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+    /// 下载整个文件到本地。
+    ///
+    /// `cancel` 传下去后，进度回调返回 false 会**真的把传输停掉**（AMSMB2 支持中途叫停），
+    /// 而不是像以前那样只能等它下完。取消时会把写了一半的文件删掉再抛 `CancellationError`，
+    /// 调用方据此静默收尾，不要当成「下载失败」报错。
+    func download(
+        _ path: String,
+        to url: URL,
+        cancel: CancellationBox? = nil,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws {
         try? FileManager.default.removeItem(at: url)
-        try await run { manager in
-            try await manager.downloadItem(atPath: path, to: url, progress: { received, total in
-                if total > 0 {
-                    progress(min(1, max(0, Double(received) / Double(total))))
-                }
-                return true
-            })
+        do {
+            try await run { manager in
+                try await manager.downloadItem(atPath: path, to: url, progress: { received, total in
+                    if cancel?.isCancelled == true { return false }
+                    if total > 0 {
+                        progress(min(1, max(0, Double(received) / Double(total))))
+                    }
+                    return true
+                })
+            }
+        } catch {
+            // `run` 会把任何错误包装成 SMBFailure，所以取消要在外面重新认一次
+            if cancel?.isCancelled == true {
+                try? FileManager.default.removeItem(at: url)
+                throw CancellationError()
+            }
+            throw error
+        }
+        // 停下来的那一刻可能刚好下完：仍然按取消处理，别把半成品当成品留下
+        if cancel?.isCancelled == true {
+            try? FileManager.default.removeItem(at: url)
+            throw CancellationError()
         }
     }
 

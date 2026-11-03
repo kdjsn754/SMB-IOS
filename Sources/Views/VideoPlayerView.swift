@@ -589,13 +589,24 @@ struct VideoPlayerView: View {
     // MARK: - 覆盖层
 
     private func downloadOverlay(_ progress: Double) -> some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             ProgressView(value: progress)
                 .tint(.white)
                 .frame(width: 180)
             Text("正在下载到本地… \(Int(progress * 100))%")
                 .font(.footnote)
                 .foregroundStyle(.white)
+            Button {
+                model.cancelDownload()
+            } label: {
+                Text("取消")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 6)
+                    .background(.white.opacity(0.18), in: Capsule())
+            }
+            .buttonStyle(.plain)
         }
         .padding(20)
         .background(Color.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 16, style: .continuous))

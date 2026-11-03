@@ -157,6 +157,7 @@ final class MediaStore: @unchecked Sendable {
         for item: FileItem,
         serverID: UUID,
         connection: SMBConnection,
+        cancel: CancellationBox? = nil,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         let cache = CacheManager.shared
@@ -175,7 +176,7 @@ final class MediaStore: @unchecked Sendable {
         let temporary = url.appendingPathExtension("part")
         try? FileManager.default.removeItem(at: temporary)
         do {
-            try await connection.download(item.path, to: temporary, progress: progress)
+            try await connection.download(item.path, to: temporary, cancel: cancel, progress: progress)
         } catch {
             try? FileManager.default.removeItem(at: temporary)
             throw error

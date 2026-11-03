@@ -139,6 +139,12 @@ final class VideoPlaybackModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var downloadProgress: Double?
     @Published var isDownloading = false
+    /// 当前这次「下载到本地」的取消标记。点了取消就把它 cancel 掉，
+    /// 传输中的 SMB 回调会看到并主动停下来（不是等它下完再丢掉）。
+    private var downloadCancel: CancellationBox?
+    /// 开始下载前播放页原有的提示（通常是「无法播放」）。
+    /// 取消下载后要把它还原，不然页面会变成一片纯黑、没有任何可点的东西。
+    private var messageBeforeDownload: String?
     @Published var isPlaying = false
     /// 视频画面尺寸（已按旋转元数据摆正，宽 > 高就是横片）。
     /// 播放页拿它决定进页面时自动转横屏还是竖屏。
@@ -334,6 +340,9 @@ final class VideoPlaybackModel: ObservableObject {
     /// 下载到本地再播：远端流因为容器/码率播不动时的兜底
     func downloadAndPlay(item: FileItem, serverID: UUID, connection: SMBConnection) async {
         guard !isDownloading else { return }
+        let box = CancellationBox()
+        downloadCancel = box
+        messageBeforeDownload = errorMessage
         isDownloading = true
         downloadProgress = 0
         errorMessage = nil
@@ -342,12 +351,16 @@ final class VideoPlaybackModel: ObservableObject {
             let url = try await MediaStore.shared.localVideoURL(
                 for: item,
                 serverID: serverID,
-                connection: connection
+                connection: connection,
+                cancel: box
             ) { [weak self] value in
+                // 点了取消就别再刷新进度条了（传输要下一次回调才真正停）
+                guard !box.isCancelled else { return }
                 Task { @MainActor in
                     self?.downloadProgress = value
                 }
             }
+            guard !box.isCancelled else { return }
             let localItem = AVPlayerItem(url: url)
             observe(localItem)
             resetPlaybackState()
@@ -357,13 +370,33 @@ final class VideoPlaybackModel: ObservableObject {
             applyMute()
             player.play()
             isPlaying = true
-            downloadProgress = nil
+        } catch is CancellationError {
+            // 用户自己点的取消，不是故障，安静退回播放页
         } catch {
-            errorMessage = "下载失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
-            downloadProgress = nil
+            if !box.isCancelled {
+                errorMessage = "下载失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            }
         }
 
+        // 已经被取消时状态早就清过了，别让它覆盖掉新一次下载
+        if downloadCancel === box {
+            downloadCancel = nil
+            messageBeforeDownload = nil
+            downloadProgress = nil
+            isDownloading = false
+        }
+    }
+
+    /// 取消「下载到本地」：立刻收起进度浮层，并让正在跑的 SMB 传输停手。
+    /// 写了一半的临时文件由 `MediaStore` 在取消分支里删掉，不会留下半截文件。
+    func cancelDownload() {
+        downloadCancel?.cancel()
+        downloadCancel = nil
+        downloadProgress = nil
         isDownloading = false
+        // 还原下载前的那条提示，让用户还能再点一次「下载到本地播放」或直接退出
+        errorMessage = messageBeforeDownload
+        messageBeforeDownload = nil
     }
 
     // MARK: - 播放 / 暂停
