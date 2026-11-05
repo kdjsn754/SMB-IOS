@@ -16,6 +16,7 @@ struct ServerEditorTarget: Identifiable {
 @MainActor
 struct ServerListView: View {
     @EnvironmentObject private var app: AppModel
+    @ObservedObject private var background = BackgroundSettings.shared
     @State private var editor: ServerEditorTarget?
 
     var body: some View {
@@ -38,7 +39,10 @@ struct ServerListView: View {
                     .padding(.bottom, 28)
                 }
             }
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            // 「控件透明度」：0 = 只剩背景，1 = 完全实心
+            .opacity(background.controlOpacity)
+            // 页面底色交给 RootView 的 AppBackground（自定义壁纸要能透上来）；
+            // 没设背景时它铺的就是 systemGroupedBackground，观感和以前一致。
             .toolbar(.hidden, for: .navigationBar)
             .sheet(item: $editor) { target in
                 ServerEditView(server: target.server, isNew: target.isNew)

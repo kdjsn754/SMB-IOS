@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 struct BrowserView: View {
     @EnvironmentObject private var app: AppModel
+    @ObservedObject private var background = BackgroundSettings.shared
 
     let server: SMBServer
     let path: String
@@ -80,6 +81,8 @@ struct BrowserView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        // 「控件透明度」只作用在内容上，导航栏保持实心（返回键永远点得到）
+        .opacity(background.controlOpacity)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         // 首页把导航栏藏了（自己做标题），这里必须显式显示，否则没有返回按钮
@@ -172,6 +175,8 @@ struct BrowserView: View {
                 }
             }
             .listStyle(.plain)
+            // 列表模式的行背景是系统画的，不去掉会挡住 RootView 的自定义背景
+            .scrollContentBackground(.hidden)
             .overlay {
                 if visibleItems.isEmpty {
                     noMatchState

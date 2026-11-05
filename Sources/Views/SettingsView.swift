@@ -16,6 +16,7 @@ struct SettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
     @ObservedObject private var gestures = PlayerGestureSettings.shared
     @ObservedObject private var downloads = VideoDownloadStore.shared
+    @ObservedObject private var background = BackgroundSettings.shared
 
     @AppStorage(SettingsKey.theme) private var themeRaw: String = AppTheme.light.rawValue
     @AppStorage(SettingsKey.thumbnailsEnabled) private var thumbnailsEnabled: Bool = true
@@ -30,6 +31,18 @@ struct SettingsView: View {
                     Section {
                         ThemePicker(selection: $themeRaw)
                             .padding(.vertical, 6)
+
+                        NavigationLink {
+                            BackgroundSettingsView()
+                        } label: {
+                            SettingsRow(
+                                icon: "photo.fill",
+                                tint: .indigo,
+                                title: "自定义背景",
+                                subtitle: "图片或纯色，控件透明度可调",
+                                value: background.summary
+                            )
+                        }
                     } header: {
                         SettingsSectionTitle("外观")
                     }
@@ -113,7 +126,7 @@ struct SettingsView: View {
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
             }
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            // 底色交给 RootView 的 AppBackground（自定义壁纸要能透上来）
             .toolbar(.hidden, for: .navigationBar)
             .onAppear {
                 cache.refresh()

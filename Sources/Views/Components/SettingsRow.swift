@@ -131,7 +131,7 @@ struct SettingsDetail<Content: View>: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+        // 底色交给 RootView 的 AppBackground：二级设置页也要能透出自定义背景
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         // 设置首页隐藏了导航栏，二级页要把返回按钮要回来
