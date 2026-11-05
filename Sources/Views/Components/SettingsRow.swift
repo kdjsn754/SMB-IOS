@@ -120,6 +120,8 @@ struct SettingsDetail<Content: View>: View {
     let title: String
     let content: Content
 
+    @ObservedObject private var background = BackgroundSettings.shared
+
     init(title: String, @ViewBuilder content: () -> Content) {
         self.title = title
         self.content = content()
@@ -131,7 +133,10 @@ struct SettingsDetail<Content: View>: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        // 底色交给 RootView 的 AppBackground：二级设置页也要能透出自定义背景
+        // 兜住没写分组标题的那些行（各页自己有 header 的分组还会各自再设一次，值一样）
+        .listRowBackground(background.cardFill)
+        // 壁纸铺在**这一页**里，不靠 RootView 透底（见 `pageBackground()`）
+        .pageBackground()
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         // 设置首页隐藏了导航栏，二级页要把返回按钮要回来

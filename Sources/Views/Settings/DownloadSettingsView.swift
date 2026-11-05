@@ -91,6 +91,8 @@ struct DownloadSettingsView: View {
         } header: {
             SettingsSectionTitle("\(store.items.count) 个 · \(Format.bytes(store.totalBytes))")
         }
+        .listRowBackground(BackgroundSettings.shared.cardFill)
+        .listRowSeparator(BackgroundSettings.shared.rowSeparator)
     }
 
     private func row(_ video: DownloadedVideo) -> some View {
@@ -184,6 +186,8 @@ struct DownloadSettingsView: View {
         } header: {
             SettingsSectionTitle("清理")
         }
+        .listRowBackground(BackgroundSettings.shared.cardFill)
+        .listRowSeparator(BackgroundSettings.shared.rowSeparator)
     }
 
     /// `alert(isPresented:)` 需要 Bool 绑定，删除对象用可选值驱动

@@ -18,7 +18,8 @@ enum WallpaperDefaults {
 /// 三份数据：
 /// - `kind`：当前用哪种背景（`none` 回到系统分组底色 / `color` 纯色 / `image` 壁纸）；
 /// - `colorHex`：纯色背景的颜色；
-/// - `controlOpacity`：**控件层**的不透明度 0…1（0 = 只剩背景，1 = 界面完全不透明）。
+/// - `controlOpacity`：**控件白底**的不透明度 0…1（0 = 白底全透明只剩壁纸，1 = 原来的实心卡片）。
+///   文字**不跟着淡** —— 早先版本用整页 `.opacity()`，标题和文件名一起被洗掉才改成现在这样。
 ///
 /// 壁纸不存进 `UserDefaults`（几百 KB 的二进制会把偏好文件撑爆），
 /// 落盘到 `Application Support/SMBViewer/wallpaper.jpg`，偏好里只留开关与颜色。
@@ -111,6 +112,20 @@ final class BackgroundSettings: ObservableObject {
         "\(Int((controlOpacity * 100).rounded()))%"
     }
 
+    /// 卡片 / 行 / 面板的「白底」颜色，透明度就是控件透明度。
+    ///
+    /// 1.7.1 起**只淡白底，不淡文字**：整页 `.opacity()` 会把标题、文件名一起洗掉，
+    /// 所以改成把每个控件的表面色单独降到 `controlOpacity` ——
+    /// 壁纸透过卡片显出来，字仍然是实心的。
+    var cardFill: Color {
+        Color(uiColor: .secondarySystemGroupedBackground).opacity(controlOpacity)
+    }
+
+    /// 卡片几乎透明时把列表分隔线一起收掉：不然壁纸上浮着一排灰线，比不透明还难看。
+    var rowSeparator: Visibility {
+        controlOpacity < 0.5 ? .hidden : .visible
+    }
+
     // MARK: - 写入
 
     func setColor(_ hex: String) {
@@ -130,6 +145,10 @@ final class BackgroundSettings: ObservableObject {
         image = newImage
         kind = .image
         UserDefaults.standard.set(Kind.image.rawValue, forKey: Key.kind)
+        // 落个记号：壁纸「设了但看不见」时，日志里能立刻分清是没存下来还是被挡住了
+        DiagnosticsStore.shared.note(
+            "设置壁纸 \(Int(newImage.size.width))×\(Int(newImage.size.height))，\(data.count / 1024) KB"
+        )
     }
 
     func clear() {

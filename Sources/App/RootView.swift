@@ -15,13 +15,14 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            // 自定义背景铺在最底层。没设背景时它显示的就是系统分组底色，
-            // 和加这一层之前的观感完全一样。
+            // 自定义背景的兜底层。真正的保障在每一页自己的 `.pageBackground()`：
+            // TabView / NavigationStack 的容器会盖住这一层（1.7.0 壁纸看不见就是这个原因），
+            // 这里留着是为了让容器边缘之类没被页面覆盖到的地方也不露白。
             AppBackground()
 
-            // 「控件透明度」不套在这一层：套上的话 tab bar 也会跟着淡，
-            // 设置页调到 0 时连「切回设置」的入口都没了。改由
-            // `ServerListView` / `BrowserView` 各自对自己的内容应用（见那两处的注释）。
+            // 「控件透明度」不套在这一层：套上的话 tab bar 也会跟着淡。
+            // 1.7.1 起透明度只作用在**卡片白底**上（见 `BackgroundSettings.cardFill`），
+            // 文字保持实心，所以调到 0 也照样点得动、看得清。
             TabView {
                 ServerListView()
                     .tabItem { Label("资源库", systemImage: "externaldrive.connected.to.line.below") }

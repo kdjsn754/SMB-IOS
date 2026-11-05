@@ -39,10 +39,8 @@ struct ServerListView: View {
                     .padding(.bottom, 28)
                 }
             }
-            // 「控件透明度」：0 = 只剩背景，1 = 完全实心
-            .opacity(background.controlOpacity)
-            // 页面底色交给 RootView 的 AppBackground（自定义壁纸要能透上来）；
-            // 没设背景时它铺的就是 systemGroupedBackground，观感和以前一致。
+            // 壁纸铺在这一页自己的视图树里，不靠父容器透底（见 `pageBackground()`）
+            .pageBackground()
             .toolbar(.hidden, for: .navigationBar)
             .sheet(item: $editor) { target in
                 ServerEditView(server: target.server, isNew: target.isNew)
@@ -130,8 +128,9 @@ struct ServerListView: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(14)
+        // 卡片白底跟随「控件透明度」：文字始终实心，只有这块底在淡
         .background(
-            Color(uiColor: .secondarySystemGroupedBackground),
+            background.cardFill,
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -164,7 +163,7 @@ struct ServerListView: View {
         .padding(.vertical, 36)
         .padding(.horizontal, 20)
         .background(
-            Color(uiColor: .secondarySystemGroupedBackground),
+            background.cardFill,
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
     }

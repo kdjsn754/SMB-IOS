@@ -24,6 +24,8 @@ struct AboutSettingsView: View {
             } header: {
                 SettingsSectionTitle("应用")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
             Section {
                 LabeledContent("连接协议", value: "SMB 2 / 3")
@@ -31,6 +33,8 @@ struct AboutSettingsView: View {
             } header: {
                 SettingsSectionTitle("连接")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
             Section {
                 VStack(alignment: .leading, spacing: 6) {
@@ -53,6 +57,8 @@ struct AboutSettingsView: View {
             } header: {
                 SettingsSectionTitle("开源许可")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
         }
     }
 

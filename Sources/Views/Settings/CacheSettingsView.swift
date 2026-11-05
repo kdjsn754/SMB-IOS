@@ -55,6 +55,8 @@ struct CacheSettingsView: View {
             } header: {
                 SettingsSectionTitle("上限")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
             Section {
                 Button {
@@ -85,6 +87,8 @@ struct CacheSettingsView: View {
             } header: {
                 SettingsSectionTitle("清理")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
         }
         .toast($toast)
         .onAppear { cache.refresh() }

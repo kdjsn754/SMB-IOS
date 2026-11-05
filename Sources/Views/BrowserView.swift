@@ -3,7 +3,6 @@ import SwiftUI
 @MainActor
 struct BrowserView: View {
     @EnvironmentObject private var app: AppModel
-    @ObservedObject private var background = BackgroundSettings.shared
 
     let server: SMBServer
     let path: String
@@ -81,8 +80,9 @@ struct BrowserView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // 「控件透明度」只作用在内容上，导航栏保持实心（返回键永远点得到）
-        .opacity(background.controlOpacity)
+        // 壁纸铺在这一页自己的视图树里，不靠父容器透底（见 `pageBackground()`）。
+        // 「控件透明度」不再整页 `.opacity()` —— 那只淡白底，文字保持实心。
+        .pageBackground()
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         // 首页把导航栏藏了（自己做标题），这里必须显式显示，否则没有返回按钮

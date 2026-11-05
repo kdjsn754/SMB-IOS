@@ -38,6 +38,8 @@ struct ThumbnailSettingsView: View {
             } header: {
                 SettingsSectionTitle("显示")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
             Section {
                 Button {
@@ -67,6 +69,8 @@ struct ThumbnailSettingsView: View {
             } header: {
                 SettingsSectionTitle("维护")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
         }
         .toast($toast)
     }
@@ -96,9 +100,11 @@ struct ThumbnailFailureListView: View {
                     }
                 }
                 .scrollContentBackground(.hidden)
-                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+                .listRowBackground(BackgroundSettings.shared.cardFill)
             }
         }
+        // 空态和列表都要有壁纸，所以铺在 Group 上，不铺在 List 上
+        .pageBackground()
         .navigationTitle("加载失败记录")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -127,6 +133,5 @@ struct ContentUnavailableViewCompat: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemGroupedBackground))
     }
 }

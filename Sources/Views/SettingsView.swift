@@ -46,6 +46,8 @@ struct SettingsView: View {
                     } header: {
                         SettingsSectionTitle("外观")
                     }
+                    .listRowBackground(BackgroundSettings.shared.cardFill)
+                    .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
                     Section {
                         NavigationLink {
@@ -74,6 +76,8 @@ struct SettingsView: View {
                     } header: {
                         SettingsSectionTitle("浏览")
                     }
+                    .listRowBackground(BackgroundSettings.shared.cardFill)
+                    .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
                     Section {
                         NavigationLink {
@@ -90,6 +94,8 @@ struct SettingsView: View {
                     } header: {
                         SettingsSectionTitle("播放")
                     }
+                    .listRowBackground(BackgroundSettings.shared.cardFill)
+                    .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
                     Section {
                         NavigationLink {
@@ -106,6 +112,8 @@ struct SettingsView: View {
                     } header: {
                         SettingsSectionTitle("下载")
                     }
+                    .listRowBackground(BackgroundSettings.shared.cardFill)
+                    .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
                     Section {
                         NavigationLink {
@@ -122,11 +130,14 @@ struct SettingsView: View {
                     } header: {
                         SettingsSectionTitle("关于")
                     }
+                    .listRowBackground(BackgroundSettings.shared.cardFill)
+                    .listRowSeparator(BackgroundSettings.shared.rowSeparator)
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
             }
-            // 底色交给 RootView 的 AppBackground（自定义壁纸要能透上来）
+            // 壁纸铺在这一页自己的视图树里，不靠父容器透底（见 `pageBackground()`）
+            .pageBackground()
             .toolbar(.hidden, for: .navigationBar)
             .onAppear {
                 cache.refresh()

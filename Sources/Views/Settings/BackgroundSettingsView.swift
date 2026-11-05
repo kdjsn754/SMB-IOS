@@ -52,6 +52,8 @@ struct BackgroundSettingsView: View {
             } header: {
                 SettingsSectionTitle("背景")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
             Section {
                 VStack(alignment: .leading, spacing: 6) {
@@ -71,6 +73,8 @@ struct BackgroundSettingsView: View {
             } header: {
                 SettingsSectionTitle("控件")
             }
+            .listRowBackground(BackgroundSettings.shared.cardFill)
+            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
             if settings.kind != .none {
                 Section {
@@ -115,11 +119,10 @@ struct BackgroundSettingsView: View {
                 sampleCard(title: "我的 NAS", detail: "192.168.1.10")
 
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                    .fill(settings.cardFill)
                     .frame(height: 52)
             }
             .padding(16)
-            .opacity(settings.controlOpacity)
         }
         .frame(height: 208)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -153,7 +156,7 @@ struct BackgroundSettingsView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(
-            Color(uiColor: .secondarySystemGroupedBackground),
+            settings.cardFill,
             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
     }
