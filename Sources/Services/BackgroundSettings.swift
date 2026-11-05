@@ -9,8 +9,9 @@ import UIKit
 enum WallpaperDefaults {
     /// 纯色背景的默认值（藏蓝，配浅色/深色两种主题都不刺眼）
     static let colorHex = "#3D5A80"
-    /// 控件透明度默认 70%：第一次选完壁纸就能看见，又不会把文字压得读不清
-    static let controlOpacity: Double = 0.70
+    /// 控件透明度默认 30%（= 白底还有 70% 不透明）：第一次选完壁纸就能看见，
+    /// 又不至于把卡片洗到只剩字。**数值是「透明度」不是「不透明度」** —— 100 = 全透明。
+    static let controlOpacity: Double = 0.30
 }
 
 /// 自定义背景（壁纸 / 纯色）与「控件透明度」的持久化。
@@ -18,7 +19,7 @@ enum WallpaperDefaults {
 /// 三份数据：
 /// - `kind`：当前用哪种背景（`none` 回到系统分组底色 / `color` 纯色 / `image` 壁纸）；
 /// - `colorHex`：纯色背景的颜色；
-/// - `controlOpacity`：**控件白底**的不透明度 0…1（0 = 白底全透明只剩壁纸，1 = 原来的实心卡片）。
+/// - `controlOpacity`：**控件白底的透明度** 0…1（**100 = 白底全透明只剩壁纸，0 = 原来的实心卡片**）。
 ///   文字**不跟着淡** —— 早先版本用整页 `.opacity()`，标题和文件名一起被洗掉才改成现在这样。
 ///
 /// 壁纸不存进 `UserDefaults`（几百 KB 的二进制会把偏好文件撑爆），
@@ -37,7 +38,9 @@ final class BackgroundSettings: ObservableObject {
     private enum Key {
         static let kind = "settings.backgroundKind"
         static let color = "settings.backgroundColor"
-        static let opacity = "settings.backgroundOpacity"
+        /// 1.7.2 换了 key：语义从「不透明度」翻成「透明度」，旧值不能再用，
+        /// 否则上一版存的 70 会被当成「70% 透明」，界面一下子糊掉。
+        static let opacity = "settings.backgroundTransparency"
     }
 
     /// 纯色背景的默认值（藏蓝，配浅色/深色两种主题都不刺眼）
@@ -56,7 +59,7 @@ final class BackgroundSettings: ObservableObject {
         }
     }
 
-    /// 控件层不透明度，0…1。滑块直接绑这个值。
+    /// 控件白底的**透明度**，0…1（100% = 白底全透明）。滑杆直接绑这个值。
     @Published var controlOpacity: Double {
         didSet {
             let clamped = min(max(controlOpacity, 0), 1)
@@ -115,15 +118,16 @@ final class BackgroundSettings: ObservableObject {
     /// 卡片 / 行 / 面板的「白底」颜色，透明度就是控件透明度。
     ///
     /// 1.7.1 起**只淡白底，不淡文字**：整页 `.opacity()` 会把标题、文件名一起洗掉，
-    /// 所以改成把每个控件的表面色单独降到 `controlOpacity` ——
-    /// 壁纸透过卡片显出来，字仍然是实心的。
+    /// 所以改成把每个控件的表面色单独降下去 —— 壁纸透过卡片显出来，字仍然是实心的。
+    ///
+    /// 1.7.2 起数值是**透明度**：100 → 白底 alpha 0（全透），0 → alpha 1（实心卡片）。
     var cardFill: Color {
-        Color(uiColor: .secondarySystemGroupedBackground).opacity(controlOpacity)
+        Color(uiColor: .secondarySystemGroupedBackground).opacity(1 - controlOpacity)
     }
 
     /// 卡片几乎透明时把列表分隔线一起收掉：不然壁纸上浮着一排灰线，比不透明还难看。
     var rowSeparator: Visibility {
-        controlOpacity < 0.5 ? .hidden : .visible
+        1 - controlOpacity < 0.5 ? .hidden : .visible
     }
 
     // MARK: - 写入

@@ -7,7 +7,8 @@ import UIKit
 /// 三段：
 /// - 顶部预览：把当前背景 + 一张样张卡片叠起来，滑杆一拖就能看出「控件变透明」是什么样；
 /// - 背景：从相册选图（选完进裁切页）或直接挑一个纯色；
-/// - 控件：0…100 的透明度 —— 调的是**控件层**的不透明度，背景本身不动。
+/// - 控件：0…100 的**透明度** —— 100 = 卡片白底全透只剩壁纸，0 = 原来的实心卡片。
+///   淡的只有白底，文字始终实心。滑杆是自绘的（`OpacitySlider`），不是系统 `Slider`。
 @MainActor
 struct BackgroundSettingsView: View {
     @ObservedObject private var settings = BackgroundSettings.shared
@@ -56,7 +57,7 @@ struct BackgroundSettingsView: View {
             .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
             Section {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("控件透明度")
                         Spacer(minLength: 8)
@@ -66,8 +67,18 @@ struct BackgroundSettingsView: View {
                             .monospacedDigit()
                     }
 
-                    Slider(value: $settings.controlOpacity, in: 0...1)
-                        .tint(.accentColor)
+                    // 自绘滑杆（用户要求不用系统 `Slider`，见 `OpacitySlider`）
+                    OpacitySlider(value: $settings.controlOpacity)
+                        .padding(.top, 2)
+
+                    // 两端各标一句：1.7.2 数值方向翻成「越大越透明」，不写清楚容易拖反
+                    HStack {
+                        Text("不透明")
+                        Spacer(minLength: 8)
+                        Text("透明")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 }
                 .padding(.vertical, 4)
             } header: {
