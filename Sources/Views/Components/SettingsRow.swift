@@ -37,6 +37,9 @@ struct SettingsRow: View {
     var titleTint: Color = .primary
     /// 右侧值的颜色
     var valueTint: Color = .secondary
+    /// 右侧是否画 chevron：自绘卡片（设置首页，1.7.4）不在 `List` 里，
+    /// 系统不再自动补箭头，得自己画，否则整行看不出可点。
+    var showsChevron: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -61,8 +64,86 @@ struct SettingsRow: View {
                     .foregroundStyle(valueTint)
                     .lineLimit(1)
             }
+
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 2)
+    }
+}
+
+// MARK: - 自绘分组卡片（设置首页，1.7.4）
+
+/// 设置首页的分组：小标题 + 一张圆角卡片。
+///
+/// 为什么不用 `List`：iOS 26 起 `insetGrouped` 会在每个分组卡片下面画一条 hairline
+/// （`.listSectionSeparator(.hidden)` 也拦不住，用户实测 1.7.3 仍在，见第 7 节 93 条）。
+/// 分组、卡片、行间线全部自己画，系统就没有可以插手的地方。
+struct SettingsGroup<Content: View>: View {
+    let title: String
+    let content: Content
+
+    @ObservedObject private var background = BackgroundSettings.shared
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+
+            VStack(spacing: 0) {
+                content
+            }
+            .background(
+                background.cardFill,
+                in: RoundedRectangle(cornerRadius: 26, style: .continuous)
+            )
+        }
+    }
+}
+
+/// 行间分隔线：缩进到文字起点（和系统 insetGrouped 的行间线一致），
+/// 壁纸把卡片洗到半透以下时一起收掉（和 `BackgroundSettings.rowSeparator` 同一个判据）。
+struct SettingsRowDivider: View {
+    var leadingInset: CGFloat = 58
+
+    @ObservedObject private var background = BackgroundSettings.shared
+
+    var body: some View {
+        if background.rowSeparator == .visible {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.5)
+                .padding(.leading, leadingInset)
+        }
+    }
+}
+
+/// 一行在自绘卡片里的内边距与点击区域。
+extension View {
+    func settingsRowChrome(horizontal: CGFloat = 16, vertical: CGFloat = 12) -> some View {
+        padding(.horizontal, horizontal)
+            .padding(.vertical, vertical)
+            .contentShape(Rectangle())
+    }
+}
+
+/// 自绘卡片里的可点行：`List` 之外的 `NavigationLink` 默认会把 label 染成蓝色，
+/// 用自定义 ButtonStyle 同时解决染色与按压反馈（轻微变淡）。
+struct SettingsRowPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
