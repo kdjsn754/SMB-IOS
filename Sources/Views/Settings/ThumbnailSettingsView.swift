@@ -5,6 +5,7 @@ import UIKit
 ///
 /// 1.3.34 重设计：开关带图标与一行说明，维护操作从「两个裸按钮」改成两项带说明的行，
 /// 失败记录的数量直接放在行尾，不用点进去才知道有没有。
+/// 1.7.6 换到统一的 `AppGroup` / `AppRow`（不再用 `List`，见 `AppSurface.swift`）。
 @MainActor
 struct ThumbnailSettingsView: View {
     @ObservedObject private var diagnostics = ThumbnailDiagnostics.shared
@@ -16,97 +17,102 @@ struct ThumbnailSettingsView: View {
 
     var body: some View {
         SettingsDetail(title: "缩略图与封面") {
-            Section {
-                SettingsToggleRow(
+            VStack(alignment: .leading, spacing: 22) {
+                AppGroup("显示") {
+                AppRow(
                     icon: "photo.fill",
-                    tint: .pink,
+                    iconTint: .pink,
                     title: "图片缩略图",
-                    subtitle: "网格和列表里的预览图",
-                    isOn: $thumbnailsEnabled
-                )
+                    subtitle: "网格和列表里的预览图"
+                ) {
+                    Toggle("", isOn: $thumbnailsEnabled)
+                        .labelsHidden()
+                }
 
-                SettingsToggleRow(
+                AppRow(
                     icon: "film.fill",
-                    tint: .purple,
+                    iconTint: .purple,
                     title: "视频封面",
                     subtitle: thumbnailsEnabled
                         ? "读取视频首帧当封面，比图片慢一些"
                         : "需要先打开「图片缩略图」",
-                    isOn: $videoThumbnails
-                )
+                    showsSeparator: false
+                ) {
+                    Toggle("", isOn: $videoThumbnails)
+                        .labelsHidden()
+                }
                 .disabled(!thumbnailsEnabled)
-            } header: {
-                SettingsSectionTitle("显示")
             }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
-            Section {
+            AppGroup("维护") {
                 Button {
                     ThumbnailStore.shared.resetFailures()
                     toast = "已重新排队"
                 } label: {
-                    SettingsRow(
+                    AppRow(
                         icon: "arrow.clockwise",
-                        tint: .blue,
+                        iconTint: .blue,
                         title: "重新加载失败的缩略图",
                         subtitle: "清空失败记录，下一轮重新尝试"
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(AppRowPressStyle())
 
                 NavigationLink {
                     ThumbnailFailureListView()
                 } label: {
-                    SettingsRow(
+                    AppRow(
                         icon: "exclamationmark.triangle.fill",
-                        tint: .yellow,
+                        iconTint: .yellow,
                         title: "加载失败记录",
                         subtitle: diagnostics.entries.isEmpty ? "暂时没有失败的文件" : "点开可以查看原因",
-                        value: diagnostics.entries.isEmpty ? nil : "\(diagnostics.entries.count)"
+                        value: diagnostics.entries.isEmpty ? nil : "\(diagnostics.entries.count)",
+                        chevron: true,
+                        showsSeparator: false
                     )
                 }
-            } header: {
-                SettingsSectionTitle("维护")
+                .buttonStyle(AppRowPressStyle())
+                }
             }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
         }
         .toast($toast)
     }
 }
 
-/// 失败记录单独一页：列表长了也不会把设置页顶开
+/// 失败记录单独一页：列表长了也不会把设置页顶开。
 @MainActor
 struct ThumbnailFailureListView: View {
     @ObservedObject private var diagnostics = ThumbnailDiagnostics.shared
 
     var body: some View {
-        Group {
+        SettingsDetail(title: "加载失败记录") {
             if diagnostics.entries.isEmpty {
-                ContentUnavailableViewCompat(title: "没有失败记录")
+                AppGroup {
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(.secondary)
+                        Text("没有失败记录")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                }
             } else {
-                List {
-                    ForEach(diagnostics.entries) { entry in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(entry.name)
-                                .font(.subheadline)
-                                .lineLimit(1)
-                            Text(entry.reason)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                AppGroup {
+                    ForEach(Array(diagnostics.entries.enumerated()), id: \.element.id) { index, entry in
+                        AppRow(
+                            title: entry.name,
+                            subtitle: entry.reason,
+                            showsSeparator: index < diagnostics.entries.count - 1
+                        ) {
+                            EmptyView()
                         }
-                        .padding(.vertical, 1)
                     }
                 }
-                .scrollContentBackground(.hidden)
-                .listRowBackground(BackgroundSettings.shared.cardFill)
             }
         }
-        // 空态和列表都要有壁纸，所以铺在 Group 上，不铺在 List 上
-        .pageBackground()
-        .navigationTitle("加载失败记录")
-        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !diagnostics.entries.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -116,22 +122,5 @@ struct ThumbnailFailureListView: View {
                 }
             }
         }
-    }
-}
-
-/// iOS 16 没有 ContentUnavailableView（17+ 才有），这里做个等价占位
-struct ContentUnavailableViewCompat: View {
-    let title: String
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "checkmark.circle")
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(.secondary)
-            Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

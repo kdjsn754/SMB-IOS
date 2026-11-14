@@ -167,16 +167,20 @@ struct BrowserView: View {
                 }
             }
         } else {
-            List {
-                ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
-                    cell(for: item, order: index)
-                        .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
-                        .listRowSeparator(.hidden)
+            // 列表模式不再用 `List`：`List` 会自己画行底与分隔线，壁纸下会透出一层
+            // 系统底色，也和网格模式的边距对不上（1.7.6 统一到自绘容器）。
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
+                        cell(for: item, order: index)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                    }
                 }
+                .padding(.top, 8)
+                .padding(.bottom, 28)
             }
-            .listStyle(.plain)
-            // 列表模式的行背景是系统画的，不去掉会挡住 RootView 的自定义背景
-            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
             .overlay {
                 if visibleItems.isEmpty {
                     noMatchState

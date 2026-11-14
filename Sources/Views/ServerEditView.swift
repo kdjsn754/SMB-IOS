@@ -1,5 +1,10 @@
 import SwiftUI
+import UIKit
 
+/// 添加 / 编辑服务器。
+///
+/// 1.7.6 从 `Form` 换到统一卡片：`Form` 会给每行套不透明底和系统分隔线，
+/// 壁纸透不上来，也和设置页不是一套观感（见 `AppSurface.swift`）。
 @MainActor
 struct ServerEditView: View {
     @EnvironmentObject private var app: AppModel
@@ -35,51 +40,52 @@ struct ServerEditView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("服务器") {
-                    TextField("名称（可选）", text: $name)
-                    TextField("主机地址，如 192.168.1.10", text: $host)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("端口", text: $port)
-                        .keyboardType(.numberPad)
-                    TextField("共享名称，如 Video", text: $share)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+            AppPage {
+                AppGroup("服务器") {
+                    AppField(label: "名称", placeholder: "可选，默认用主机地址", text: $name)
+                    AppField(label: "主机", placeholder: "192.168.1.10", text: $host, keyboard: .URL)
+                    AppField(label: "端口", placeholder: "445", text: $port, keyboard: .numberPad)
+                    AppField(label: "共享", placeholder: "Video", text: $share, showsSeparator: false)
                 }
 
-                Section {
-                    TextField("用户名（guest 表示匿名）", text: $username)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("密码", text: $password)
-                    TextField("域 / 工作组（可选）", text: $domain)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("账户")
-                } footer: {
-                    Text("Windows 共享若使用微软账户，用户名可填写 MicrosoftAccount\\邮箱地址。")
+                AppGroup(
+                    "账户",
+                    footer: "Windows 共享若使用微软账户，用户名可填写 MicrosoftAccount\\邮箱地址。"
+                ) {
+                    AppField(label: "用户名", placeholder: "guest 表示匿名", text: $username)
+                    AppField(label: "密码", placeholder: "留空表示无密码", text: $password, isSecure: true)
+                    AppField(label: "域", placeholder: "可选", text: $domain, showsSeparator: false)
                 }
 
-                Section {
+                AppGroup("连接") {
                     Button {
                         Task { await testConnection() }
                     } label: {
-                        HStack {
+                        AppRow(
+                            title: isTesting ? "正在连接…" : "测试连接",
+                            titleColor: .accentColor,
+                            showsSeparator: testMessage != nil
+                        ) {
                             if isTesting {
-                                ProgressView().padding(.trailing, 4)
+                                ProgressView()
                             }
-                            Text(isTesting ? "正在连接…" : "测试连接")
                         }
                     }
+                    .buttonStyle(AppRowPressStyle())
                     .disabled(isTesting)
 
                     if let testMessage {
-                        Label(testMessage, systemImage: testSucceeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .font(.footnote)
-                            .foregroundStyle(testSucceeded ? Color.green : Color.orange)
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: testSucceeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .font(.subheadline)
+                            Text(testMessage)
+                                .font(.footnote)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(testSucceeded ? Color.green : Color.orange)
+                        .padding(.horizontal, AppSurfaces.cardPadding)
+                        .padding(.vertical, 12)
                     }
                 }
             }

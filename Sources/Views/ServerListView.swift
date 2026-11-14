@@ -66,8 +66,13 @@ struct ServerListView: View {
                     .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(.primary)
                     .frame(width: 46, height: 46)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5))
+                    .background(background.surfaces.control, in: Circle())
+                    .overlay(
+                        Circle().strokeBorder(
+                            Color.primary.opacity(0.07 + background.surfaces.strokeOpacity),
+                            lineWidth: 0.5
+                        )
+                    )
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -128,12 +133,9 @@ struct ServerListView: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(14)
-        // 卡片白底跟随「控件透明度」：文字始终实心，只有这块底在淡
-        .background(
-            background.cardFill,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        // 卡片底与轮廓跟随全局表面令牌：文字始终实心，只有这块底在淡
+        .appCardSurface()
+        .contentShape(RoundedRectangle(cornerRadius: AppSurfaces.cardRadius, style: .continuous))
     }
 
     private var emptyCard: some View {
@@ -162,10 +164,7 @@ struct ServerListView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 36)
         .padding(.horizontal, 20)
-        .background(
-            background.cardFill,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
+        .appCardSurface()
     }
 
     // MARK: - 动作

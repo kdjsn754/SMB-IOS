@@ -10,33 +10,20 @@ import UIKit
 struct AboutSettingsView: View {
     var body: some View {
         SettingsDetail(title: "关于") {
-            Section {
-                banner
-                    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+            banner
+
+            AppGroup("应用") {
+                AppRow(title: "版本", value: AppInfo.version)
+                AppRow(title: "构建", value: AppInfo.build)
+                AppRow(title: "最低系统", value: "iOS " + AppInfo.minimumOS, showsSeparator: false)
             }
 
-            Section {
-                LabeledContent("版本", value: AppInfo.version)
-                LabeledContent("构建", value: AppInfo.build)
-                LabeledContent("最低系统", value: "iOS " + AppInfo.minimumOS)
-            } header: {
-                SettingsSectionTitle("应用")
+            AppGroup("连接") {
+                AppRow(title: "连接协议", value: "SMB 2 / 3")
+                AppRow(title: "网络库", value: "AMSMB2 · libsmb2", showsSeparator: false)
             }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
-            Section {
-                LabeledContent("连接协议", value: "SMB 2 / 3")
-                LabeledContent("网络库", value: "AMSMB2 · libsmb2")
-            } header: {
-                SettingsSectionTitle("连接")
-            }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
-
-            Section {
+            AppGroup("开源许可") {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("AMSMB2")
                         .font(.subheadline.weight(.medium))
@@ -53,12 +40,9 @@ struct AboutSettingsView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.vertical, 2)
-            } header: {
-                SettingsSectionTitle("开源许可")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
             }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
         }
     }
 
@@ -98,6 +82,7 @@ struct AboutSettingsView: View {
                 .background(Color.primary.opacity(0.06), in: Capsule())
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
+        .padding(.vertical, 20)
+        .appCardSurface()
     }
 }

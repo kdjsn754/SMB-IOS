@@ -5,10 +5,11 @@ import UIKit
 ///
 /// 1.3.34 重设计：顶部换成一张「用量卡」—— 大号数字 + 占用进度条 + 两项明细，
 /// 一眼能看出「用了多少、还剩多少」；下面才是上限、自动清理、清理操作。
-/// 之前只有三行 `LabeledContent`，看不出占用比例。
+/// 1.7.6 换到统一表面令牌：用量卡的底不再写死不透明色（壁纸下曾是死白一块）。
 @MainActor
 struct CacheSettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
+    @ObservedObject private var background = BackgroundSettings.shared
 
     @AppStorage(SettingsKey.cacheLimitMB) private var cacheLimit: Int = 500
     @AppStorage(SettingsKey.autoClean) private var autoClean: Bool = true
@@ -19,76 +20,69 @@ struct CacheSettingsView: View {
 
     var body: some View {
         SettingsDetail(title: "存储空间") {
-            Section {
-                usageCard
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
+            usageCard
 
-            Section {
-                Picker(selection: $cacheLimit) {
-                    Text("200 MB").tag(200)
-                    Text("500 MB").tag(500)
-                    Text("1 GB").tag(1024)
-                    Text("2 GB").tag(2048)
-                    Text("5 GB").tag(5120)
-                    Text("不限制").tag(0)
-                } label: {
-                    HStack(spacing: 12) {
-                        SettingsIcon(symbol: "gauge.with.dots.needle.33percent", tint: .indigo)
-                        Text("缓存上限")
+            AppGroup("上限") {
+                AppRow(
+                    icon: "gauge.with.dots.needle.33percent",
+                    iconTint: .indigo,
+                    title: "缓存上限"
+                ) {
+                    Picker("", selection: $cacheLimit) {
+                        Text("200 MB").tag(200)
+                        Text("500 MB").tag(500)
+                        Text("1 GB").tag(1024)
+                        Text("2 GB").tag(2048)
+                        Text("5 GB").tag(5120)
+                        Text("不限制").tag(0)
                     }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
                 }
-                .pickerStyle(.menu)
 
-                SettingsToggleRow(
+                AppRow(
                     icon: "arrow.triangle.2.circlepath",
-                    tint: .teal,
+                    iconTint: .teal,
                     title: "自动清理",
                     subtitle: cacheLimit == 0
                         ? "设为「不限制」时不需要自动清理"
                         : "超过上限时先删最旧的，保留最近看的",
-                    isOn: $autoClean
-                )
+                    showsSeparator: false
+                ) {
+                    Toggle("", isOn: $autoClean)
+                        .labelsHidden()
+                }
                 .disabled(cacheLimit == 0)
-            } header: {
-                SettingsSectionTitle("上限")
             }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
 
-            Section {
+            AppGroup("清理") {
                 Button {
                     confirmClearThumbnails = true
                 } label: {
-                    SettingsRow(
+                    AppRow(
                         icon: "photo.stack.fill",
-                        tint: .blue,
+                        iconTint: .blue,
                         title: "清理缩略图",
                         subtitle: "下次打开目录会重新生成",
                         value: Format.bytes(cache.thumbnailBytes)
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(AppRowPressStyle())
 
                 Button {
                     confirmClearAll = true
                 } label: {
-                    SettingsRow(
+                    AppRow(
                         icon: "trash.fill",
-                        tint: .red,
+                        iconTint: .red,
                         title: "清空全部缓存",
                         subtitle: "缩略图、图片与视频",
-                        titleTint: .red
+                        titleColor: .red,
+                        showsSeparator: false
                     )
                 }
-                .buttonStyle(.plain)
-            } header: {
-                SettingsSectionTitle("清理")
+                .buttonStyle(AppRowPressStyle())
             }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
         }
         .toast($toast)
         .onAppear { cache.refresh() }
@@ -145,7 +139,7 @@ struct CacheSettingsView: View {
 
             if cacheLimit > 0 {
                 Capsule()
-                    .fill(Color.primary.opacity(0.08))
+                    .fill(background.surfaces.track)
                     .frame(height: 8)
                     .overlay(alignment: .leading) {
                         GeometryReader { proxy in
@@ -171,19 +165,20 @@ struct CacheSettingsView: View {
                 .foregroundStyle(.secondary)
             }
 
-            Divider()
+            Rectangle()
+                .fill(background.surfaces.separator)
+                .frame(height: 0.5)
 
             HStack(spacing: 0) {
                 metric(title: "缩略图", bytes: cache.thumbnailBytes)
-                Divider().frame(height: 30)
+                Rectangle()
+                    .fill(background.surfaces.separator)
+                    .frame(width: 0.5, height: 30)
                 metric(title: "图片与视频", bytes: cache.mediaBytes)
             }
         }
         .padding(16)
-        .background(
-            Color(uiColor: .secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
+        .appCardSurface()
     }
 
     private func metric(title: String, bytes: Int64) -> some View {

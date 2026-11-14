@@ -7,13 +7,8 @@ import UIKit
 /// **连缩略图和图片一起**清空 —— 用户根本分不清哪个文件是哪个视频。
 /// 这里把已下载的视频按「封面 + 原文件名 + 大小 + 下载时间」列出来。
 ///
-/// 1.6.6 按用户要求改了三处：
-/// - 列表行带**首帧封面**（从本机文件直接抓，不需要服务器在线）；
-/// - **点一行直接播**，放的就是本地文件，不走网络；
-/// - 右边的垃圾桶按钮去掉，删除只在**左滑**时出现。
-///
-/// 数据来自 `VideoDownloadStore`：下载时写索引，列表则每次都按磁盘对账，
-/// 所以文件被缓存上限淘汰后这里也会同步消失，不会留下点不开的死条目。
+/// 1.7.6 不再用 `List`：卡片与行线交给统一组件，左滑删除用 `SwipeDeleteRow`
+/// 自己实现，观感和其它设置页一致（见 `AppSurface.swift`）。
 @MainActor
 struct DownloadSettingsView: View {
     @ObservedObject private var store = VideoDownloadStore.shared
@@ -34,9 +29,20 @@ struct DownloadSettingsView: View {
     var body: some View {
         SettingsDetail(title: "视频下载") {
             if store.items.isEmpty {
-                emptySection
+                AppGroup {
+                    VStack(spacing: 10) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(.secondary)
+
+                        Text("还没有下载到本机的视频")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                }
             } else {
-                listSection
+                videoList
                 clearSection
             }
         }
@@ -69,30 +75,23 @@ struct DownloadSettingsView: View {
 
     // MARK: - 列表
 
-    private var listSection: some View {
-        Section {
-            ForEach(store.items) { video in
-                Button {
-                    play(video)
-                } label: {
-                    row(video)
-                }
-                .buttonStyle(.plain)
-                // 删除只留这一条路：从右往左滑出「删除」（系统标准做法，
-                // 行内不再摆垃圾桶按钮）
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) {
-                        pendingDelete = video
+    private var videoList: some View {
+        AppGroup("\(store.items.count) 个 · \(Format.bytes(store.totalBytes))") {
+            ForEach(Array(store.items.enumerated()), id: \.element.id) { index, video in
+                SwipeDeleteRow(onDelete: { pendingDelete = video }) {
+                    Button {
+                        play(video)
                     } label: {
-                        Label("删除", systemImage: "trash")
+                        row(video)
                     }
+                    .buttonStyle(.plain)
+                }
+
+                if index < store.items.count - 1 {
+                    AppSeparator()
                 }
             }
-        } header: {
-            SettingsSectionTitle("\(store.items.count) 个 · \(Format.bytes(store.totalBytes))")
         }
-        .listRowBackground(BackgroundSettings.shared.cardFill)
-        .listRowSeparator(BackgroundSettings.shared.rowSeparator)
     }
 
     private func row(_ video: DownloadedVideo) -> some View {
@@ -111,7 +110,8 @@ struct DownloadSettingsView: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, AppSurfaces.cardPadding)
+        .padding(.vertical, 10)
         .contentShape(Rectangle())
     }
 
@@ -136,39 +136,23 @@ struct DownloadSettingsView: View {
         playing = PlaybackRequest(id: video.id, item: item, url: url)
     }
 
-    // MARK: - 空状态 / 全部删除
-
-    private var emptySection: some View {
-        Section {
-            VStack(spacing: 10) {
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 34, weight: .light))
-                    .foregroundStyle(.secondary)
-
-                Text("还没有下载到本机的视频")
-                    .font(.subheadline.weight(.medium))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 40)
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
-        }
-    }
+    // MARK: - 全部删除
 
     private var clearSection: some View {
-        Section {
+        AppGroup("清理") {
             Button {
                 confirmClearAll = true
             } label: {
-                SettingsRow(
+                AppRow(
                     icon: "trash.fill",
-                    tint: .red,
+                    iconTint: .red,
                     title: "删除全部下载",
                     subtitle: "只删视频，不动缩略图和图片缓存",
-                    titleTint: .red
+                    titleColor: .red,
+                    showsSeparator: false
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(AppRowPressStyle())
             // 弹窗挂在按钮上、不挂整页：同一页两个 `.alert` 挂在同一个视图上，
             // 后挂的会把先挂的顶掉，删除单个视频的确认框就弹不出来了
             .alert("删除全部已下载的视频？", isPresented: $confirmClearAll) {
@@ -183,11 +167,7 @@ struct DownloadSettingsView: View {
             } message: {
                 Text("共 \(store.items.count) 个、\(Format.bytes(store.totalBytes))。缩略图和缓存的图片不受影响。")
             }
-        } header: {
-            SettingsSectionTitle("清理")
         }
-        .listRowBackground(BackgroundSettings.shared.cardFill)
-        .listRowSeparator(BackgroundSettings.shared.rowSeparator)
     }
 
     /// `alert(isPresented:)` 需要 Bool 绑定，删除对象用可选值驱动

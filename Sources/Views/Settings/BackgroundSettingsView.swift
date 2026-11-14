@@ -5,10 +5,12 @@ import UIKit
 /// 设置 → 外观 → 自定义背景。
 ///
 /// 三段：
-/// - 顶部预览：把当前背景 + 一张样张卡片叠起来，滑杆一拖就能看出「控件变透明」是什么样；
-/// - 背景：从相册选图（选完进裁切页）或直接挑一个纯色；
+/// - 顶部预览：把当前壁纸 + 一张样张卡片叠起来，滑杆一拖就能看出「控件变透明」是什么样；
+/// - 背景：从相册选图（选完进裁切页）、清除；
 /// - 控件：0…100 的**透明度** —— 100 = 卡片白底全透只剩壁纸，0 = 原来的实心卡片。
 ///   淡的只有白底，文字始终实心。滑杆是自绘的（`OpacitySlider`），不是系统 `Slider`。
+///
+/// 1.7.6 去掉「纯色背景」：只剩壁纸一条路，设置项少一个「我到底选了哪种」的问题。
 @MainActor
 struct BackgroundSettingsView: View {
     @ObservedObject private var settings = BackgroundSettings.shared
@@ -27,80 +29,39 @@ struct BackgroundSettingsView: View {
 
     var body: some View {
         SettingsDetail(title: "自定义背景") {
-            Section {
-                preview
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
+            preview
 
-            Section {
+            AppGroup("背景") {
                 PhotosPicker(selection: $pickerItem, matching: .images, photoLibrary: .shared()) {
-                    SettingsRow(
+                    AppRow(
                         icon: "photo.fill",
-                        tint: .indigo,
-                        title: settings.kind == .image ? "更换图片" : "选择图片",
-                        value: settings.kind == .image ? "已设置" : ""
+                        iconTint: .indigo,
+                        title: settings.kind == .image ? "更换壁纸" : "选择壁纸",
+                        subtitle: "从相册选一张图片，可以缩放裁切",
+                        value: settings.kind == .image ? "已设置" : nil,
+                        showsSeparator: settings.kind == .image
                     )
                 }
+                .buttonStyle(AppRowPressStyle())
 
-                ColorPicker(selection: colorBinding, supportsOpacity: false) {
-                    HStack(spacing: 12) {
-                        SettingsIcon(symbol: "paintpalette.fill", tint: .purple)
-                        Text("背景颜色")
-                    }
-                }
-            } header: {
-                SettingsSectionTitle("背景")
-            }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
-
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("控件透明度")
-                        Spacer(minLength: 8)
-                        Text("\(Int((settings.controlOpacity * 100).rounded()))")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-
-                    // 自绘滑杆（用户要求不用系统 `Slider`，见 `OpacitySlider`）
-                    OpacitySlider(value: $settings.controlOpacity)
-                        .padding(.top, 2)
-
-                    // 两端各标一句：1.7.2 数值方向翻成「越大越透明」，不写清楚容易拖反
-                    HStack {
-                        Text("不透明")
-                        Spacer(minLength: 8)
-                        Text("透明")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                }
-                .padding(.vertical, 4)
-            } header: {
-                SettingsSectionTitle("控件")
-            }
-            .listRowBackground(BackgroundSettings.shared.cardFill)
-            .listRowSeparator(BackgroundSettings.shared.rowSeparator)
-
-            if settings.kind != .none {
-                Section {
+                if settings.kind == .image {
                     Button {
                         settings.clear()
                     } label: {
-                        SettingsRow(
+                        AppRow(
                             icon: "xmark.circle.fill",
-                            tint: .red,
-                            title: "清除背景",
-                            titleTint: .red
+                            iconTint: .red,
+                            title: "移除壁纸",
+                            titleColor: .red,
+                            showsSeparator: false
                         )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(AppRowPressStyle())
                 }
+            }
+
+            AppGroup("控件", footer: "数值越大卡片越透明，壁纸越清楚；文字始终是实心的。") {
+                opacityRow
             }
         }
         .onChange(of: pickerItem) { _, item in
@@ -117,6 +78,36 @@ struct BackgroundSettingsView: View {
         }
     }
 
+    // MARK: - 控件透明度
+
+    private var opacityRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("控件透明度")
+                Spacer(minLength: 8)
+                Text("\(Int((settings.controlOpacity * 100).rounded()))")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            // 自绘滑杆（用户要求不用系统 `Slider`，见 `OpacitySlider`）
+            OpacitySlider(value: $settings.controlOpacity)
+                .padding(.top, 2)
+
+            // 两端各标一句：1.7.2 数值方向翻成「越大越透明」，不写清楚容易拖反
+            HStack {
+                Text("不透明")
+                Spacer(minLength: 8)
+                Text("透明")
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, AppSurfaces.cardPadding)
+        .padding(.vertical, 14)
+    }
+
     // MARK: - 预览
 
     private var preview: some View {
@@ -130,15 +121,15 @@ struct BackgroundSettingsView: View {
                 sampleCard(title: "我的 NAS", detail: "192.168.1.10")
 
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(settings.cardFill)
+                    .fill(settings.surfaces.card)
                     .frame(height: 52)
             }
             .padding(16)
         }
         .frame(height: 208)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: AppSurfaces.cardRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: AppSurfaces.cardRadius, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
         )
     }
@@ -167,7 +158,7 @@ struct BackgroundSettingsView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(
-            settings.cardFill,
+            settings.surfaces.card,
             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
     }
@@ -182,21 +173,12 @@ struct BackgroundSettingsView: View {
                     .frame(width: proxy.size.width, height: proxy.size.height)
                     .clipped()
             }
-        } else if settings.kind == .color {
-            Color(hex: settings.colorHex)
         } else {
             Color(uiColor: .systemGroupedBackground)
         }
     }
 
     // MARK: - 选图与裁切
-
-    private var colorBinding: Binding<Color> {
-        Binding(
-            get: { Color(hex: settings.colorHex) },
-            set: { settings.setColor(UIColor($0).hexRGB) }
-        )
-    }
 
     private func load(_ item: PhotosPickerItem) {
         Task {

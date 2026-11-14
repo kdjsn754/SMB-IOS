@@ -1,7 +1,9 @@
 import SwiftUI
 
-/// 「播放手势」设置的 Form 内容，设置页和播放页共用同一份，
-/// 两处改的是同一个 `PlayerGestureSettings.shared`，改完立刻生效。
+/// 「播放手势」设置页的内容，设置页直接用；`header` 传 nil 时不重复写标题。
+///
+/// 1.7.6 不再用 `Section` / 系统 `Picker`：整页在统一卡片里，行用 `AppRow`，
+/// 选项用 `Menu` 自绘（`List` 行上 `Menu` 锚点跑偏的问题不存在了，见 1.4.6 第 7 节）。
 @MainActor
 struct PlayerGestureSettingsSections: View {
     @ObservedObject private var gestures = PlayerGestureSettings.shared
@@ -16,65 +18,117 @@ struct PlayerGestureSettingsSections: View {
     }
 
     var body: some View {
-        Section {
-            Toggle("启用手势", isOn: $gestures.isEnabled)
+        AppGroup(header) {
+            AppRow(icon: "hand.draw.fill", iconTint: .orange, title: "启用手势") {
+                Toggle("", isOn: $gestures.isEnabled).labelsHidden()
+            }
 
-            // 和下面几行一样用系统 Picker（`.menu` 样式）。
-            // 不用自绘 Menu：iOS 26/27 里给 Menu 自定义 label 挂在 List 行上时，
-            // 弹出锚点会跑到上方行、并把整行文字糊成玻璃，label 还会被染成 accent 蓝。
-            // 折行问题靠「只放超短文案」规避，完整说明留给播放页的诊断与 `detail`。
-            Picker("双击画面", selection: $gestures.doubleTap) {
-                ForEach(DoubleTapAction.allCases) { action in
-                    Text(action.shortTitle).tag(action)
-                }
-            }
-            .disabled(!gestures.isEnabled)
+            menuRow(
+                icon: "hand.tap.fill",
+                tint: .blue,
+                title: "双击画面",
+                options: DoubleTapAction.allCases.map { ($0.shortTitle, $0) },
+                selection: $gestures.doubleTap
+            )
 
-            Picker("快进 / 快退", selection: $gestures.seekStep) {
-                ForEach(PlayerGestureSettings.seekStepChoices, id: \.self) { step in
-                    Text("\(Int(step)) 秒").tag(step)
-                }
-            }
-            .disabled(!gestures.isEnabled || gestures.doubleTap == .none)
+            menuRow(
+                icon: "goforward",
+                tint: .teal,
+                title: "快进 / 快退",
+                options: PlayerGestureSettings.seekStepChoices.map { ("\(Int($0)) 秒", $0) },
+                selection: $gestures.seekStep
+            )
 
-            Picker("左右拖动", selection: $gestures.horizontal) {
-                ForEach(HorizontalDragAction.allCases) { action in
-                    Text(action.title).tag(action)
-                }
-            }
-            .disabled(!gestures.isEnabled)
+            menuRow(
+                icon: "arrow.left.and.right",
+                tint: .indigo,
+                title: "左右拖动",
+                options: HorizontalDragAction.allCases.map { ($0.title, $0) },
+                selection: $gestures.horizontal
+            )
 
-            Picker("上下拖动", selection: $gestures.vertical) {
-                ForEach(VerticalDragAction.allCases) { action in
-                    Text(action.title).tag(action)
-                }
-            }
-            .disabled(!gestures.isEnabled)
+            menuRow(
+                icon: "arrow.up.and.down",
+                tint: .purple,
+                title: "上下拖动",
+                options: VerticalDragAction.allCases.map { ($0.title, $0) },
+                selection: $gestures.vertical
+            )
 
-            Picker("长按画面", selection: $gestures.longPress) {
-                ForEach(LongPressAction.allCases) { action in
-                    Text(action.title).tag(action)
-                }
-            }
-            .disabled(!gestures.isEnabled)
+            menuRow(
+                icon: "hand.point.up.left.fill",
+                tint: .pink,
+                title: "长按画面",
+                options: LongPressAction.allCases.map { ($0.title, $0) },
+                selection: $gestures.longPress
+            )
 
-            Picker("双指捏合", selection: $gestures.pinch) {
-                ForEach(PinchAction.allCases) { action in
-                    Text(action.title).tag(action)
-                }
-            }
-            .disabled(!gestures.isEnabled)
-        } header: {
-            if let header {
-                Text(header)
-            }
+            menuRow(
+                icon: "arrow.up.left.and.arrow.down.right",
+                tint: .green,
+                title: "双指捏合",
+                options: PinchAction.allCases.map { ($0.title, $0) },
+                selection: $gestures.pinch,
+                showsSeparator: false
+            )
         }
 
-        Section {
-            Button("恢复默认手势") {
+        AppGroup {
+            Button {
                 gestures.resetToDefaults()
                 onReset?()
+            } label: {
+                AppRow(title: "恢复默认手势", showsSeparator: false) {
+                    EmptyView()
+                }
             }
+            .buttonStyle(AppRowPressStyle())
         }
+    }
+
+    /// 一行「标题 + 当前值」，点开是选项菜单。
+    private func menuRow<T: Hashable>(
+        icon: String,
+        tint: Color,
+        title: String,
+        options: [(String, T)],
+        selection: Binding<T>,
+        showsSeparator: Bool = true
+    ) -> some View {
+        AppRow(
+            icon: icon,
+            iconTint: tint,
+            title: title,
+            showsSeparator: showsSeparator
+        ) {
+            Menu {
+                ForEach(options.indices, id: \.self) { index in
+                    let option = options[index]
+                    Button {
+                        selection.wrappedValue = option.1
+                    } label: {
+                        if option.1 == selection.wrappedValue {
+                            Label(option.0, systemImage: "checkmark")
+                        } else {
+                            Text(option.0)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(currentLabel(options, selection.wrappedValue))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .disabled(!gestures.isEnabled)
+        }
+    }
+
+    private func currentLabel<T: Hashable>(_ options: [(String, T)], _ value: T) -> String {
+        options.first { $0.1 == value }?.0 ?? ""
     }
 }

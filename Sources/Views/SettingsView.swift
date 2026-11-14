@@ -7,10 +7,8 @@ import UIKit
 /// 与「资源库」同一条 24 pt 竖线；导航栏整体隐藏，进二级页时由 `SettingsDetail`
 /// 的 `.toolbar(.visible, for: .navigationBar)` 把返回按钮要回来。
 ///
-/// 1.3.34 全页重设计（用户要求「显示文本和布局都要」）：
-/// - 每项从单行名词改成「图标 + 标题 + 一行灰字说明」，设置页本身就能读懂每个入口是什么；
-/// - 分组按「外观 / 浏览 / 播放 / 关于」重排，去掉了和浏览页工具栏重复的「网格视图」开关；
-/// - 图标块换成淡色底 + 实色符号（`SettingsIcon`），和首页服务器卡片同一套语言。
+/// 1.7.6 全页改到 `AppSurface` 的令牌与组件上：分组卡片、行间线、轮廓都不再由
+/// 每个页面自己拼（见 `AppSurface.swift` 顶部说明）。
 @MainActor
 struct SettingsView: View {
     @ObservedObject private var cache = CacheManager.shared
@@ -27,125 +25,119 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 header
 
-                // 1.7.4 起整页改自绘分组卡片，**不再用 List**：
-                // iOS 26 的 insetGrouped 会在每个分组卡片下面画一条 hairline，
-                // `.listSectionSeparator(.hidden)` 也拦不住（1.7.3 用户实测仍在，
-                // 见第 7 节 93 条）。分组标题 / 圆角卡片 / 行间线全部自己画。
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        SettingsGroup("外观") {
+                        AppGroup("外观") {
                             ThemePicker(selection: $themeRaw)
                                 .padding(.horizontal, 14)
                                 .padding(.top, 14)
                                 .padding(.bottom, 8)
 
-                            SettingsRowDivider(leadingInset: 14)
+                            AppSeparator(leadingInset: 14)
 
                             NavigationLink {
                                 BackgroundSettingsView()
                             } label: {
-                                SettingsRow(
+                                AppRow(
                                     icon: "photo.fill",
-                                    tint: .indigo,
+                                    iconTint: .indigo,
                                     title: "自定义背景",
-                                    subtitle: "图片或纯色，控件透明度可调",
+                                    subtitle: "选一张壁纸，控件透明度可调",
                                     value: background.summary,
-                                    showsChevron: true
+                                    chevron: true,
+                                    showsSeparator: false
                                 )
-                                .settingsRowChrome()
                             }
-                            .buttonStyle(SettingsRowPressStyle())
+                            .buttonStyle(AppRowPressStyle())
                         }
 
-                        SettingsGroup("浏览") {
+                        AppGroup("浏览") {
                             NavigationLink {
                                 ThumbnailSettingsView()
                             } label: {
-                                SettingsRow(
+                                AppRow(
                                     icon: "photo.on.rectangle.angled",
-                                    tint: .pink,
+                                    iconTint: .pink,
                                     title: "缩略图与封面",
                                     subtitle: "网格里的图片预览、视频首帧",
                                     value: thumbnailSummary,
-                                    showsChevron: true
+                                    chevron: true
                                 )
-                                .settingsRowChrome()
                             }
-                            .buttonStyle(SettingsRowPressStyle())
-
-                            SettingsRowDivider()
+                            .buttonStyle(AppRowPressStyle())
 
                             NavigationLink {
                                 CacheSettingsView()
                             } label: {
-                                SettingsRow(
+                                AppRow(
                                     icon: "internaldrive.fill",
-                                    tint: .green,
+                                    iconTint: .green,
                                     title: "存储空间",
                                     subtitle: "缩略图与已缓存的媒体文件",
                                     value: Format.bytes(cache.totalBytes),
-                                    showsChevron: true
+                                    chevron: true,
+                                    showsSeparator: false
                                 )
-                                .settingsRowChrome()
                             }
-                            .buttonStyle(SettingsRowPressStyle())
+                            .buttonStyle(AppRowPressStyle())
                         }
 
-                        SettingsGroup("播放") {
+                        AppGroup("播放") {
                             NavigationLink {
                                 GestureSettingsView()
                             } label: {
-                                SettingsRow(
+                                AppRow(
                                     icon: "hand.draw.fill",
-                                    tint: .orange,
+                                    iconTint: .orange,
                                     title: "播放手势",
                                     subtitle: "双击、拖动、长按分别做什么",
                                     value: gestures.isEnabled ? gestures.doubleTap.shortTitle : "已关闭",
-                                    showsChevron: true
+                                    chevron: true,
+                                    showsSeparator: false
                                 )
-                                .settingsRowChrome()
                             }
-                            .buttonStyle(SettingsRowPressStyle())
+                            .buttonStyle(AppRowPressStyle())
                         }
 
-                        SettingsGroup("下载") {
+                        AppGroup("下载") {
                             NavigationLink {
                                 DownloadSettingsView()
                             } label: {
-                                SettingsRow(
+                                AppRow(
                                     icon: "arrow.down.circle.fill",
-                                    tint: .blue,
+                                    iconTint: .blue,
                                     title: "视频下载",
                                     subtitle: "已存到本机的视频，可单独删除",
                                     value: downloads.summary,
-                                    showsChevron: true
+                                    chevron: true,
+                                    showsSeparator: false
                                 )
-                                .settingsRowChrome()
                             }
-                            .buttonStyle(SettingsRowPressStyle())
+                            .buttonStyle(AppRowPressStyle())
                         }
 
-                        SettingsGroup("关于") {
+                        AppGroup("关于") {
                             NavigationLink {
                                 AboutSettingsView()
                             } label: {
-                                SettingsRow(
+                                AppRow(
                                     icon: "info.circle.fill",
-                                    tint: .gray,
+                                    iconTint: .gray,
                                     title: "关于 SMBViewer",
                                     subtitle: "版本、连接协议与开源许可",
                                     value: AppInfo.version,
-                                    showsChevron: true
+                                    chevron: true,
+                                    showsSeparator: false
                                 )
-                                .settingsRowChrome()
                             }
-                            .buttonStyle(SettingsRowPressStyle())
+                            .buttonStyle(AppRowPressStyle())
                         }
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, AppSurfaces.cardPadding)
                     .padding(.top, 2)
                     .padding(.bottom, 28)
                 }
+                .scrollIndicators(.hidden)
             }
             // 壁纸铺在这一页自己的视图树里，不靠父容器透底（见 `pageBackground()`）
             .pageBackground()

@@ -21,8 +21,8 @@ struct RootView: View {
             AppBackground()
 
             // 「控件透明度」不套在这一层：套上的话 tab bar 也会跟着淡。
-            // 1.7.1 起透明度只作用在**卡片白底**上（见 `BackgroundSettings.cardFill`），
-            // 文字保持实心，所以拖到 100（全透）也照样点得动、看得清。
+            // 1.7.6 起透明度只作用在**表面令牌**里的卡片底上（见 `AppSurface.swift` 的
+            // `AppSurfaces`），文字保持实心，所以拖到 100（全透）也照样点得动、看得清。
             TabView {
                 ServerListView()
                     .tabItem { Label("资源库", systemImage: "externaldrive.connected.to.line.below") }
