@@ -107,6 +107,17 @@ struct SettingsGroup<Content: View>: View {
                 background.cardFill,
                 in: RoundedRectangle(cornerRadius: 26, style: .continuous)
             )
+            // 卡片轮廓：透明度 0 时不画，越透越明显 —— 壁纸上靠它分辨模块，
+            // 而不是在每个模块下面加一条横线（用户 2026-11-14 的原话）
+            .overlay {
+                if background.cardOutlineOpacity > 0.001 {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .strokeBorder(
+                            Color.primary.opacity(background.cardOutlineOpacity),
+                            lineWidth: 0.5
+                        )
+                }
+            }
         }
     }
 }

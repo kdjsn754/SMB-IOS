@@ -130,6 +130,17 @@ final class BackgroundSettings: ObservableObject {
         1 - controlOpacity < 0.5 ? .hidden : .visible
     }
 
+    /// 卡片**轮廓描边**的强度（1.7.5 起）。
+    ///
+    /// 分组卡片全透明时（100%）白底没了，模块之间只剩 22 pt 间距，
+    /// 壁纸花一点就分不清哪几行是一组。用户原来的读法是「用一条细线区分模块」——
+    /// 线太像分割条，改成一圈跟着圆角走的描边：透明度 0 时完全不画（和原来一样），
+    /// 越透越明显，最高约 0.10，只在壁纸上勾出卡片轮廓。
+    var cardOutlineOpacity: Double {
+        let transparency = min(max(controlOpacity, 0), 1)
+        return 0.10 * transparency
+    }
+
     // MARK: - 写入
 
     func setColor(_ hex: String) {
