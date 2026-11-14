@@ -133,6 +133,8 @@ struct SettingsDetail<Content: View>: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        // 与设置首页一致：收掉 iOS 26 在分组卡片下面画的全宽 hairline（见 SettingsView）
+        .listSectionSeparator(.hidden)
         // 兜住没写分组标题的那些行（各页自己有 header 的分组还会各自再设一次，值一样）
         .listRowBackground(background.cardFill)
         // 壁纸铺在**这一页**里，不靠 RootView 透底（见 `pageBackground()`）

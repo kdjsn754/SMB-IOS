@@ -135,6 +135,10 @@ struct SettingsView: View {
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
+                // iOS 26 起 insetGrouped 会在每个分组卡片下面画一条**全宽 hairline**
+                // （用户截图：每个模块下面都有细线）。行间那条窄线（listRowSeparator）
+                // 是正常的，要收的是这条分组之间的 —— 系统设置的玻璃卡片之间也没有线。
+                .listSectionSeparator(.hidden)
             }
             // 壁纸铺在这一页自己的视图树里，不靠父容器透底（见 `pageBackground()`）
             .pageBackground()
