@@ -18,18 +18,39 @@ struct WallpaperCropperView: View {
     @State private var cropper = CropperBox()
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            CropScrollHost(image: image, box: cropper)
-                .ignoresSafeArea()
-
-            VStack(spacing: 0) {
+        // 这里的分层很讲究，1.7.7 之前是 ZStack 里并列三个视图：
+        // `Color.black.ignoresSafeArea()` + 画布 `.ignoresSafeArea()` + 工具条。
+        // 两个兄弟视图都忽略安全区，ZStack 自己就被撑到整块屏幕，没忽略安全区的
+        // 工具条也被按「撑大后的」边界摆位 —— 于是「取消 / 完成」顶到状态栏上，
+        // 点不到（ImageViewerView 第 104 行记过同一条教训）。
+        //
+        // 现在：画布铺满整屏（裁切区域 = 整块屏幕，壁纸该是什么比例就是什么比例），
+        // 工具条走 `overlay` 并按**真实安全区**下移，跟画布尺寸彻底脱钩。
+        GeometryReader { proxy in
+            ZStack {
+                Color.black
+                CropScrollHost(image: image, box: cropper)
+            }
+            .ignoresSafeArea()
+            .overlay(alignment: .top) {
                 toolbar
-                Spacer(minLength: 0)
+                    // 取两者较大值：正常情况 `proxy` 就给对了，万一某代系统在这一层
+                    // 把安全区传成 0，问窗口要一次，按钮绝不会压在状态栏上。
+                    .padding(.top, max(proxy.safeAreaInsets.top, windowTopInset) + 6)
             }
         }
         .background(Color.black)
+        // 黑底上状态栏要用白字（App 全局跟随主题，这里固定深色）
+        .preferredColorScheme(.dark)
+    }
+
+    /// 窗口自己的安全区高度（兜底用，见上面那层 overlay）
+    private var windowTopInset: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }?
+            .keyWindow?
+            .safeAreaInsets.top ?? 0
     }
 
     private var toolbar: some View {
@@ -65,7 +86,7 @@ struct WallpaperCropperView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 10)
+        // 顶部间距由 `body` 里那层 overlay 按安全区给，这里不再叠一次
     }
 
     private func finish() {
