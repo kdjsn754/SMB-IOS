@@ -18,14 +18,16 @@ struct WallpaperCropperView: View {
     @State private var cropper = CropperBox()
 
     var body: some View {
-        // 这里的分层很讲究，1.7.7 之前是 ZStack 里并列三个视图：
-        // `Color.black.ignoresSafeArea()` + 画布 `.ignoresSafeArea()` + 工具条。
-        // 两个兄弟视图都忽略安全区，ZStack 自己就被撑到整块屏幕，没忽略安全区的
-        // 工具条也被按「撑大后的」边界摆位 —— 于是「取消 / 完成」顶到状态栏上，
-        // 点不到（ImageViewerView 第 104 行记过同一条教训）。
+        // 分层：画布铺满整屏（裁切区域 = 整块屏幕，壁纸该是什么比例就是什么比例），
+        // 工具条挂在 `overlay` 上，跟画布尺寸**彻底脱钩**，自己按顶部实际高度下移。
         //
-        // 现在：画布铺满整屏（裁切区域 = 整块屏幕，壁纸该是什么比例就是什么比例），
-        // 工具条走 `overlay` 并按**真实安全区**下移，跟画布尺寸彻底脱钩。
+        // 踩过的坑：1.7.6 及之前是 ZStack 里并列「黑底 + 画布 + 工具条」，两个兄弟
+        // 都 `.ignoresSafeArea()`，容器被撑到整屏，没忽略安全区的工具条跟着贴到 y=0 →
+        // 「取消 / 完成」压在状态栏上点不到。
+        // 1.7.7 改成 overlay + 只信 `GeometryProxy.safeAreaInsets`，用户实测**还是贴顶** ——
+        // 说明这一层（从 `fullScreenCover` 起来）拿到的安全区可能是 0。
+        // 1.7.8 起不信单一路径：窗口安全区、状态栏高度各取一次，再加 44 pt 硬下限，
+        // 三者取最大。宁可多让几个点，也不能让按钮压在时钟上。
         GeometryReader { proxy in
             ZStack {
                 Color.black
@@ -34,9 +36,7 @@ struct WallpaperCropperView: View {
             .ignoresSafeArea()
             .overlay(alignment: .top) {
                 toolbar
-                    // 取两者较大值：正常情况 `proxy` 就给对了，万一某代系统在这一层
-                    // 把安全区传成 0，问窗口要一次，按钮绝不会压在状态栏上。
-                    .padding(.top, max(proxy.safeAreaInsets.top, windowTopInset) + 6)
+                    .padding(.top, max(proxy.safeAreaInsets.top, resolvedTopInset) + 6)
             }
         }
         .background(Color.black)
@@ -44,13 +44,21 @@ struct WallpaperCropperView: View {
         .preferredColorScheme(.dark)
     }
 
-    /// 窗口自己的安全区高度（兜底用，见上面那层 overlay）
-    private var windowTopInset: CGFloat {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }?
-            .keyWindow?
-            .safeAreaInsets.top ?? 0
+    /// 顶部必须让开的距离，多个**互不依赖**的来源取最大：
+    /// ① 窗口 `safeAreaInsets`（UIKit 层的真值）；② 状态栏高度（不受安全区传播影响）；
+    /// ③ 60 pt 硬下限 —— 前两个都失效时也不许贴顶。60 是灵动岛机型的状态栏高度，
+    /// 刘海机（44~47）只会略低几个点，老 Home 键机（20）会明显偏低 ——
+    /// 但那是「永远不该走到」的兜底分支，宁可偏低也不能压在时钟上点不到。
+    private var resolvedTopInset: CGFloat {
+        let floor: CGFloat = 60
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })
+        else { return floor }
+
+        let windowTop = scene.keyWindow?.safeAreaInsets.top ?? 0
+        let statusBar = scene.statusBarManager?.statusBarFrame.height ?? 0
+        return max(floor, windowTop, statusBar)
     }
 
     private var toolbar: some View {
